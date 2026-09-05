@@ -60,10 +60,24 @@ services:
         value: "medium"
       - key: BOT_SYMBOLS
         value: "100"
+      # A SIGNAL SCORE (0-100), and it reaches only the three score-scaled sim
+      # bots plus the live bot. It deliberately does NOT reach the 4H Path bot,
+      # whose "confidence" is the Wilson lower bound of a hit rate — a
+      # probability. Setting 60 there asked for a bucket that wins 60% of the
+      # time at a 1.5R target; none exists, so the bot fell silent while this
+      # read like an ordinary setting. simDefaults.ts enforces the split.
       - key: BOT_MIN_CONFIDENCE
         value: "60"
+      # The same floor for the one bot that speaks probabilities. Unset = 33,
+      # the calibrated default. Raise it to make bot 4 pickier; anything above
+      # ~50 will silence it, which is the point of it being a separate knob.
+      - key: BOT_PATH_MIN_CONFIDENCE
+        sync: false
       - key: BOT_POSITION_PERCENT
         value: "10"
+      # Applies to the live bot AND all four sims, so they measure the strategy
+      # the live bot is actually allowed to run. The code's own base is 5; this
+      # overrides it for every bot at once.
       - key: BOT_MAX_OPEN_POSITIONS
         value: "7"
       - key: BOT_MAX_FUTURES_POSITIONS

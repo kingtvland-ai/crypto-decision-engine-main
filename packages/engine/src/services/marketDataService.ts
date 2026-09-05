@@ -44,7 +44,12 @@ export interface TimeframeSpec {
 }
 
 export const TIMEFRAME_SPECS: Record<TimeframeKey, TimeframeSpec> = {
-  '1h': { key: '1h', bybit: '60', binance: '1h', ms: 3_600_000, minCandles: 200, targetCandles: 240, refreshMs: 5 * 60_000 },
+  // 1h targetCandles covers the MOST DEMANDING consumer, not the average one.
+  // The Path bot needs 62 closed 4H bars = 248 H1 candles (MIN_PATH_CANDLES);
+  // at 240 it was short by two bars on every cold start and skipped every
+  // symbol, producing an empty table that looked exactly like a strategy which
+  // had found nothing. Still one Bybit page, so the extra depth is free.
+  '1h': { key: '1h', bybit: '60', binance: '1h', ms: 3_600_000, minCandles: 200, targetCandles: 260, refreshMs: 5 * 60_000 },
   '15m': { key: '15m', bybit: '15', binance: '15m', ms: 900_000, minCandles: 300, targetCandles: 320, refreshMs: 90_000 },
   '5m': { key: '5m', bybit: '5', binance: '5m', ms: 300_000, minCandles: 500, targetCandles: 520, refreshMs: 45_000 }
 };

@@ -4,29 +4,25 @@
  * ============================================================================
  */
 
-// ── Pro engine (alg.md) ──────────────────────────────────────────────────────
+// ── Pro engine (alg.md — weighted-indicator confidence engine) ──────────────
 export type {
-  ProRegimeType, ProDirectionType, ProVolatilityType, ProMarketRegimeResult,
-  ProIndicatorSignal, ProSignalResult, ProEntryTimingResult,
-  ProTradeType, ProTradeSide, ProRouterResult, ProRouterOptions,
-  ProClosedTradeMetric, ProRiskResult, ProActivePosition, ProExitDecision
+  ProIndicatorSignal, ProSignalResult, ProRiskLevel, ProPositionView, ProExitDecision
 } from './services/proAlgEngine';
 export {
-  detectProRegime,
-  evaluateProSignals,
-  calculateProOptimalEntry,
-  dynamicConfidenceThreshold as proDynamicConfidenceThreshold,
-  PRO_SPOT_BASE_THRESHOLD,
-  PRO_FUTURES_BASE_THRESHOLD,
-  routeProTradeType,
-  calculateProRisk,
-  PRO_FUTURES_TIME_STOP_EXTENDED_HOURS,
-  PRO_FUTURES_TIME_STOP_MIN_PROGRESS_R,
-  evaluateProExit
+  computeProSignal,
+  proTechnicalScore,
+  proMinConfidence,
+  proAllocationPercent,
+  evaluateProExit,
+  PRO_INDICATOR_WEIGHTS,
+  PRO_COVERAGE_FULL_WEIGHT,
+  PRO_CONFIDENCE_BY_RISK,
+  PRO_ALLOCATION_BY_RISK,
+  PRO_TAKE_PROFIT_PERCENT,
+  PRO_STOP_LOSS_PERCENT,
+  MIN_PRO_CANDLES as PRO_ALG_MIN_CANDLES
 } from './services/proAlgEngine';
 
-export type { ProAdvancedSignal, ProAdvancedPredictions, ProAdvancedResult, ProAdvancedInput } from './services/proAdvancedAnalysis';
-export { computeProAdvancedAnalysis } from './services/proAdvancedAnalysis';
 export {
   evaluateFundingGate,
   annualisedFundingPct,

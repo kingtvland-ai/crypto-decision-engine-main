@@ -18,8 +18,6 @@
 // what scripts/pathStudy.ts is for — a walk-forward build over cached history,
 // whose output can be loaded here in place of the live one.
 
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import {
   createGenericSimEngine,
   SimEngineStrategy,
@@ -27,7 +25,7 @@ import {
   SimSnapshot
 } from './simEngineFactory';
 import { SIM_MIN_CONFIDENCE } from '@cde/engine/execution';
-import { generatePathOrders, MIN_PATH_CANDLES } from '@cde/engine/execution';
+import { generatePathOrders, MIN_PATH_CANDLES, PATH_MIN_H4_BARS } from '@cde/engine/execution';
 import type { SignalEvaluation, DecisionFactor, Candle } from '@cde/engine';
 import {
   aggregateToH4,
@@ -64,6 +62,9 @@ const MIN_EXPECTED_R = 0.05;
 let pathTable: PathBucket[] = [];
 let tableBuiltAt = 0;
 let tableSourceBars = 0;
+/** Symbols the last rebuild skipped for want of history, and how many it saw. */
+let lastSkippedForHistory = 0;
+let lastSymbolsSeen = 0;
 /** Where the table in memory came from. The two are not interchangeable and the
  *  difference decides how much the bot's results are worth. */
 let tableSource: 'validated' | 'live-in-sample' | 'none' = 'none';
@@ -73,43 +74,43 @@ export function getPathTable(): PathBucket[] {
   return pathTable;
 }
 
+/** The serialised form scripts/pathStudy.ts publishes. */
+export interface ValidatedPathTable {
+  builtAt?: string;
+  snapshotFrom?: string;
+  snapshotTo?: string;
+  survivors?: number;
+  table?: PathBucket[];
+}
+
 /**
- * Loads the walk-forward table produced by scripts/pathStudy.ts, if one exists.
+ * Installs the walk-forward table produced by scripts/pathStudy.ts.
  *
  * This is the table the bot SHOULD trade: every bucket in it held a positive
  * expectancy on periods it was not built from, across several disjoint windows.
  * The runtime rebuild below is the fallback, and it is in-sample — good enough
  * to exercise the machinery, not good enough to believe.
  *
- * Reading the file is deliberately synchronous and best-effort: a missing or
- * malformed table must not stop the engine from starting, it must only leave the
- * bot abstaining, which is the correct behaviour when nothing has been
- * validated.
+ * The worker calls this at boot with whatever it read from durable storage. It
+ * used to read a local file itself, from a path inside a gitignored directory,
+ * which meant the file never existed on the server: the bot fell through to the
+ * in-sample rebuild on every deploy and nothing in the logs or the UI
+ * distinguished that from "a validated table was loaded". Durable state belongs
+ * in the KV store with the rest of it.
  */
-function loadValidatedTable(): boolean {
-  try {
-    const path = join(process.cwd(), 'path-study', 'table.json');
-    if (!existsSync(path)) return false;
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as {
-      builtAt?: string; snapshotFrom?: string; snapshotTo?: string;
-      survivors?: number; table?: PathBucket[];
-    };
-    if (!Array.isArray(parsed.table)) return false;
-    pathTable = parsed.table;
-    tableSource = 'validated';
-    tableBuiltAt = Date.now();
-    validatedMeta = {
-      builtAt: parsed.builtAt,
-      snapshotFrom: parsed.snapshotFrom,
-      snapshotTo: parsed.snapshotTo,
-      survivors: parsed.survivors
-    };
-    console.log(`[path-sim-engine] loaded VALIDATED table: ${pathTable.length} buckets (study ${parsed.snapshotFrom} → ${parsed.snapshotTo})`);
-    return true;
-  } catch (e) {
-    console.warn('[path-sim-engine] validated table unreadable, falling back to live rebuild:', e instanceof Error ? e.message : String(e));
-    return false;
-  }
+export function installValidatedTable(parsed: ValidatedPathTable | null): boolean {
+  if (!parsed || !Array.isArray(parsed.table)) return false;
+  pathTable = parsed.table;
+  tableSource = 'validated';
+  tableBuiltAt = Date.now();
+  validatedMeta = {
+    builtAt: parsed.builtAt,
+    snapshotFrom: parsed.snapshotFrom,
+    snapshotTo: parsed.snapshotTo,
+    survivors: parsed.survivors
+  };
+  console.log(`[path-sim-engine] loaded VALIDATED table: ${pathTable.length} buckets (study ${parsed.snapshotFrom} → ${parsed.snapshotTo})`);
+  return true;
 }
 
 /**
@@ -124,15 +125,20 @@ function loadValidatedTable(): boolean {
 function rebuildTable(input: StrategyTickInput): void {
   const outcomes: PathOutcome[] = [];
   let barsUsed = 0;
+  // Counted so an empty table can say WHY it is empty. "0 buckets because no
+  // symbol had enough history yet" and "0 buckets because nothing cleared the
+  // expectancy bar" are the same number and completely different situations,
+  // and for months the status endpoint reported only the number.
+  let skippedForHistory = 0;
 
   for (const symbol of Object.keys(input.liveCandles)) {
     const snap = input.liveCandles[symbol];
     const h1 = snap?.h1;
     const m15 = snap?.m15;
-    if (!h1 || h1.length < MIN_PATH_CANDLES || !m15 || m15.length < 64) continue;
+    if (!h1 || h1.length < MIN_PATH_CANDLES || !m15 || m15.length < 64) { skippedForHistory++; continue; }
 
     const h4 = aggregateToH4(h1);
-    if (h4.length < 62) continue;
+    if (h4.length < PATH_MIN_H4_BARS) { skippedForHistory++; continue; }
 
     // Index the 15M candles by the 4H bar they belong to.
     const slotsByBar = new Map<number, Candle[]>();
@@ -189,6 +195,8 @@ function rebuildTable(input: StrategyTickInput): void {
   pathTable = buildPathTable(outcomes, { minSamples: LIVE_MIN_SAMPLES });
   tableBuiltAt = Date.now();
   tableSourceBars = barsUsed;
+  lastSkippedForHistory = skippedForHistory;
+  lastSymbolsSeen = Object.keys(input.liveCandles).length;
   tableSource = 'live-in-sample';
   console.log(`[path-sim-engine] IN-SAMPLE table rebuilt: ${pathTable.length} buckets from ${barsUsed} bars (${outcomes.length} outcomes)`);
 }
@@ -253,9 +261,12 @@ const pathStrategy: SimEngineStrategy = {
     // result would silently downgrade the bot from "trading a tested rule" to
     // "trading whatever the last few weeks happened to look like", and nothing
     // in the trade list would show it.
-    if (tableSource === 'none') {
-      if (!loadValidatedTable()) rebuildTable(input);
-    } else if (tableSource === 'live-in-sample' && Date.now() - tableBuiltAt > TABLE_REBUILD_MS) {
+    // A validated table is installed once at boot and never overwritten by the
+    // live rebuild. Letting a 30-minute in-sample refresh clobber a walk-forward
+    // result would silently downgrade the bot from "trading a tested rule" to
+    // "trading whatever the last few weeks happened to look like", and nothing
+    // in the trade list would show it.
+    if (tableSource === 'none' || (tableSource === 'live-in-sample' && Date.now() - tableBuiltAt > TABLE_REBUILD_MS)) {
       rebuildTable(input);
     }
 
@@ -328,6 +339,25 @@ export function getPathTableStatus() {
     validated: validatedMeta,
     builtAt: tableBuiltAt,
     sourceBars: tableSourceBars,
+    /**
+     * Why the table is the size it is.
+     *
+     * 'ok'                — the rebuild ran on real history.
+     * 'warming-up'        — every symbol was skipped for want of candles. The
+     *                       series grows one bar an hour after a cold start, so
+     *                       this clears itself; it is not a strategy result and
+     *                       must never be read as one.
+     * 'no-validated-table' — running the in-sample fallback because nothing has
+     *                       been published to the store.
+     */
+    readiness: tableSource === 'validated'
+      ? 'ok'
+      : lastSymbolsSeen > 0 && lastSkippedForHistory >= lastSymbolsSeen
+        ? 'warming-up'
+        : tableSource === 'none' ? 'no-validated-table' : 'ok',
+    skippedForHistory: lastSkippedForHistory,
+    symbolsSeen: lastSymbolsSeen,
+    minCandlesRequired: MIN_PATH_CANDLES,
     minSamples: LIVE_MIN_SAMPLES,
     minExpectedR: MIN_EXPECTED_R,
     top: pathTable.slice(0, 5).map((b) => ({

@@ -1,5 +1,5 @@
 /**
- * Stop-test for the funding gate (PLAN_ENGINE_FIXES.md — שלב 3).
+ * Stop-test for the funding gate. See SIM_BOTS.md.
  *
  * The whole case for adding funding is that it is ORTHOGONAL to the seven
  * price indicators the engines already weight. If it correlates with the

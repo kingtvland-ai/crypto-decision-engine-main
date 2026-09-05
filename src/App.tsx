@@ -8,7 +8,6 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import { WorkerAuthProvider } from "./contexts/WorkerAuthContext";
 import { SimulationBotProvider } from "./contexts/SimulationBotContext";
-import { LegacySimulationBotProvider } from "./contexts/LegacySimulationBotContext";
 import { ProSimulationBotProvider } from "./contexts/ProSimulationBotContext";
 import { PathSimulationBotProvider } from "./contexts/PathSimulationBotContext";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -18,7 +17,6 @@ import Alerts from "./pages/Alerts";
 import SimulationBot from "./pages/SimulationBot";
 import RealTradingBot from "./pages/RealTradingBot";
 import AdvancedAnalysis from "./pages/AdvancedAnalysis";
-import BacktestResults from "./pages/BacktestResults";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient({
@@ -42,16 +40,14 @@ const App = () => {
             <Sonner />
             <BrowserRouter>
               <WorkerAuthProvider>
-              {/* The three sim-bot contexts live here, at the app root, not just on
+              {/* The sim-bot contexts live here, at the app root, not just on
                   /simulation-bot. Each one polls the server for its engine's real
-                  state (see LegacySimulationBotContext.tsx etc.) — mounting them
-                  only on one page meant every OTHER page's `useXContextSafe()`
-                  returned null, so the home page's dashboard fell through to a
-                  localStorage snapshot that nothing kept in sync, and looked
-                  permanently reset regardless of what the bots were actually doing
-                  on the server. */}
+                  state — mounting them only on one page meant every OTHER page's
+                  `useXContextSafe()` returned null, so the home page's dashboard
+                  fell through to a localStorage snapshot that nothing kept in
+                  sync, and looked permanently reset regardless of what the bots
+                  were actually doing on the server. */}
               <SimulationBotProvider>
-              <LegacySimulationBotProvider>
               <ProSimulationBotProvider>
               <PathSimulationBotProvider>
               <Routes>
@@ -61,12 +57,10 @@ const App = () => {
                 <Route path="/simulation-bot" element={<SimulationBot />} />
                 <Route path="/real-trading" element={<RealTradingBot />} />
                 <Route path="/advanced-analysis" element={<AdvancedAnalysis />} />
-                <Route path="/backtest-results" element={<BacktestResults />} />
                 <Route path="*" element={<NotFound />} />
               </Routes>
               </PathSimulationBotProvider>
               </ProSimulationBotProvider>
-              </LegacySimulationBotProvider>
               </SimulationBotProvider>
               </WorkerAuthProvider>
             </BrowserRouter>

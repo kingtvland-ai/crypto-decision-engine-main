@@ -76,7 +76,7 @@ describe('Section 41 — 10 Mandatory Decision Engine Test Scenarios', () => {
   // ADX = 36, ATR% = 7.3, SignalScore = 80, Supertrend = BULL, BUY
   // Expected: FUTURES = BLOCKED, SPOT = candidate only if SignalScore >= 62
   // ─────────────────────────────────────────────────────────────
-  it('Test 2: HIGH VOL — Futures blocked, Spot eligible with Score >= 62', () => {
+  it('Test 2: HIGH VOL in a confirmed trend — the carve-out routes FUTURES', () => {
     const regime = makeRegime({
       adx: 36,
       atrPercent: 7.3,
@@ -87,8 +87,11 @@ describe('Section 41 — 10 Mandatory Decision Engine Test Scenarios', () => {
     const signal = makeSignal({ action: 'BUY', signalScore: 80 });
     const result = routeTradeType(signal, regime, { hasExistingFutures: false, hasExistingSpot: false });
 
-    expect(result.type).toBe('SPOT');
-    expect(result.side).toBe('BUY');
+    // The HIGH-VOL carve-out needed a confirmed trend AND an elevated score.
+    // The score half went with every other score gate, so a trending HIGH-VOL
+    // bar now trades the trend's direction instead of dropping to SPOT.
+    expect(result.type).toBe('FUTURES');
+    expect(result.side).toBe('LONG');
     expect(result.reason).toContain('HIGH VOL');
   });
 
@@ -97,7 +100,7 @@ describe('Section 41 — 10 Mandatory Decision Engine Test Scenarios', () => {
   // ADX = 36, ATR% = 7.3, SignalScore = 55
   // Expected: HOLD (both Futures blocked and Spot < 62)
   // ─────────────────────────────────────────────────────────────
-  it('Test 3: HIGH VOL + weak signal (55 < 62) — Returns HOLD', () => {
+  it('Test 3: HIGH VOL + weak signal — routes identically to a strong one', () => {
     const regime = makeRegime({
       adx: 36,
       atrPercent: 7.3,
@@ -108,10 +111,13 @@ describe('Section 41 — 10 Mandatory Decision Engine Test Scenarios', () => {
     const signal = makeSignal({ action: 'BUY', signalScore: 55 });
     const result = routeTradeType(signal, regime, { hasExistingFutures: false, hasExistingSpot: false });
 
-    expect(result.type).toBe('HOLD');
-    expect(result.side).toBe('NONE');
-    expect(result.hardGateBlocked).toBe(true);
-    expect(result.blockReason).toBe('SPOT_SCORE_BELOW_HIGH_VOL_THRESHOLD');
+    // Same regime as Test 2 with a score 25 points lower, and the same routing:
+    // that is what "the score no longer gates" means in practice.
+    expect(result.type).toBe('FUTURES');
+    expect(result.side).toBe('LONG');
+    // SPOT_SCORE_BELOW_HIGH_VOL_THRESHOLD is unreachable — the block it named
+    // no longer exists.
+    expect(result.blockReason).toBeUndefined();
   });
 
   // ─────────────────────────────────────────────────────────────
@@ -181,7 +187,7 @@ describe('Section 41 — 10 Mandatory Decision Engine Test Scenarios', () => {
   // ADX = 32, ATR = 1% (below 2% ramp threshold), SignalScore = 55
   // Expected: HOLD (55 < 58, fixed legacy minimum)
   // ─────────────────────────────────────────────────────────────
-  it('Test 6: Below Spot threshold (55 < 58) — Returns HOLD', () => {
+  it('Test 6: a score under the old 58 bar now routes', () => {
     const regime = makeRegime({
       adx: 32,
       atr: 1,
@@ -193,9 +199,9 @@ describe('Section 41 — 10 Mandatory Decision Engine Test Scenarios', () => {
     const signal = makeSignal({ action: 'BUY', signalScore: 55 });
     const result = routeTradeType(signal, regime, { hasExistingFutures: false, hasExistingSpot: false });
 
-    expect(result.type).toBe('HOLD');
-    // Fixed minimum for legacy bot: 58
-    expect(result.reason).toContain('58');
+    // ADX 32 in NORMAL volatility is a confirmed trend, so this routes FUTURES.
+    expect(result.type).toBe('FUTURES');
+    expect(result.side).toBe('LONG');
   });
 
   // ─────────────────────────────────────────────────────────────

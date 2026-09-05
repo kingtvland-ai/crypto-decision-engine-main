@@ -45,6 +45,40 @@ export interface ClosedTradeRecord {
  *  trade in the window to carry riskUsd: a partial mix would divide dollar
  *  wins by R-multiple losses, which is worse than either alone.
  */
+/**
+ * How far back Kelly is allowed to remember.
+ *
+ * Without a bound the estimator is an ABSORBING STATE. `calculateRiskParameters`
+ * refuses to size a trade when the measured edge is negative — correct on its
+ * own — but the edge was measured over every trade ever closed, so once a bad
+ * stretch pushed it below zero no new trade could open, no new data could
+ * arrive, and the estimate could never change. Measured on six months of
+ * Legacy: 421 signals cleared routing and 373 of them (88%) died at sizing.
+ *
+ * Bounding the memory breaks the trap without ever deliberately sizing into a
+ * known-negative edge: as old trades age out the sample eventually falls below
+ * KELLY_MIN_SAMPLE, sizing reverts to the flat pre-Kelly default, and the bot
+ * re-measures. An edge from a regime three months gone is not evidence about
+ * this one.
+ *
+ * The reference point is the most recent CLOSED TRADE, not the wall clock —
+ * reading the clock inside a pure function is the exact bug that made every
+ * backtested position look a year old (see evaluateExit's `now`).
+ */
+export const KELLY_MEMORY_MS = 90 * 24 * 3_600_000;
+
+/** The slice of history Kelly is allowed to see. */
+export function recentTrades<T extends { at?: number }>(
+  trades: ReadonlyArray<T>,
+  memoryMs: number = KELLY_MEMORY_MS
+): T[] {
+  let newest = 0;
+  for (const t of trades) if (typeof t.at === 'number' && t.at > newest) newest = t.at;
+  if (!newest) return [...trades];
+  const cutoff = newest - memoryMs;
+  return trades.filter((t) => typeof t.at !== 'number' || t.at >= cutoff);
+}
+
 export function kellyPayoffRatio(
   trades: ReadonlyArray<ClosedTradeRecord>
 ): { r: number; basis: 'r-multiple' | 'dollar' } | null {
@@ -104,7 +138,7 @@ export function kellyPayoffRatio(
  *  the way that matters: they are taken at a fixed small size, which costs
  *  little, whereas diluting Kelly's shutoff costs a great deal. Treat this as
  *  settled unless you have a mechanism that de-risks a losing book FASTER than
- *  raw Kelly, not merely more smoothly. See PLAN_ENGINE_FIXES.md §5. */
+ *  raw Kelly, not merely more smoothly. Measured via scripts/abBacktest.ts. */
 export const KELLY_MIN_SAMPLE = 30;
 
 /** Fraction of full Kelly actually bet. Was 0.5 (half-Kelly).

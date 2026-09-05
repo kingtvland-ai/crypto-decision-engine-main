@@ -1,11 +1,11 @@
 /**
- * @cde/engine/execution — the Legacy trade-math engine, order generation,
- * fills, and adaptive risk sizing.
+ * @cde/engine/execution — shared technical-analysis primitives, order
+ * generation, fills, and per-engine sizing.
  * ============================================================================
  */
 
-// ── Legacy engine core (regime → signals → route → entry → risk → exit) ─────
-export type { Candle, PortfolioRiskStats, TradeRouterOptions, EntryTimingResult, ClosedTradeMetric, ExitDecision } from './services/tradeEngine';
+// ── Shared candle-math + fee/slippage primitives ────────────────────────────
+export type { Candle, PortfolioRiskStats, ClosedTradeMetric } from './services/tradeEngine';
 export {
   formatDynamicPrice,
   calculateEMA,
@@ -13,17 +13,8 @@ export {
   calculateADX,
   calculateSupertrend,
   detectMarketRegime,
-  evaluateSignals,
-  dynamicConfidenceThreshold,
-  LEGACY_SPOT_BASE_THRESHOLD,
-  LEGACY_FUTURES_BASE_THRESHOLD,
-  routeTradeType,
-  computeEntryIndicators,
   computeRelativeVolume,
   MIN_ENTRY_RELATIVE_VOLUME,
-  calculateOptimalEntry,
-  calculateRiskParameters,
-  evaluateExit,
   BYBIT_FEES,
   calculateTradingFee,
   FEE_REFERENCE_PERCENT,
@@ -34,25 +25,22 @@ export {
 
 // ── Simulation defaults, shared by the worker and the browser ─────────────
 export {
+  SIM_BOTS,
+  SIM_BOT_IDS,
+  SIM_BOT_SPECS,
+  UI_FACING_SIM_PREFIXES,
   SIM_BASE_DEFAULTS,
   SIM_MIN_CONFIDENCE,
   SIM_MAX_FUTURES_POSITIONS,
   simBotDefaults
 } from './services/simDefaults';
-export type { SimBotId } from './services/simDefaults';
+export type { SimBotId, SimBotSpec, ConfidenceScale, SimEnvOverrides } from './services/simDefaults';
 
 // ── Order generation per engine ──────────────────────────────────────────────
-export type { LegacyOrderGenContext } from './services/legacySimExecution';
-export {
-  MIN_LEGACY_CANDLES,
-  activeMarketRegimesFrom as activeLegacyMarketRegimesFrom,
-  generateLegacyOrders
-} from './services/legacySimExecution';
-
 export type { ProOrderGenContext } from './services/proSimExecution';
 export {
   MIN_PRO_CANDLES,
-  activeMarketRegimesFrom as activeProMarketRegimesFrom,
+  buildProEvaluation,
   generateProOrders
 } from './services/proSimExecution';
 
@@ -121,5 +109,6 @@ export {
 } from './services/adaptiveRisk';
 
 // ── 4H Path bot order generation ─────────────────────────────────────────────
-export { generatePathOrders, pathEntryBudget, MIN_PATH_CANDLES } from './services/pathSimExecution';
+export { generatePathOrders, pathEntryBudget, MIN_PATH_CANDLES,
+  PATH_MIN_H4_BARS } from './services/pathSimExecution';
 export type { PathOrderGenContext } from './services/pathSimExecution';

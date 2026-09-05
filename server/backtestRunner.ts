@@ -1,32 +1,24 @@
 /**
- * Shared backtest runner — extracted from scripts/backtestLegacyPro.ts so both
- * the CLI script and the server can call the same logic without duplication.
+ * Backtest runner — the Intraday (multi-timeframe) engine's own portfolio
+ * replay.
+ * ============================================================================
  *
- * Runs a walk-forward backtest over real Binance H1 history, sweeping
- * MIN_STOP_PERCENT / MAX_STOP_PERCENT / softTrendBase to find the parameter
- * combination that best holds an edge.
+ * This file used to ALSO drive a parameter-sweep search (`runBacktestSweep`,
+ * `buildSlGrid`) over the Legacy and old-Pro engines' ATR-scaled stop/target
+ * grid. Both of those engines are gone: Legacy was deleted outright, and the
+ * Pro bot now implements alg.md — a fixed-percentage exit (§5: stop-loss
+ * 4.2%, take-profit 3%) and a discrete risk-level table (§3), neither of
+ * which is a continuous parameter a grid search makes sense to sweep. There is
+ * nothing left in Pro's own spec to tune, so the sweep machinery went with the
+ * engines it existed to tune.
+ *
+ * What remains is the Intraday engine's replay, unchanged in behaviour from
+ * before this file was trimmed.
  */
 import {
   Candle,
-  detectMarketRegime,
-  evaluateSignals,
-  routeTradeType,
-  calculateRiskParameters,
-  evaluateExit,
-  calculateATR,
-  calculateADX,
-  calculateSupertrend,
-  ClosedTradeMetric,
+  calculateATR
 } from '@cde/engine/execution';
-import {
-  detectProRegime,
-  routeProTradeType,
-  calculateProRisk,
-  evaluateProExit,
-  ProActivePosition,
-  evaluateProSignals,
-} from '@cde/engine/analysis';
-import { sizingMultiplierFromHistory, MIN_STOP_PERCENT, MAX_STOP_PERCENT } from '@cde/engine/execution';
 import {
   evaluateIntradayDecision,
   evaluateIntradayExit,
@@ -37,29 +29,18 @@ import {
 import { DEFAULT_INTRADAY_PARAMS, withParams, type IntradayParams } from '@cde/engine';
 
 /**
- * Intraday parameter overrides for a single run.
- *
- * Deliberately separate from SlConfig: SlConfig is the Legacy/Pro stop grid and
- * means nothing to this engine. Undefined reproduces DEFAULT_INTRADAY_PARAMS
- * exactly, so an unspecified run is the unmodified strategy.
+ * Intraday parameter overrides for a single run. Undefined reproduces
+ * DEFAULT_INTRADAY_PARAMS exactly, so an unspecified run is the unmodified
+ * strategy.
  */
 export type IntradayOverrides = Partial<IntradayParams>;
-import { getCachedHistory, saveCachedHistory } from './historicalCandleCache';
-import type { ActivePosition, TradeSide, SignalEngineResult } from '@cde/engine';
+import type { TradeSide } from '@cde/engine';
 
-const BINANCE = 'https://api.binance.com/api/v3';
-
-export type EngineType = 'legacy' | 'pro' | 'intraday';
+export type EngineType = 'intraday';
 
 /**
- * One symbol's history. `candles` is the H1 series every engine decides on;
- * `m15` and `m5` are required by the Intraday engine and ignored by the other
- * two.
- *
- * Optional rather than required on purpose: the existing H1-only snapshot stays
- * a valid input, so every legacy/pro run already recorded against it remains
- * comparable. Re-fetching that file would change the yardstick and silently
- * invalidate every earlier measurement.
+ * One symbol's history. `candles` is the H1 series; `m15`/`m5` are the two
+ * additional series the Intraday engine's multi-timeframe decision needs.
  */
 export interface SymbolHistory {
   symbol: string;
@@ -68,85 +49,7 @@ export interface SymbolHistory {
   m5?: Candle[];
 }
 
-export interface SlConfig {
-  minStop: number;
-  maxStop: number;
-  softTrendBase: number;
-}
-
-export interface SweepResult extends SlConfig {
-  engine: EngineType;
-  totalTrades: number;
-  wins: number;
-  losses: number;
-  winRate: number;
-  netProfit: number;
-  profitFactor: number;
-  expectancy: number;
-  maxDrawdown: number;
-}
-
-export interface BacktestOptions {
-  engine: EngineType;
-  days: number;
-  symbols: string[];
-  concurrency?: number;
-  onProgress?: (msg: string) => void;
-}
-
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-// ── Binance fetch ─────────────────────────────────────────────────────────
-async function fetchKlinesPaged(symbol: string, interval: string, startMs: number, endMs: number): Promise<Candle[]> {
-  const out: Candle[] = [];
-  let cursor = startMs;
-  let guard = 0;
-  while (cursor < endMs && guard < 2000) {
-    guard++;
-    const url = `${BINANCE}/klines?symbol=${symbol}&interval=${interval}&startTime=${cursor}&endTime=${endMs}&limit=1000`;
-    let list: unknown[] = [];
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const r = await fetch(url);
-        const rows = (await r.json()) as unknown;
-        if (Array.isArray(rows)) {
-          list = rows;
-          break;
-        }
-      } catch { /* retry */ }
-      await sleep(300 * (attempt + 1));
-    }
-    if (!Array.isArray(list) || !list.length) break;
-    for (const c of list) {
-      if (!Array.isArray(c)) continue;
-      out.push({ timestamp: Number(c[0]), open: Number(c[1]), high: Number(c[2]), low: Number(c[3]), close: Number(c[4]), volume: Number(c[5]) });
-    }
-    const lastTs = Number(list[list.length - 1][0]);
-    if (lastTs <= cursor) break;
-    cursor = lastTs + 1;
-    if (list.length < 1000) break;
-  }
-  return out.sort((a, b) => a.timestamp - b.timestamp);
-}
-
-// ── SL parameter grid ──────────────────────────────────────────────────────
-function buildSlGrid(): SlConfig[] {
-  const slPairs = [
-    { minStop: 1, maxStop: 4 },
-    { minStop: 1.5, maxStop: 6 },
-    { minStop: 2, maxStop: 8 },
-    { minStop: 1, maxStop: 8 },
-    { minStop: 2, maxStop: 6 },
-  ];
-  const softTrendBases = [55, 60, 65];
-  const grid: SlConfig[] = [];
-  for (const sl of slPairs) {
-    for (const softTrendBase of softTrendBases) {
-      grid.push({ ...sl, softTrendBase });
-    }
-  }
-  return grid;
-}
 
 // ── Simulation state ───────────────────────────────────────────────────────
 interface SimPosition {
@@ -164,14 +67,10 @@ interface SimPosition {
   lowestPrice: number;
   tp1Hit: boolean;
   sizeUsd: number;
-  /** Risk-at-entry, mirroring SimPosition.initialRiskUsd in simExecution.ts.
-   *  Without it the backtest would feed Kelly dollar-based payoff ratios while
-   *  production feeds R-multiples — i.e. measure a different engine. */
+  /** Risk-at-entry, mirroring SimPosition.initialRiskUsd in simExecution.ts. */
   initialRiskUsd: number;
-  /** Intraday only. The engine's exit rules are time-aware — maxHold and the
-   *  time-stop come out of the RiskPlan per setup type — so a position that
-   *  drops them is not the same position the live bot holds. Legacy and Pro
-   *  leave these undefined and their exits never read them. */
+  /** The engine's exit rules are time-aware — maxHold and the time-stop come
+   *  out of the RiskPlan per setup type. */
   maxHoldMs?: number;
   timeStopMs?: number;
   plannedStopDistance?: number;
@@ -181,7 +80,7 @@ interface SimPosition {
 interface SimState {
   cash: number;
   positions: SimPosition[];
-  closedTrades: ClosedTradeMetric[];
+  closedTrades: { pnl: number; at?: number; riskUsd?: number }[];
   totalFees: number;
   peakEquity: number;
   maxDrawdown: number;
@@ -206,131 +105,14 @@ function equity(state: SimState, prices: Record<string, number>): number {
   return eq;
 }
 
-// ── Per-bar evaluation ─────────────────────────────────────────────────────
-function getAtr(candles: Candle[], idx: number, period: number = 14): number {
-  if (idx < period) return 0;
-  return calculateATR(candles.slice(0, idx + 1), period).atr;
-}
-
-function getAdx(candles: Candle[], idx: number, period: number = 14): number {
-  if (idx < period * 2) return 0;
-  return calculateADX(candles.slice(0, idx + 1), period);
-}
-
 // Exit type union for all possible exit reasons
 type ExitType = 'FULL' | 'PARTIAL_50' | 'NONE' | 'TRAILING_STOP' | 'REVERSAL' | 'TIME_BASED';
-
-function legacyEvaluate(
-  symbol: string, candles: Candle[], idx: number, state: SimState, config: SlConfig
-): { willExecute: boolean; tradeType: 'SPOT' | 'FUTURES' | 'HOLD'; side: TradeSide; signalScore: number; reason: string } {
-  if (idx < 50) return { willExecute: false, tradeType: 'HOLD', side: 'BUY', signalScore: 0, reason: 'insufficient data' };
-  const slice = candles.slice(0, idx + 1);
-  const currentPrice = candles[idx].close;
-  const regime = detectMarketRegime(slice, currentPrice);
-  const signalResult = evaluateSignals(slice, currentPrice, 0, regime);
-  const routeResult = routeTradeType(
-    signalResult,
-    regime,
-    {
-      hasExistingFutures: state.positions.some(p => p.symbol === symbol && p.type === 'FUTURES'),
-      hasExistingSpot: state.positions.some(p => p.symbol === symbol && p.type === 'SPOT'),
-      softTrendBaseOverride: config.softTrendBase
-    }
-  );
-  if (routeResult.type === 'HOLD') {
-    return { willExecute: false, tradeType: 'HOLD', side: 'BUY', signalScore: signalResult.signalScore, reason: routeResult.reason };
-  }
-  return { willExecute: true, tradeType: routeResult.type, side: routeResult.side, signalScore: signalResult.signalScore, reason: routeResult.reason };
-}
-
-function proEvaluate(
-  symbol: string, candles: Candle[], idx: number, state: SimState, config: SlConfig
-): { willExecute: boolean; tradeType: 'SPOT' | 'FUTURES' | 'HOLD'; side: TradeSide; signalScore: number; reason: string } {
-  if (idx < 50) return { willExecute: false, tradeType: 'HOLD', side: 'BUY', signalScore: 0, reason: 'insufficient data' };
-  const slice = candles.slice(0, idx + 1);
-  const currentPrice = candles[idx].close;
-  const regime = detectProRegime(slice, currentPrice);
-  // Mirrors proAdapter.ts's AdvancedAnalysisStage (2026-09-03: evaluateProSignals,
-  // not computeProAdvancedAnalysis — see checkpoint-pro-advanced-analysis to revert
-  // both together) so the backtest sweep scores entries the same way live does.
-  const signalResult = evaluateProSignals(slice, currentPrice, 0, regime, 50);
-  const routeResult = routeProTradeType(
-    signalResult, regime,
-    {
-      hasExistingFutures: state.positions.some(p => p.symbol === symbol && p.type === 'FUTURES'),
-      softTrendBaseOverride: config.softTrendBase
-    }
-  );
-  if (routeResult.type === 'HOLD') {
-    return { willExecute: false, tradeType: 'HOLD', side: 'BUY', signalScore: signalResult.rawConfidence, reason: routeResult.reason };
-  }
-  return { willExecute: true, tradeType: routeResult.type, side: routeResult.side as TradeSide, signalScore: signalResult.rawConfidence, reason: routeResult.reason };
-}
-
-// ── Exit check ─────────────────────────────────────────────────────────────
-function checkExitLegacy(pos: SimPosition, candle: Candle, candles: Candle[], idx: number, state: SimState): { shouldExit: boolean; exitType: ExitType; pnl: number } {
-  const activePos: ActivePosition = {
-    id: `${pos.symbol}-${pos.openTimestamp}`, symbol: pos.symbol, type: pos.type, side: pos.side as 'BUY' | 'SELL' | 'LONG' | 'SHORT',
-    quantity: pos.quantity, entryPrice: pos.entryPrice, currentPrice: candle.close, avgPrice: pos.entryPrice,
-    leverage: pos.leverage, marginUsd: pos.sizeUsd, notionalUsd: pos.sizeUsd,
-    stopLoss: pos.stopLoss, takeProfit1: pos.takeProfit1, takeProfit2: pos.takeProfit2,
-    highestPrice: pos.highestPrice, lowestPrice: pos.lowestPrice, tp1Hit: pos.tp1Hit,
-    openedAt: new Date(pos.openTimestamp).toISOString(), openTimestamp: pos.openTimestamp,
-    entryFee: 0, reason: '', confidence: 50,
-  };
-  const currentAtr = getAtr(candles, idx);
-  const eq = equity(state, { [pos.symbol]: candle.close });
-  const dailyDD = state.peakEquity > 0 ? Math.max(0, (state.peakEquity - eq) / state.peakEquity * 100) : 0;
-  // Compute actual signal scores for reversal exit detection
-  const slice = candles.slice(0, idx + 1);
-  const signalResult = evaluateSignals(slice, candle.close, 0, detectMarketRegime(slice, candle.close));
-  const signalScores = { buy: signalResult.action === 'BUY' ? signalResult.signalScore : 0, sell: signalResult.action === 'SELL' ? signalResult.signalScore : 0 };
-  const exitResult = evaluateExit(activePos, candle.close, currentAtr, signalScores, { dailyDrawdownPercent: dailyDD, weeklyDrawdownPercent: dailyDD, systemLocked: false, adx: getAdx(candles, idx) });
-  if (!exitResult.shouldExit) return { shouldExit: false, exitType: 'NONE', pnl: 0 };
-  let pnl = 0;
-  if (pos.type === 'SPOT') {
-    pnl = (candle.close - pos.entryPrice) * pos.quantity;
-  } else {
-    const dir = pos.side === 'LONG' ? 1 : -1;
-    pnl = (candle.close - pos.entryPrice) * pos.quantity * dir * pos.leverage;
-  }
-  return { shouldExit: true, exitType: exitResult.exitType, pnl };
-}
-
-function checkExitPro(pos: SimPosition, candle: Candle, candles: Candle[], idx: number, state: SimState): { shouldExit: boolean; exitType: ExitType; pnl: number } {
-  const activePos: ProActivePosition = {
-    type: pos.type, side: pos.side as 'BUY' | 'SELL' | 'LONG' | 'SHORT',
-    entryPrice: pos.entryPrice, stopLoss: pos.stopLoss, takeProfit1: pos.takeProfit1, takeProfit2: pos.takeProfit2,
-    highestPrice: pos.highestPrice, lowestPrice: pos.lowestPrice, tp1Hit: pos.tp1Hit,
-    openTimestamp: pos.openTimestamp,
-  };
-  const currentAtr = getAtr(candles, idx);
-  const eq = equity(state, { [pos.symbol]: candle.close });
-  const dailyDD = state.peakEquity > 0 ? Math.max(0, (state.peakEquity - eq) / state.peakEquity * 100) : 0;
-  const slice = candles.slice(0, idx + 1);
-  // Same source swap as proEvaluate() above — keeps the reversal-exit check
-  // consistent with what live evaluations now carry (proSimExecution.ts
-  // reuses the tick's own SignalEvaluation here rather than recomputing).
-  const regimeForExit = detectProRegime(slice, candle.close);
-  const signal = evaluateProSignals(slice, candle.close, 0, regimeForExit, 50);
-  const signalScores = { buy: signal.action === 'BUY' ? signal.confidence : 0, sell: signal.action === 'SELL' ? signal.confidence : 0 };
-  const exitResult = evaluateProExit(activePos, candle.close, currentAtr, signalScores, { dailyDrawdownPercent: dailyDD, weeklyDrawdownPercent: dailyDD, systemLocked: false });
-  if (!exitResult.shouldExit) return { shouldExit: false, exitType: 'NONE', pnl: 0 };
-  let pnl = 0;
-  if (pos.type === 'SPOT') {
-    pnl = (candle.close - pos.entryPrice) * pos.quantity;
-  } else {
-    const dir = pos.side === 'LONG' ? 1 : -1;
-    pnl = (candle.close - pos.entryPrice) * pos.quantity * dir * pos.leverage;
-  }
-  return { shouldExit: true, exitType: exitResult.exitType, pnl };
-}
 
 // ── Intrabar exit + position PnL ─────────────────────────────────────────────
 // Fidelity helpers: a stop-loss / take-profit that the candle's RANGE crosses
 // fires at the LEVEL, not at the H1 close. The old close-only check let
 // intrabar SL/TP hits run through and close on a favourable close — WinRate
-// and MaxDrawdown were systematically biased vs. the live engines.
+// and MaxDrawdown were systematically biased vs. the live engine.
 
 type IntrabarExitType = 'SL' | 'TP1' | 'TP2';
 
@@ -368,68 +150,24 @@ function positionPnl(pos: SimPosition, price: number): number {
   return (price - pos.entryPrice) * pos.quantity * dir * pos.leverage;
 }
 
-// ── Open position ──────────────────────────────────────────────────────────
-function openPositionLegacy(symbol: string, candles: Candle[], idx: number, state: SimState, tradeType: 'SPOT' | 'FUTURES', side: TradeSide, signalScore: number, slConfig: SlConfig): SimPosition | null {
-  const slice = candles.slice(0, idx + 1);
-  const currentPrice = candles[idx].close;
-  const atr = getAtr(candles, idx);
-  if (atr <= 0) return null;
-  const regime = detectMarketRegime(slice, currentPrice);
-  const eq = equity(state, { [symbol]: currentPrice });
-  const dailyDD = state.peakEquity > 0 ? Math.max(0, (state.peakEquity - eq) / state.peakEquity * 100) : 0;
-  const mult = sizingMultiplierFromHistory(state.closedTrades, dailyDD);
-  const risk = calculateRiskParameters(currentPrice, tradeType, side, atr, regime.volatility, signalScore, eq, state.closedTrades, state.positions.length, state.positions.filter(p => p.type === 'FUTURES').length, 0, undefined, mult, slConfig);
-  if (!risk) return null;
-  const sizeUsd = risk.betSizeUsd;
-  const quantity = sizeUsd / currentPrice;
-  return { symbol, type: tradeType, side, entryPrice: currentPrice, stopLoss: risk.stopLoss, takeProfit1: risk.takeProfit1, takeProfit2: risk.takeProfit2, quantity, leverage: risk.leverage, openTimestamp: candles[idx].timestamp, highestPrice: currentPrice, lowestPrice: currentPrice, tp1Hit: false, sizeUsd, initialRiskUsd: Math.abs(currentPrice - risk.stopLoss) * quantity };
-}
-
-function openPositionPro(symbol: string, candles: Candle[], idx: number, state: SimState, tradeType: 'SPOT' | 'FUTURES', side: TradeSide, signalScore: number, slConfig: SlConfig): SimPosition | null {
-  const slice = candles.slice(0, idx + 1);
-  const currentPrice = candles[idx].close;
-  const atr = getAtr(candles, idx);
-  if (atr <= 0) return null;
-  const regime = detectProRegime(slice, currentPrice);
-  const eq = equity(state, { [symbol]: currentPrice });
-  const dailyDD = state.peakEquity > 0 ? Math.max(0, (state.peakEquity - eq) / state.peakEquity * 100) : 0;
-  const mult = sizingMultiplierFromHistory(state.closedTrades, dailyDD);
-  const risk = calculateProRisk(currentPrice, tradeType, side, atr, regime.volatility, signalScore, eq, state.closedTrades, state.positions.length, state.positions.filter(p => p.type === 'FUTURES').length, 0, dailyDD, mult, slConfig);
-  if (!risk) return null;
-  const sizeUsd = risk.betSizeUsd;
-  const quantity = sizeUsd / currentPrice;
-  return { symbol, type: tradeType, side, entryPrice: currentPrice, stopLoss: risk.stopLoss, takeProfit1: risk.takeProfit1, takeProfit2: risk.takeProfit2, quantity, leverage: risk.leverage, openTimestamp: candles[idx].timestamp, highestPrice: currentPrice, lowestPrice: currentPrice, tp1Hit: false, sizeUsd, initialRiskUsd: Math.abs(currentPrice - risk.stopLoss) * quantity };
-}
-
-
 // ── Intraday (Multi-Timeframe) ──────────────────────────────────────────────
 //
-// Parity notes, because this engine is not shaped like the other two:
+// Parity notes:
 //
 //  * It needs three series. Its first gate is a hard NO_DATA on
 //    1H < 200 || 15M < 300 || 5M < 500 bars, so an H1-only snapshot does not
 //    produce a thin version of Intraday — it produces no Intraday at all.
 //
 //  * It sizes itself. `buildRiskPlan` returns quantity, leverage, stops,
-//    targets AND a per-setup time budget. Routing it through
-//    calculateRiskParameters the way Legacy and Pro are routed would be
-//    measuring a different strategy under the Intraday name, so the plan is
-//    used verbatim.
+//    targets AND a per-setup time budget, used verbatim.
 //
-//  * It decides on the 5M clock, and that is production parity rather than a
-//    convenience. The worker scans every BOT_SCAN_INTERVAL_SECONDS, default
-//    300 — five minutes. Legacy and Pro decide hourly because their signal is
-//    an H1 signal; Intraday's entry confirmation is a 5M trigger.
-//
-//    This was H1 in the first version of this file and the results were
-//    meaningless. Intraday's hold budgets are 45-120 minutes
-//    (params.maxHoldMinutes), so an hourly exit check reached a MEAN_REVERSION
-//    position for the first time already past its 45-minute deadline: it could
-//    never exit for any other reason. 71% of trades closed on MAX_DURATION and
-//    only 19% ever reached a level, which reads as a strategy that cannot
-//    resolve and was in fact a clock that could not see it resolve. A backtest
-//    whose sampling interval is coarser than the strategy's holding period does
-//    not measure the strategy.
+//  * It decides on the 5M clock, which is production parity: the worker scans
+//    every BOT_SCAN_INTERVAL_SECONDS (default 300 — five minutes), and the
+//    engine's entry confirmation is itself a 5M trigger. An hourly sampling
+//    clock previously made a MEAN_REVERSION position (45-120 minute hold
+//    budgets) reach its first exit check already past its own deadline — a
+//    backtest whose sampling interval is coarser than the strategy's holding
+//    period does not measure the strategy.
 
 /** Per-symbol read cursors into the 15M and 5M series. */
 interface MtfCursors { h1: number; m15: number; m5: number }
@@ -571,7 +309,7 @@ function checkExitIntraday(
   return { shouldExit: true, exitType: exit.exitType, pnl: positionPnl(pos, candle.close), reasonCode: exit.reasonCode };
 }
 
-// ── Run single backtest ────────────────────────────────────────────────────
+// ── Result shape ─────────────────────────────────────────────────────────────
 export interface BacktestResult {
   totalTrades: number;
   wins: number;
@@ -581,138 +319,36 @@ export interface BacktestResult {
   profitFactor: number;
   expectancy: number;
   maxDrawdown: number;
-  /** Per-trade records behind the aggregates above. Exposed for the A/B
-   *  harness (scripts/abBacktest.ts), which needs the raw PnL series to
-   *  compute dispersion metrics the aggregates cannot express — per-trade
-   *  Sharpe today, and the R-multiple distribution once ClosedTradeRecord
-   *  carries riskUsd. Purely additive: no caller is required to read it. */
-  closedTrades: ClosedTradeMetric[];
-  /**
-   * How the trades ended, by reason.
-   *
-   * Aggregates hide the difference between "the stop was hit" and "the clock
-   * ran out": both are a loss, and only one of them is the strategy working as
-   * designed. A run whose exits are mostly time-based is paying a full
-   * round-trip cost per trade to close positions that never resolved, which is
-   * a cost problem wearing the costume of an edge problem.
-   */
+  /** Per-trade records behind the aggregates above — the raw PnL series an
+   *  A/B harness needs for dispersion metrics the aggregates cannot express. */
+  closedTrades: { pnl: number; at?: number; riskUsd?: number }[];
+  /** Why bars produced no trade, bucketed. */
+  gateReasons: Record<string, number>;
+  /** How the trades ended, by reason. */
   exitReasons: Record<string, number>;
 }
 
 // Fee and slippage constants (matching simExecution.ts fillDueOrders)
 const FEE_PERCENT = 0.001;      // 0.1% taker fee (entry + exit = 0.2% total)
 const SLIPPAGE_PERCENT = 0.001; // 0.1% slippage on entry
-// Per-symbol post-loss entry cooldown (matches the live per-symbol streak gate).
-const STREAK_COOLDOWN_MS = 30 * 60 * 1000;
-
-export function runBacktest(symbol: string, candles: Candle[], slConfig: SlConfig, engine: EngineType): Promise<BacktestResult> {
-  const state = initState();
-  let lossCooldownUntil = 0; // per-symbol 30-min post-loss entry cooldown (matches the live streak gate)
-  return (async () => {
-  for (let idx = 50; idx < candles.length; idx++) {
-    if (idx % 100 === 0) {
-      await sleep(0);
-    }
-    const candle = candles[idx];
-    const currentPrice = candle.close;
-    // 1. Check exits
-    const toRemove: number[] = [];
-    for (let i = 0; i < state.positions.length; i++) {
-      const pos = state.positions[i];
-      // Intrabar SL/TP hit takes precedence over the close-based evaluation:
-      // a level crossed by the candle's own range fires at the level.
-      const intrabar = intrabarExit(pos, candle);
-      const check = intrabar
-        ? { shouldExit: true, exitType: (intrabar.exitType === 'TP1' ? 'PARTIAL_50' : 'FULL') as ExitType, pnl: positionPnl(pos, intrabar.price) }
-        : (engine === 'legacy' ? checkExitLegacy(pos, candle, candles, idx, state) : checkExitPro(pos, candle, candles, idx, state));
-      if (check.shouldExit) {
-        // Apply exit fee (0.1% of notional value)
-        const exitNotional = pos.type === 'SPOT' ? pos.quantity * currentPrice : pos.sizeUsd + check.pnl;
-        const exitFee = exitNotional * FEE_PERCENT;
-        const pnlAfterFee = check.pnl - exitFee;
-        state.totalFees += exitFee;
-        
-        if (check.exitType === 'PARTIAL_50') {
-          // Partial close: 50% of position
-          const halfQty = pos.quantity / 2;
-          const halfPnl = pnlAfterFee / 2;
-          state.closedTrades.push({ pnl: halfPnl, at: candle.timestamp, riskUsd: pos.initialRiskUsd / 2 });
-          pos.quantity = halfQty;
-          pos.initialRiskUsd = pos.initialRiskUsd / 2;
-          pos.tp1Hit = true;
-          if (pos.type === 'SPOT') { state.cash += halfQty * currentPrice - exitFee / 2; } else { state.cash += (pos.sizeUsd / 2) + halfPnl; }
-          pos.sizeUsd = pos.sizeUsd / 2;
-        } else {
-          // FULL, TRAILING_STOP, REVERSAL, TIME_BASED: full close
-          state.closedTrades.push({ pnl: pnlAfterFee, at: candle.timestamp, riskUsd: pos.initialRiskUsd });
-          if (pnlAfterFee < 0) lossCooldownUntil = Math.max(lossCooldownUntil, candle.timestamp + STREAK_COOLDOWN_MS);
-          if (pos.type === 'SPOT') { state.cash += pos.quantity * currentPrice - exitFee; } else { state.cash += pos.sizeUsd + pnlAfterFee; }
-          toRemove.push(i);
-        }
-      } else {
-        pos.highestPrice = Math.max(pos.highestPrice, candle.high);
-        pos.lowestPrice = Math.min(pos.lowestPrice, candle.low);
-      }
-    }
-    for (let i = toRemove.length - 1; i >= 0; i--) state.positions.splice(toRemove[i], 1);
-    // 2. Update equity
-    const eq = equity(state, { [symbol]: currentPrice });
-    state.peakEquity = Math.max(state.peakEquity, eq);
-    const drawdown = state.peakEquity > 0 ? (state.peakEquity - eq) / state.peakEquity * 100 : 0;
-    state.maxDrawdown = Math.max(state.maxDrawdown, drawdown);
-    // 3. New entry
-    if (state.positions.some(p => p.symbol === symbol)) continue;
-    if (candle.timestamp < lossCooldownUntil) continue; // per-symbol post-loss cooldown
-    const evalResult = engine === 'legacy' ? legacyEvaluate(symbol, candles, idx, state, slConfig) : proEvaluate(symbol, candles, idx, state, slConfig);
-    if (!evalResult.willExecute) continue;
-    const pos = engine === 'legacy' ? openPositionLegacy(symbol, candles, idx, state, evalResult.tradeType as 'SPOT' | 'FUTURES', evalResult.side, evalResult.signalScore, slConfig) : openPositionPro(symbol, candles, idx, state, evalResult.tradeType as 'SPOT' | 'FUTURES', evalResult.side, evalResult.signalScore, slConfig);
-    if (pos) {
-      // Apply entry fee (0.1%) and slippage (0.1%)
-      const entryNotional = pos.type === 'SPOT' ? pos.quantity * currentPrice : pos.sizeUsd;
-      const entryFee = entryNotional * FEE_PERCENT;
-      const slippage = entryNotional * SLIPPAGE_PERCENT;
-      const totalEntryCost = entryFee + slippage;
-      state.cash -= totalEntryCost;
-      state.totalFees += totalEntryCost;
-      if (pos.type === 'SPOT') { state.cash -= pos.quantity * currentPrice; } else { state.cash -= pos.sizeUsd; }
-      state.positions.push(pos);
-    }
-  }
-  const totalTrades = state.closedTrades.length;
-  const wins = state.closedTrades.filter(t => t.pnl > 0).length;
-  const losses = totalTrades - wins;
-  const winRate = totalTrades > 0 ? (wins / totalTrades) * 100 : 0;
-  const netProfit = state.closedTrades.reduce((s, t) => s + t.pnl, 0);
-  const grossWin = state.closedTrades.filter(t => t.pnl > 0).reduce((s, t) => s + t.pnl, 0);
-  const grossLoss = Math.abs(state.closedTrades.filter(t => t.pnl < 0).reduce((s, t) => s + t.pnl, 0));
-  const profitFactor = grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? Infinity : 0);
-  const expectancy = totalTrades > 0 ? netProfit / totalTrades : 0;
-  // The single-symbol path serves legacy/pro only and does not tally reasons;
-  // an empty object says "not measured here", which is the honest value.
-  return { totalTrades, wins, losses, winRate, netProfit, profitFactor, expectancy, maxDrawdown: state.maxDrawdown, closedTrades: state.closedTrades, exitReasons: {} };
-  })();
-}
 
 // ── Portfolio backtest (cross-symbol) ──────────────────────────────────────
 // Runs ALL symbols together on a merged time axis so the portfolio-level
 // gates (maxPositions=7, maxFutures=2) actually bind — matching how the live
-// bots trade. Per-bar logic (intrabar SL/TP, close-based exits, entries,
-// per-symbol post-loss cooldown) is identical to runBacktest; positions stay
-// scoped per-symbol while the capacity caps are global.
+// bot trades.
 
 const PORTFOLIO_MAX_POSITIONS = 7;
 const PORTFOLIO_MAX_FUTURES = 2;
 
 export async function runPortfolioBacktest(
   histories: SymbolHistory[],
-  slConfig: SlConfig,
   engine: EngineType,
-  /** Intraday only. Omit for the unmodified strategy. */
   intradayOverrides?: IntradayOverrides
 ): Promise<BacktestResult> {
-  // Merged over the defaults, never substituted for them: a partial object
-  // handed straight to the engine blanks every threshold it does not name, and
-  // every `x >= params.someThreshold` test then silently reads undefined.
+  void engine; // single valid value today; kept for API stability
+  // Merged, never replaced. `input.params ?? DEFAULT_INTRADAY_PARAMS` only
+  // fell back when params was null/undefined — a partial object handed
+  // straight to the engine blanks every threshold it does not name.
   const intradayParams = intradayOverrides
     ? withParams(intradayOverrides)
     : DEFAULT_INTRADAY_PARAMS;
@@ -720,43 +356,38 @@ export async function runPortfolioBacktest(
   const lossCooldownUntil = new Map<string, number>();
   const exitReasons: Record<string, number> = {};
   const tally = (reason: string) => { exitReasons[reason] = (exitReasons[reason] ?? 0) + 1; };
+  const gateReasons: Record<string, number> = {};
+  const tallyGate = (gate: string) => { gateReasons[gate] = (gateReasons[gate] ?? 0) + 1; };
 
   // Intraday cannot run on an H1-only snapshot: its first gate is a hard
   // NO_DATA below 200/300/500 bars, so it would report zero trades and look
   // like a strategy that never fires rather than a snapshot that never fed it.
   // Fail loudly instead — a silent zero is the worst possible backtest result.
-  if (engine === 'intraday') {
-    const missing = histories.filter(h => !h.m15 || !h.m5).map(h => h.symbol);
-    if (missing.length) {
-      throw new Error(
-        `intraday needs 15M and 5M series; missing for ${missing.join(', ')}. ` +
-        `Build one with: npx tsx scripts/abBacktest.ts snapshot-mtf --from <date> --to <date>`
-      );
-    }
+  const missing = histories.filter(h => !h.m15 || !h.m5).map(h => h.symbol);
+  if (missing.length) {
+    throw new Error(
+      `intraday needs 15M and 5M series; missing for ${missing.join(', ')}. ` +
+      `Build one with: npx tsx scripts/abBacktest.ts snapshot-mtf --from <date> --to <date>`
+    );
   }
 
-  // Merged, time-ordered event stream — one event per (symbol, bar) on the
-  // clock the engine actually runs on. Intraday ticks every 5 minutes like the
-  // live worker; Legacy and Pro decide on their H1 signal.
-  //
-  // The warm-up offset is each engine's own minimum history: 50 H1 bars for the
-  // two H1 engines, and for Intraday the 500 5M bars its NO_DATA gate demands
-  // (the 1H and 15M minimums are checked per event, since those series reach
-  // their own thresholds at different points).
+  const STREAK_COOLDOWN_MS = 30 * 60 * 1000;
+
+  // Merged, time-ordered event stream on the engine's OWN clock — the 5M
+  // series, since Intraday's entry confirmation is a 5M trigger.
   const events: { ts: number; symbol: string; idx: number }[] = [];
   for (const h of histories) {
-    const clock = engine === 'intraday' ? h.m5! : h.candles;
-    const warmup = engine === 'intraday' ? 500 : 50;
-    for (let i = warmup; i < clock.length; i++) {
+    const clock = h.m5!;
+    for (let i = 500; i < clock.length; i++) {
       events.push({ ts: clock[i].timestamp, symbol: h.symbol, idx: i });
     }
   }
   events.sort((a, b) => a.ts - b.ts || a.symbol.localeCompare(b.symbol));
   const historyBySymbol = new Map(histories.map(h => [h.symbol, h]));
   const candlesBySymbol = new Map(histories.map(h => [h.symbol, h.candles]));
-  // Monotonic per-symbol read heads into the 15M/5M series. The event stream is
-  // time-ordered and each symbol's own events are in increasing index order, so
-  // these only ever move forward.
+  // Monotonic per-symbol read heads. The event stream is time-ordered and each
+  // symbol's own events are in increasing index order, so these only ever move
+  // forward.
   const cursorsBySymbol = new Map<string, MtfCursors>(histories.map(h => [h.symbol, { h1: 0, m15: 0, m5: 0 }]));
   let processed = 0;
 
@@ -765,23 +396,19 @@ export async function runPortfolioBacktest(
     const symbol = ev.symbol;
     const history = historyBySymbol.get(symbol)!;
     const candles = candlesBySymbol.get(symbol)!;
-    // `ev.idx` indexes the engine's own clock: the 5M series for Intraday, H1
-    // for the other two.
-    const bars = engine === 'intraday' ? history.m5! : candles;
+    const bars = history.m5!;
     const candle = bars[ev.idx];
 
+    // Advance the HIGHER-timeframe heads to the last bar that closed at or
+    // before this 5M bar. A 1H bar that closes later has not happened yet;
+    // letting one through would be look-ahead, the one bug a backtest cannot
+    // survive. The 5M head is the event index itself.
     const cursors = cursorsBySymbol.get(symbol)!;
-    if (engine === 'intraday') {
-      // Advance the HIGHER-timeframe heads to the last bar that closed at or
-      // before this 5M bar. A 1H bar that closes later has not happened yet;
-      // letting one through would be look-ahead, the one bug a backtest cannot
-      // survive. The 5M head is the event index itself.
-      cursors.h1 = advanceCursor(candles, cursors.h1, candle.timestamp);
-      cursors.m15 = advanceCursor(history.m15!, cursors.m15, candle.timestamp);
-      cursors.m5 = ev.idx + 1;
-      // The engine's own NO_DATA thresholds on the two slower series.
-      if (cursors.h1 < 200 || cursors.m15 < 300) continue;
-    }
+    cursors.h1 = advanceCursor(candles, cursors.h1, candle.timestamp);
+    cursors.m15 = advanceCursor(history.m15!, cursors.m15, candle.timestamp);
+    cursors.m5 = ev.idx + 1;
+    // The engine's own NO_DATA thresholds on the two slower series.
+    if (cursors.h1 < 200 || cursors.m15 < 300) continue;
 
     // 1. Exits for THIS symbol's positions
     const toRemove: number[] = [];
@@ -791,12 +418,8 @@ export async function runPortfolioBacktest(
       const intrabar = intrabarExit(pos, candle);
       const check = intrabar
         ? { shouldExit: true, exitType: (intrabar.exitType === 'TP1' ? 'PARTIAL_50' : 'FULL') as ExitType, pnl: positionPnl(pos, intrabar.price) }
-        : engine === 'legacy' ? checkExitLegacy(pos, candle, candles, ev.idx, state)
-          : engine === 'pro' ? checkExitPro(pos, candle, candles, ev.idx, state)
-            : checkExitIntraday(pos, candle, history, cursors, state, intradayParams);
+        : checkExitIntraday(pos, candle, history, cursors, state, intradayParams);
       if (check.shouldExit) {
-        // Intrabar SL/TP is a level hit; everything else comes from the exit
-        // engine and carries its own reason where the engine reports one.
         tally(intrabar ? intrabar.exitType : ((check as { reasonCode?: string }).reasonCode ?? check.exitType));
         const exitPrice = intrabar ? intrabar.price : candle.close;
         const exitNotional = pos.type === 'SPOT' ? pos.quantity * exitPrice : pos.sizeUsd + check.pnl;
@@ -832,27 +455,18 @@ export async function runPortfolioBacktest(
     const drawdown = state.peakEquity > 0 ? (state.peakEquity - eq) / state.peakEquity * 100 : 0;
     state.maxDrawdown = Math.max(state.maxDrawdown, drawdown);
 
-    // 3. New entry — portfolio-level capacity gates (fixes the old
-    //    "one position per backtest run" fidelity gap)
-    if (state.positions.some(p => p.symbol === symbol)) continue;
-    if (ev.ts < (lossCooldownUntil.get(symbol) ?? 0)) continue; // per-symbol post-loss cooldown
-    if (state.positions.length >= PORTFOLIO_MAX_POSITIONS) continue;
-    let pos: SimPosition | null = null;
-    if (engine === 'intraday') {
-      const { decision, willExecute } = intradayEvaluate(history, cursors, candle.timestamp, candle.close, state, intradayParams);
-      if (!willExecute || !decision) continue;
-      if (decision.tradeType === 'FUTURES' && state.positions.filter(p => p.type === 'FUTURES').length >= PORTFOLIO_MAX_FUTURES) continue;
-      pos = openPositionIntraday(symbol, bars, ev.idx, decision);
-    } else {
-      const evalResult = engine === 'legacy'
-        ? legacyEvaluate(symbol, candles, ev.idx, state, slConfig)
-        : proEvaluate(symbol, candles, ev.idx, state, slConfig);
-      if (!evalResult.willExecute) continue;
-      if (evalResult.tradeType === 'FUTURES' && state.positions.filter(p => p.type === 'FUTURES').length >= PORTFOLIO_MAX_FUTURES) continue;
-      pos = engine === 'legacy'
-        ? openPositionLegacy(symbol, candles, ev.idx, state, evalResult.tradeType as 'SPOT' | 'FUTURES', evalResult.side, evalResult.signalScore, slConfig)
-        : openPositionPro(symbol, candles, ev.idx, state, evalResult.tradeType as 'SPOT' | 'FUTURES', evalResult.side, evalResult.signalScore, slConfig);
-    }
+    // 3. New entry — portfolio-level capacity gates
+    if (state.positions.some(p => p.symbol === symbol)) { tallyGate('ALREADY_IN_SYMBOL'); continue; }
+    if (ev.ts < (lossCooldownUntil.get(symbol) ?? 0)) { tallyGate('LOSS_COOLDOWN'); continue; }
+    if (state.positions.length >= PORTFOLIO_MAX_POSITIONS) { tallyGate('PORTFOLIO_FULL'); continue; }
+
+    const { decision, willExecute } = intradayEvaluate(history, cursors, candle.timestamp, candle.close, state, intradayParams);
+    tallyGate(willExecute ? 'SIGNAL' : (decision?.gate ?? 'NO_DECISION'));
+    if (!willExecute || !decision) continue;
+    if (decision.tradeType === 'FUTURES' && state.positions.filter(p => p.type === 'FUTURES').length >= PORTFOLIO_MAX_FUTURES) { tallyGate('FUTURES_FULL'); continue; }
+    const pos = openPositionIntraday(symbol, bars, ev.idx, decision);
+
+    if (!pos) tallyGate('RISK_REJECTED');
     if (pos) {
       const entryNotional = pos.type === 'SPOT' ? pos.quantity * candle.close : pos.sizeUsd;
       const entryFee = entryNotional * FEE_PERCENT;
@@ -874,83 +488,5 @@ export async function runPortfolioBacktest(
   const grossLoss = Math.abs(state.closedTrades.filter(t => t.pnl < 0).reduce((s, t) => s + t.pnl, 0));
   const profitFactor = grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? Infinity : 0);
   const expectancy = totalTrades > 0 ? netProfit / totalTrades : 0;
-  return { totalTrades, wins, losses, winRate, netProfit, profitFactor, expectancy, maxDrawdown: state.maxDrawdown, closedTrades: state.closedTrades, exitReasons };
-}
-
-// ── Main exported function ─────────────────────────────────────────────────
-export async function runBacktestSweep(options: BacktestOptions): Promise<SweepResult[]> {
-  const { engine, days, symbols, concurrency = 4, onProgress = () => {} } = options;
-  const slGrid = buildSlGrid();
-
-  // Fetch history (with cache)
-  const histories: { symbol: string; candles: Candle[] }[] = [];
-  const queue = [...symbols];
-  async function worker() {
-    while (queue.length) {
-      const symbol = queue.shift()!;
-      const end = Date.now();
-      const start = end - days * 24 * 60 * 60 * 1000;
-      let candles: Candle[];
-      const cached = await getCachedHistory(symbol, '1h');
-      if (cached && cached.length >= 200) {
-        const oldestCached = cached[0].timestamp;
-        const newestCached = cached[cached.length - 1].timestamp;
-        if (oldestCached <= start + 3600_000 && newestCached >= end - 3600_000) {
-          onProgress(`${symbol}: cache hit (${cached.length} bars)`);
-          histories.push({ symbol, candles: cached });
-          continue;
-        }
-      }
-      candles = await fetchKlinesPaged(symbol, '1h', start, end);
-      if (candles.length < 200) {
-        onProgress(`${symbol}: insufficient data (${candles.length} bars), skip`);
-        continue;
-      }
-      if (cached && cached.length > 0) {
-        const cachedMax = cached[cached.length - 1].timestamp;
-        const freshMin = candles.length > 0 ? candles[0].timestamp : Infinity;
-        if (freshMin > cachedMax) {
-          candles = [...cached, ...candles].sort((a, b) => a.timestamp - b.timestamp);
-        }
-      }
-      await saveCachedHistory(symbol, '1h', candles);
-      histories.push({ symbol, candles });
-      onProgress(`${symbol}: ok (${candles.length} bars)`);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(concurrency, symbols.length) }, worker));
-
-  if (histories.length === 0) {
-    throw new Error('No symbols with sufficient data');
-  }
-
-  // Run sweep — multi-symbol runs use the portfolio backtest so the live
-  // capacity gates (maxPositions=7, maxFutures=2) actually bind; a single
-  // symbol still goes through the per-symbol runner.
-  const results: SweepResult[] = [];
-  for (const slConfig of slGrid) {
-    let totalTrades = 0, wins = 0, netProfit = 0, pfSum = 0, pfCount = 0, expSum = 0, maxDD = 0;
-    const r = await (histories.length > 1
-      ? runPortfolioBacktest(histories, slConfig, engine)
-      : runBacktest(histories[0].symbol, histories[0].candles, slConfig, engine));
-    totalTrades += r.totalTrades;
-    wins += r.wins;
-    netProfit += r.netProfit;
-    maxDD = Math.max(maxDD, r.maxDrawdown);
-    if (r.totalTrades > 0) { pfSum += r.profitFactor; pfCount++; expSum += r.expectancy; }
-    results.push({
-      ...slConfig, engine, totalTrades,
-      winRate: totalTrades > 0 ? (wins / totalTrades) * 100 : 0,
-      wins: totalTrades > 0 ? wins : 0,
-      losses: totalTrades > 0 ? totalTrades - wins : 0,
-      netProfit,
-      profitFactor: pfCount > 0 ? pfSum / pfCount : 0,
-      expectancy: pfCount > 0 ? expSum / pfCount : 0,
-      maxDrawdown: maxDD,
-    });
-  }
-
-  // Sort by profit factor (descending)
-  results.sort((a, b) => b.profitFactor - a.profitFactor);
-  return results;
+  return { totalTrades, wins, losses, winRate, netProfit, profitFactor, expectancy, maxDrawdown: state.maxDrawdown, closedTrades: state.closedTrades, exitReasons, gateReasons };
 }

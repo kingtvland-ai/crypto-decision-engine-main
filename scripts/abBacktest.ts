@@ -1,5 +1,5 @@
 /**
- * A/B measurement harness for engine changes (PLAN_ENGINE_FIXES.md — שלב 4).
+ * A/B measurement harness for engine changes. See SIM_BOTS.md.
  *
  * WHY THIS EXISTS
  * ---------------
@@ -30,9 +30,12 @@ import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { runPortfolioBacktest, runBacktest, type SlConfig, type EngineType, type IntradayOverrides } from '../server/backtestRunner.js';
 import { DEFAULT_INTRADAY_PARAMS } from '@cde/engine';
+// History comes from Binance's monthly archives, not the paginated REST
+// endpoint: one request per symbol-month instead of thousands, which is what
+// turned "just measure it over a longer window" from an hour into a minute.
+import { fetchBulkKlines } from './bulkKlines';
 
 const OUT_DIR = join(process.cwd(), 'backtest-ab');
-const BINANCE = 'https://api.binance.com/api/v3';
 
 // The fixed comparison basket. Chosen for liquidity and for spanning a range
 // of volatility regimes (BTC/ETH low, SOL/AVAX mid, DOGE high) so a change
@@ -71,6 +74,14 @@ const SNAPSHOT_FILE: Record<EngineType, string> = {
   pro: 'snapshot.json',
   intraday: 'snapshot-mtf.json'
 };
+
+/** `--snapshot <name>` writes/reads snapshot-<name>.json instead of the default.
+ *  A second, longer window therefore never overwrites the yardstick every
+ *  earlier run was measured against. */
+function snapshotPathFor(engine: EngineType): string {
+  const named = process.argv.includes('--snapshot') ? arg('snapshot') : '';
+  return join(OUT_DIR, named ? `snapshot-${named}.json` : SNAPSHOT_FILE[engine]);
+}
 
 interface Metrics {
   label: string;
@@ -154,41 +165,6 @@ function gitCommit(): string {
 
 // ── snapshot ───────────────────────────────────────────────────────────────
 
-async function fetchKlines(symbol: string, startMs: number, endMs: number, interval = '1h'): Promise<Candle[]> {
-  const out: Candle[] = [];
-  let cursor = startMs;
-  let guard = 0;
-  while (cursor < endMs && guard++ < 2000) {
-    const url = `${BINANCE}/klines?symbol=${symbol}&interval=${interval}&startTime=${cursor}&endTime=${endMs}&limit=1000`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`${symbol}: HTTP ${res.status} ${await res.text()}`);
-    const rows = (await res.json()) as unknown[];
-    if (!Array.isArray(rows) || rows.length === 0) break;
-    for (const r of rows as unknown[][]) {
-      out.push({
-        timestamp: Number(r[0]), open: Number(r[1]), high: Number(r[2]),
-        low: Number(r[3]), close: Number(r[4]), volume: Number(r[5])
-      });
-    }
-    const last = out[out.length - 1].timestamp;
-    if (last <= cursor) break;
-    cursor = last + 1;
-    await new Promise((r) => setTimeout(r, 250)); // stay well inside the public rate limit
-  }
-  return out;
-}
-
-/**
- * Downloads the three series the Intraday engine gates on.
- *
- * Sized by its own requirements, not by symmetry with the H1 snapshot: the
- * engine refuses to evaluate below 200 H1 / 300 15M / 500 5M bars, so a window
- * short enough to miss any of those produces a run of zero trades that looks
- * like a strategy result and is not one.
- *
- * This is a much larger download than the H1 snapshot — roughly twelve 5M bars
- * per hour — so it is a separate command run once, not part of `snapshot`.
- */
 async function cmdSnapshotMtf() {
   const from = arg('from');
   const to = arg('to');
@@ -200,11 +176,11 @@ async function cmdSnapshotMtf() {
   const histories: { symbol: string; candles: Candle[]; m15: Candle[]; m5: Candle[] }[] = [];
   for (const symbol of SYMBOLS) {
     process.stdout.write(`  ${symbol} 1h ... `);
-    const candles = await fetchKlines(symbol, startMs, endMs, '1h');
+    const candles = await fetchBulkKlines(symbol, '1h', from, to);
     process.stdout.write(`${candles.length}  15m ... `);
-    const m15 = await fetchKlines(symbol, startMs, endMs, '15m');
+    const m15 = await fetchBulkKlines(symbol, '15m', from, to);
     process.stdout.write(`${m15.length}  5m ... `);
-    const m5 = await fetchKlines(symbol, startMs, endMs, '5m');
+    const m5 = await fetchBulkKlines(symbol, '5m', from, to);
     console.log(`${m5.length}`);
     // The engine's own NO_DATA gate, checked here so a thin window fails at
     // download time rather than as a silent zero-trade result.
@@ -235,10 +211,11 @@ async function cmdSnapshot() {
   if (Number.isNaN(startMs) || Number.isNaN(endMs)) throw new Error('--from/--to must be YYYY-MM-DD');
   if (endMs <= startMs) throw new Error('--to must be after --from');
 
+  const basket = process.argv.includes('--symbols') ? arg('symbols').split(',') : SYMBOLS;
   const histories: { symbol: string; candles: Candle[] }[] = [];
-  for (const symbol of SYMBOLS) {
+  for (const symbol of basket) {
     process.stdout.write(`  ${symbol} ... `);
-    const candles = await fetchKlines(symbol, startMs, endMs);
+    const candles = await fetchBulkKlines(symbol, '1h', from, to);
     if (candles.length < 200) {
       console.log(`skipped (${candles.length} bars, need 200+)`);
       continue;
@@ -250,7 +227,8 @@ async function cmdSnapshot() {
 
   const snap: Snapshot = { createdAt: new Date().toISOString(), from, to, symbols: histories.map((h) => h.symbol), histories };
   mkdirSync(OUT_DIR, { recursive: true });
-  const path = join(OUT_DIR, 'snapshot.json');
+  const named = process.argv.includes('--snapshot') ? arg('snapshot') : '';
+  const path = join(OUT_DIR, named ? `snapshot-${named}.json` : 'snapshot.json');
   writeFileSync(path, JSON.stringify(snap));
   console.log(`\nsnapshot → ${path}`);
   console.log(`${histories.length} symbols, ${histories.reduce((s, h) => s + h.candles.length, 0)} bars, ${from} → ${to}`);
@@ -260,6 +238,38 @@ async function cmdSnapshot() {
 
 // ── run ────────────────────────────────────────────────────────────────────
 
+/**
+ * Splits a snapshot's histories at a fraction of the calendar span.
+ *
+ * A candidate chosen on the same window it is scored on is fitted, not
+ * measured — and with a handful of candidates tried per engine, one of them
+ * looking good is the expected outcome under a null. Train picks; test decides.
+ * This is the same discipline the 4H Path study already runs (walk-forward
+ * windows plus an explicit noise floor); the difference is only that these
+ * engines have few enough knobs for a single hold-out to be honest.
+ */
+function splitHistories<T extends { candles: Candle[]; m15?: Candle[]; m5?: Candle[] }>(
+  histories: T[], trainFraction: number
+): { train: T[]; test: T[]; cutoff: number } {
+  let lo = Infinity, hi = -Infinity;
+  for (const h of histories) {
+    lo = Math.min(lo, h.candles[0].timestamp);
+    hi = Math.max(hi, h.candles[h.candles.length - 1].timestamp);
+  }
+  const cutoff = lo + (hi - lo) * trainFraction;
+  const slice = (h: T, keep: (ts: number) => boolean): T => ({
+    ...h,
+    candles: h.candles.filter((c) => keep(c.timestamp)),
+    ...(h.m15 ? { m15: h.m15.filter((c) => keep(c.timestamp)) } : {}),
+    ...(h.m5 ? { m5: h.m5.filter((c) => keep(c.timestamp)) } : {})
+  });
+  return {
+    train: histories.map((h) => slice(h, (ts) => ts < cutoff)),
+    test: histories.map((h) => slice(h, (ts) => ts >= cutoff)),
+    cutoff
+  };
+}
+
 async function cmdRun() {
   const label = arg('label');
   const engine = arg('engine', 'pro') as EngineType;
@@ -267,7 +277,12 @@ async function cmdRun() {
     throw new Error('--engine must be pro, legacy or intraday');
   }
 
-  const snapPath = join(OUT_DIR, SNAPSHOT_FILE[engine]);
+  // 'train' | 'test' | omitted (the whole window). A candidate is picked on
+  // train and only believed if it survives test.
+  const split = process.argv.includes('--split') ? arg('split') : '';
+  if (split && split !== 'train' && split !== 'test') throw new Error('--split must be train or test');
+
+  const snapPath = snapshotPathFor(engine);
   if (!existsSync(snapPath)) {
     throw new Error(
       `no snapshot at ${snapPath} — run ` +
@@ -276,7 +291,14 @@ async function cmdRun() {
   }
   const snap = JSON.parse(readFileSync(snapPath, 'utf8')) as Snapshot;
 
-  console.log(`replaying ${snap.histories.length} symbols (${snap.from} → ${snap.to}), engine=${engine}`);
+  let histories = snap.histories;
+  if (split) {
+    const parts = splitHistories(histories, 0.6);
+    histories = split === 'train' ? parts.train : parts.test;
+    console.log(`  split=${split} (60/40 at ${new Date(parts.cutoff).toISOString().slice(0, 10)})`);
+  }
+
+  console.log(`replaying ${histories.length} symbols (${snap.from} → ${snap.to}), engine=${engine}`);
   const t0 = Date.now();
   // Intraday parameter overrides. Omitting all three reproduces
   // DEFAULT_INTRADAY_PARAMS exactly, so an unflagged run is the unmodified
@@ -309,14 +331,24 @@ async function cmdRun() {
   // Intraday always goes through the portfolio path: the single-symbol runner
   // walks an H1 array and has no way to carry the other two timeframes, and
   // giving it a degraded second implementation is how the two paths drift.
-  const result = snap.histories.length > 1 || engine === 'intraday'
-    ? await runPortfolioBacktest(snap.histories, FIXED_SL, engine, hasOverrides ? intradayOverrides : undefined)
-    : await runBacktest(snap.histories[0].symbol, snap.histories[0].candles, FIXED_SL, engine);
+  const result = histories.length > 1 || engine === 'intraday'
+    ? await runPortfolioBacktest(histories, FIXED_SL, engine, hasOverrides ? intradayOverrides : undefined)
+    : await runBacktest(histories[0].symbol, histories[0].candles, FIXED_SL, engine);
   console.log(`done in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 
   // How the trades ended. A run whose exits are mostly time-based is paying a
   // full round-trip cost per trade to close positions that never resolved,
   // which reads as a broken edge in the aggregates and is not one.
+  const gates = Object.entries(result.gateReasons ?? {}).sort((a, b) => b[1] - a[1]);
+  if (gates.length) {
+    const total = gates.reduce((sum, [, n]) => sum + n, 0);
+    console.log('');
+    console.log('  why no trade');
+    for (const [gate, n] of gates) {
+      console.log(`    ${gate.padEnd(24)} ${String(n).padStart(7)}  ${((n / total) * 100).toFixed(1)}%`);
+    }
+  }
+
   const reasons = Object.entries(result.exitReasons ?? {}).sort((a, b) => b[1] - a[1]);
   if (reasons.length) {
     const total = reasons.reduce((sum, [, n]) => sum + n, 0);
@@ -470,6 +502,7 @@ if (!run) {
   console.error('  snapshot-mtf --from YYYY-MM-DD --to YYYY-MM-DD   (1h+15m+5m — intraday)');
   console.error('  run --label <name> [--engine pro|legacy|intraday]');
   console.error('      intraday only: [--time-stop-progress N] [--time-stop-fraction N] [--hold-mult N]');
+  console.error('      [--split train|test]  60/40 hold-out; pick on train, believe only if test agrees');
   console.error('  compare <baseline-label> <candidate-label>');
   process.exit(1);
 }

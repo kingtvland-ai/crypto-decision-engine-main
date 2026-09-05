@@ -103,7 +103,7 @@ describe('sizing constants', () => {
     //
     // This assertion exists to make a future raise a deliberate act: if you
     // change it, re-run scripts/abBacktest.ts and fix the flat-6% fallback
-    // first. See PLAN_ENGINE_FIXES.md.
+    // first. Measured via scripts/abBacktest.ts.
     expect(KELLY_MIN_SAMPLE).toBe(30);
   });
 

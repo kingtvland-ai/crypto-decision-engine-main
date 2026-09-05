@@ -1,839 +1,381 @@
 /**
- * "Bot Pro" decision engine — a faithful, literal implementation of
- * ASSETS/alg.md (Layers 0-4), independent from both existing engines:
+ * "Bot Pro" — a literal implementation of the algorithm in `alg.md`
+ * (weighted-indicator confidence engine, dominance/margin/coverage scoring,
+ * fixed-percentage TP/SL, risk-level-driven threshold + allocation).
+ * ============================================================================
  *
- *  - intradayEngine.ts (the "new" bot) is a different, multi-timeframe
- *    (1H/15M/5M) algorithm entirely — not related to alg.md.
- *  - tradeEngine.ts (the "legacy" bot) was ORIGINALLY meant to implement
- *    alg.md but has drifted from it over time. Verified, concrete
- *    differences found while building this file (tradeEngine.ts vs the
- *    alg.md text):
- *      - SPOT threshold: code 58 (62 in HIGH vol) vs spec's flat 60.
- *      - FUTURES threshold: code 70 vs spec's 72.
- *      - Daily circuit breaker: code 6% vs spec's 8%.
-  *      - Weekly circuit breaker: code 15% (aligned with spec).
- *      - FUTURES requires a Supertrend-direction match — an extra condition
- *        not present anywhere in alg.md's 5-condition FUTURES list.
- *      - Position sizing: code uses risk-first sizing (risk 0.75% of equity
- *        / stop distance) scaled by a half-Kelly RISK multiplier; the spec
- *        defines Kelly as DIRECTLY setting the bet size as a fraction of
- *        portfolio (capped 10%), a materially different formula.
- *      - Layer 1's two documented confidence penalties (§Volume-neutral
- *        ×0.6, §Ranging ×0.7) are not applied anywhere in the current code.
- *      - The Futures 24h-no-TP1 time exit is documented as a 50% partial
- *        reduction, but the current code always fully closes (a real bug,
- *        left as-is in the legacy engine — not this one).
+ * This REPLACES the earlier version of this file, which implemented a
+ * different, unrelated spec (`ASSETS/alg.md` — ADX/Supertrend regime, seven
+ * ATR-scaled indicators, Kelly sizing, Spot+Futures routing). That spec and
+ * this one share a filename by coincidence, not by lineage; nothing here is
+ * inherited from it.
  *
- * This module intentionally does NOT reuse tradeEngine.ts's routing/
- * scoring/risk/exit logic (since that's exactly what has drifted) — only
- * its low-level, algorithm-agnostic technical-indicator math (EMA/ATR/ADX/
- * Supertrend), which alg.md itself specifies identically and which is
- * already shared across every engine in this codebase.
+ * WHAT ALG.MD SPECIFIES EXACTLY, and is followed literally:
+ *   - The 8-indicator weight table (§2): RSI 15, MA 15, MACD 18, BB 12,
+ *     Stochastic 8, Volume Profile 15, Sentiment 10, 24h-change 12.
+ *   - The scoring formula (§2): weighted = weight × (confidence/100), summed
+ *     into buyScore / sellScore / holdScore per indicator's vote; totalWeight
+ *     accumulates every indicator that was evaluated.
+ *   - The confidence formula (§2):
+ *       dominance = maxScore / totalWeight
+ *       margin    = (maxScore - secondScore) / maxScore
+ *       coverage  = min(1, totalWeight / 88)
+ *       confidence = 50 + (dominance×45 + margin×25) × coverage − (1−coverage)×10
+ *   - The risk-level table (§3): minConfidence / allocation% per low/medium/high,
+ *     with `minConfidenceOverride > 0` replacing the table value entirely.
+ *   - The fixed exit percentages (§5): stop-loss 4.2%, take-profit 3%.
+ *   - Spot only. §4 is explicit that a SELL signal never opens a short.
+ *
+ * WHAT ALG.MD NAMES BUT DOES NOT DEFINE, and where this file necessarily makes
+ * a choice — each is flagged at its definition below, not silently invented:
+ *   - Per-indicator BUY/SELL/HOLD bands (RSI 25/35/65/75, Stochastic 25/75,
+ *     Bollinger position, sentiment 20/35/70/80, momentum ±3%/±8%). These are
+ *     NOT re-derived here: they are the exact bands already used by this
+ *     repo's `utils/smartRecommendationEngine.ts`, which independently
+ *     implements the identical dominance/margin/coverage formula against a
+ *     nearly-identical indicator set. Reusing a band that already exists in
+ *     the codebase is a smaller assumption than inventing a new one.
+ *   - "MA" (§2 names it without a band): §2's table has no Support/Resistance
+ *     entry, unlike smartRecommendationEngine.ts, so this indicator has no
+ *     precedent to copy. Implemented as price vs. MA20, using the same
+ *     two-tier confidence convention (strong / mild deviation) the RSI and
+ *     Bollinger analyzers already use in this file. The deviation bands (±2%
+ *     for the strong tier) are a SUGGESTED STARTING VALUE, not a measured one.
+ *   - "Volume Profile" (§2, weight 15): implemented with the codebase's actual
+ *     Volume Profile primitive (`calculateVolumeProfile` — POC/value-area),
+ *     not the "volume vs. its 20-bar average" heuristic the old Legacy engine
+ *     called by the same English name. They are different techniques; this
+ *     one matches what §2 literally names.
+ *   - Sentiment direction: implemented as the conventional contrarian reading
+ *     (extreme fear → buy pressure, extreme greed → sell pressure). §2 lists
+ *     Sentiment as an input weighted 10 without stating a direction; the
+ *     contrarian convention is the standard reading of a Fear & Greed index
+ *     and is what smartRecommendationEngine.ts already does.
+ *   - On a HOLD-outcome tie between BUY and SELL, and on a tie between HOLD
+ *     and a directional bucket, this file resolves to the SAFER outcome
+ *     (HOLD wins draws). §2 does not name a tie-break.
+ *
+ * WHAT THIS FILE DELIBERATELY DOES NOT HAVE, because §1-§6 do not have it:
+ *   No market-regime classifier (no ADX/Supertrend/TRENDING-RANGING). No
+ *   Kelly sizing. No ATR-scaled stop. No Futures routing, no leverage. No
+ *   ATR-based trailing stop. No confidence penalty mechanism (Legacy's
+ *   volume-neutral ×0.6 / ranging ×0.7 has no counterpart in §2 at all).
  */
 
-import { Candle, calculateEMA, calculateATR, calculateADX, calculateSupertrend, formatDynamicPrice, computeRelativeVolume, MIN_ENTRY_RELATIVE_VOLUME } from './tradeEngine';
-import { computeDrawdownFactor, MIN_STOP_PERCENT, MAX_STOP_PERCENT, kellyPayoffRatio, KELLY_MIN_SAMPLE, KELLY_MULTIPLIER, SL_ATR_MULTIPLIER, SL_TP_REWARD_RISK } from './adaptiveRisk';
-import { WEEKLY_DRAWDOWN_LOCK_PERCENT } from './intradayParams';
-import { evaluateTimeStop, progressInR, TIME_STOP_EXTENDED_HOURS, TIME_STOP_MIN_PROGRESS_R } from './adaptiveRisk';
+import type { Candle } from './tradeEngine';
+import { formatDynamicPrice } from './tradeEngine';
+import {
+  calculateRSI,
+  calculateMovingAverage,
+  calculateBollingerBands,
+  calculateVolumeProfile,
+  calculateTechnicalScore
+} from '../utils/technicalAnalysis';
+import { calculateMACD, calculateStochastic } from '../utils/advancedTechnicalAnalysis';
+import type { HistoricalPrice, TechnicalIndicators } from '../types/crypto';
 
-// ── LAYER 0 — MARKET REGIME DETECTION ──────────────────────────────────────
-
-export type ProRegimeType = 'TRENDING' | 'RANGING' | 'TRANSITIONAL';
-export type ProDirectionType = 'BULL' | 'BEAR' | 'NEUTRAL';
-export type ProVolatilityType = 'LOW' | 'NORMAL' | 'HIGH';
-
-export interface ProMarketRegimeResult {
-  regime: ProRegimeType;
-  direction: ProDirectionType;
-  volatility: ProVolatilityType;
-  adx: number;
-  atr: number;
-  atrPercent: number;
-  supertrend: { value: number; direction: 'BULL' | 'BEAR' };
-}
-
-export function detectProRegime(candles: Candle[], currentPrice: number): ProMarketRegimeResult {
-  const adx = calculateADX(candles, 14);
-  const { atr, atrPercent } = calculateATR(candles, 14);
-  const supertrend = calculateSupertrend(candles, 10, 3);
-
-  // ADX(14): >25 TRENDING, <20 RANGING, 20-25 TRANSITIONAL
-  let regime: ProRegimeType;
-  if (adx > 25) regime = 'TRENDING';
-  else if (adx < 20) regime = 'RANGING';
-  else regime = 'TRANSITIONAL';
-
-  const isSupertrendBullish = currentPrice >= supertrend.value;
-  const direction: ProDirectionType = regime === 'RANGING' ? 'NEUTRAL' : (isSupertrendBullish ? 'BULL' : 'BEAR');
-
-  // ATR%: <2 LOW, 2-5 NORMAL, >5 HIGH
-  let volatility: ProVolatilityType;
-  if (atrPercent < 2.0) volatility = 'LOW';
-  else if (atrPercent <= 5.0) volatility = 'NORMAL';
-  else volatility = 'HIGH';
-
-  return {
-    regime,
-    direction,
-    volatility,
-    adx,
-    atr,
-    atrPercent: Number(atrPercent.toFixed(2)),
-    supertrend: { value: supertrend.value, direction: isSupertrendBullish ? 'BULL' : 'BEAR' }
-  };
-}
-
-// ── LAYER 1 — SIGNAL ENGINE ─────────────────────────────────────────────────
-// Weight table (total 100): MACD 20, EMA20/50 18, RSI 12, Bollinger 12,
-// Volume Surge 18, Supertrend 12, Stochastic 8.
+// ── §2 — indicator votes ─────────────────────────────────────────────────────
 
 export interface ProIndicatorSignal {
   name: string;
   weight: number;
-  signal: 'BUY' | 'SELL' | 'NEUTRAL';
-  strength: number;
-  value: string;
+  signal: 'BUY' | 'SELL' | 'HOLD';
+  /** This indicator's own confidence in the vote it just cast, 0-100 — the
+   *  "signalConfidence" in §2's `weighted = weight × (signalConfidence/100)`. */
+  confidence: number;
   reason: string;
 }
+
+/** §2's weight table, literally. */
+export const PRO_INDICATOR_WEIGHTS = {
+  RSI: 15,
+  MA: 15,
+  MACD: 18,
+  BOLLINGER: 12,
+  STOCHASTIC: 8,
+  VOLUME_PROFILE: 15,
+  SENTIMENT: 10,
+  MOMENTUM_24H: 12
+} as const;
+
+/**
+ * §2's coverage denominator, literally — 88.
+ *
+ * The eight weights above sum to 105, not 88; alg.md gives 88 as the coverage
+ * denominator without reconciling that gap, and this file does not resolve it
+ * on the doc's behalf. The practical effect: once every indicator has enough
+ * history to vote, totalWeight (105) exceeds 88 and coverage clamps to its
+ * ceiling of 1 — so the discrepancy only matters during the indicator warm-up
+ * window, where it makes coverage reach 1 slightly sooner than a
+ * weights-sum-to-88 world would.
+ */
+export const PRO_COVERAGE_FULL_WEIGHT = 88;
+
+function pushVote(
+  signals: ProIndicatorSignal[],
+  name: string,
+  weight: number,
+  signal: 'BUY' | 'SELL' | 'HOLD',
+  confidence: number,
+  reason: string
+): void {
+  signals.push({ name, weight, signal, confidence, reason });
+}
+
+// RSI(14) — bands are smartRecommendationEngine.ts's, not re-derived here.
+function voteRsi(rsi: number, signals: ProIndicatorSignal[]): void {
+  const w = PRO_INDICATOR_WEIGHTS.RSI;
+  if (rsi <= 25) pushVote(signals, 'RSI(14)', w, 'BUY', 90, `RSI קיצוני נמוך (${rsi.toFixed(1)}) — oversold חזק`);
+  else if (rsi <= 35) pushVote(signals, 'RSI(14)', w, 'BUY', 75, `RSI נמוך (${rsi.toFixed(1)}) — oversold`);
+  else if (rsi >= 75) pushVote(signals, 'RSI(14)', w, 'SELL', 90, `RSI קיצוני גבוה (${rsi.toFixed(1)}) — overbought חזק`);
+  else if (rsi >= 65) pushVote(signals, 'RSI(14)', w, 'SELL', 70, `RSI גבוה (${rsi.toFixed(1)}) — overbought`);
+  else pushVote(signals, 'RSI(14)', w, 'HOLD', 70, `RSI ניטרלי (${rsi.toFixed(1)})`);
+}
+
+// MA(20) — no precedent in this codebase for a bare price-vs-MA signal; the
+// ±2% band and the two-tier confidence are a SUGGESTED STARTING VALUE mirroring
+// the RSI/Bollinger convention already used below, not a measured threshold.
+function voteMa(currentPrice: number, ma20: number, signals: ProIndicatorSignal[]): void {
+  const w = PRO_INDICATOR_WEIGHTS.MA;
+  if (!(ma20 > 0)) { pushVote(signals, 'MA(20)', w, 'HOLD', 50, 'אין מספיק היסטוריה לממוצע נע 20'); return; }
+  const distPct = ((currentPrice - ma20) / ma20) * 100;
+  if (distPct > 2) pushVote(signals, 'MA(20)', w, 'BUY', 80, `מחיר ${distPct.toFixed(1)}% מעל MA20 ($${formatDynamicPrice(ma20)})`);
+  else if (distPct > 0.1) pushVote(signals, 'MA(20)', w, 'BUY', 60, `מחיר מעל MA20 (${distPct.toFixed(1)}%)`);
+  else if (distPct < -2) pushVote(signals, 'MA(20)', w, 'SELL', 80, `מחיר ${Math.abs(distPct).toFixed(1)}% מתחת ל-MA20 ($${formatDynamicPrice(ma20)})`);
+  else if (distPct < -0.1) pushVote(signals, 'MA(20)', w, 'SELL', 60, `מחיר מתחת ל-MA20 (${Math.abs(distPct).toFixed(1)}%)`);
+  else pushVote(signals, 'MA(20)', w, 'HOLD', 70, 'מחיר צמוד ל-MA20');
+}
+
+// MACD(12,26,9) — same trend+histogram reading as smartRecommendationEngine.ts.
+function voteMacd(macd: ReturnType<typeof calculateMACD>, signals: ProIndicatorSignal[]): void {
+  const w = PRO_INDICATOR_WEIGHTS.MACD;
+  if (macd.trend === 'bullish' && macd.histogram > 0) {
+    pushVote(signals, 'MACD(12,26,9)', w, 'BUY', Math.min(95, 70 + Math.abs(macd.histogram) * 10),
+      `MACD חיובי — מגמה עולה (${macd.macd.toFixed(4)} > ${macd.signal.toFixed(4)})`);
+  } else if (macd.trend === 'bearish' && macd.histogram < 0) {
+    pushVote(signals, 'MACD(12,26,9)', w, 'SELL', Math.min(95, 70 + Math.abs(macd.histogram) * 10),
+      `MACD שלילי — מגמה יורדת (${macd.macd.toFixed(4)} < ${macd.signal.toFixed(4)})`);
+  } else {
+    pushVote(signals, 'MACD(12,26,9)', w, 'HOLD', 60, 'MACD ללא מגמה מובהקת');
+  }
+}
+
+// Bollinger Bands(20,2) — same position reading as smartRecommendationEngine.ts.
+function voteBollinger(bb: ReturnType<typeof calculateBollingerBands>, currentPrice: number, signals: ProIndicatorSignal[]): void {
+  const w = PRO_INDICATOR_WEIGHTS.BOLLINGER;
+  const ratio = bb.upper > bb.lower ? (currentPrice - bb.lower) / (bb.upper - bb.lower) : 0.5;
+  if (bb.position === 'below') pushVote(signals, 'Bollinger(20,2)', w, 'BUY', 85, `מחיר מתחת לרצועה תחתונה ($${formatDynamicPrice(bb.lower)})`);
+  else if (bb.position === 'above') pushVote(signals, 'Bollinger(20,2)', w, 'SELL', 85, `מחיר מעל לרצועה עליונה ($${formatDynamicPrice(bb.upper)})`);
+  else if (ratio < 0.2) pushVote(signals, 'Bollinger(20,2)', w, 'BUY', 65, 'מחיר קרוב לרצועה תחתונה');
+  else if (ratio > 0.8) pushVote(signals, 'Bollinger(20,2)', w, 'SELL', 65, 'מחיר קרוב לרצועה עליונה');
+  else pushVote(signals, 'Bollinger(20,2)', w, 'HOLD', 70, 'מחיר בתוך הרצועות');
+}
+
+// Stochastic(14,3) — same 25/75 bands as smartRecommendationEngine.ts.
+function voteStochastic(stoch: ReturnType<typeof calculateStochastic>, signals: ProIndicatorSignal[]): void {
+  const w = PRO_INDICATOR_WEIGHTS.STOCHASTIC;
+  if (stoch.signal === 'oversold' && stoch.k < 25) pushVote(signals, 'Stochastic(14,3)', w, 'BUY', 75, `סטוכסטיק oversold (K ${stoch.k.toFixed(1)} / D ${stoch.d.toFixed(1)})`);
+  else if (stoch.signal === 'overbought' && stoch.k > 75) pushVote(signals, 'Stochastic(14,3)', w, 'SELL', 75, `סטוכסטיק overbought (K ${stoch.k.toFixed(1)} / D ${stoch.d.toFixed(1)})`);
+  else pushVote(signals, 'Stochastic(14,3)', w, 'HOLD', 60, `סטוכסטיק בטווח אמצע (K ${stoch.k.toFixed(1)})`);
+}
+
+// Volume Profile (POC / value area) — §2 names THIS technique, not a
+// volume-vs-average heuristic; calculateVolumeProfile is the codebase's real
+// implementation of it.
+function voteVolumeProfile(vp: ReturnType<typeof calculateVolumeProfile>, signals: ProIndicatorSignal[]): void {
+  const w = PRO_INDICATOR_WEIGHTS.VOLUME_PROFILE;
+  if (vp.position === 'below_val') pushVote(signals, 'Volume Profile', w, 'BUY', 75, `מחיר מתחת לאזור הערך (VAL $${formatDynamicPrice(vp.valueAreaLow)})`);
+  else if (vp.position === 'above_vah') pushVote(signals, 'Volume Profile', w, 'SELL', 75, `מחיר מעל לאזור הערך (VAH $${formatDynamicPrice(vp.valueAreaHigh)})`);
+  else pushVote(signals, 'Volume Profile', w, 'HOLD', 65, `מחיר בתוך אזור הערך (POC $${formatDynamicPrice(vp.poc)})`);
+}
+
+// Sentiment (Fear & Greed 0-100) — contrarian reading; same bands as
+// smartRecommendationEngine.ts's analyzeMarketSentiment.
+function voteSentiment(fearGreedIndex: number, signals: ProIndicatorSignal[]): void {
+  const w = PRO_INDICATOR_WEIGHTS.SENTIMENT;
+  if (fearGreedIndex <= 20) pushVote(signals, 'Sentiment (F&G)', w, 'BUY', 85, `פחד קיצוני בשוק (${fearGreedIndex}) — הזדמנות קנייה`);
+  else if (fearGreedIndex <= 35) pushVote(signals, 'Sentiment (F&G)', w, 'BUY', 70, `פחד בשוק (${fearGreedIndex})`);
+  else if (fearGreedIndex >= 80) pushVote(signals, 'Sentiment (F&G)', w, 'SELL', 80, `חמדנות קיצונית (${fearGreedIndex})`);
+  else if (fearGreedIndex >= 70) pushVote(signals, 'Sentiment (F&G)', w, 'SELL', 65, `חמדנות בשוק (${fearGreedIndex})`);
+  else pushVote(signals, 'Sentiment (F&G)', w, 'HOLD', 60, `סנטימנט ניטרלי (${fearGreedIndex})`);
+}
+
+// 24h price change (momentum) — same ±3%/±8% bands as
+// smartRecommendationEngine.ts's analyzePriceMomentum.
+function voteMomentum24h(priceChange24h: number, signals: ProIndicatorSignal[]): void {
+  const w = PRO_INDICATOR_WEIGHTS.MOMENTUM_24H;
+  if (priceChange24h > 8) pushVote(signals, 'שינוי 24ש׳', w, 'SELL', 70, `עלייה חדה (+${priceChange24h.toFixed(1)}%) — שקול מימוש`);
+  else if (priceChange24h < -8) pushVote(signals, 'שינוי 24ש׳', w, 'BUY', 70, `ירידה חדה (${priceChange24h.toFixed(1)}%) — הזדמנות`);
+  else if (priceChange24h > 3) pushVote(signals, 'שינוי 24ש׳', w, 'BUY', 60, `מומנטום חיובי (+${priceChange24h.toFixed(1)}%)`);
+  else if (priceChange24h < -3) pushVote(signals, 'שינוי 24ש׳', w, 'SELL', 60, `מומנטום שלילי (${priceChange24h.toFixed(1)}%)`);
+  else pushVote(signals, 'שינוי 24ש׳', w, 'HOLD', 65, `שינוי 24ש׳ מתון (${priceChange24h.toFixed(1)}%)`);
+}
+
+// ── §2 — the aggregate result ────────────────────────────────────────────────
 
 export interface ProSignalResult {
   action: 'BUY' | 'SELL' | 'HOLD';
   buyScore: number;
   sellScore: number;
-  /** Pre-penalty score of the winning side — this is what Layer 2 routes on
-   *  (penalties are UI/context only per alg.md §Layer1). */
-  rawConfidence: number;
-  /** Post-penalty score — shown in the UI alongside the raw score so the
-   *  operator can see exactly how much context is discounting the signal. */
+  holdScore: number;
+  totalWeight: number;
+  /** §2's formula, verbatim. 0-100. */
   confidence: number;
   signals: ProIndicatorSignal[];
-  penalties: string[];
+  /** Full per-indicator breakdown, for the technical-score line in the UI. */
+  indicators: TechnicalIndicators;
 }
 
-export function evaluateProSignals(
+/**
+ * §2, computed from raw OHLCV history — the same aggregation formula as
+ * `utils/smartRecommendationEngine.ts`, re-implemented against §2's own
+ * 8-indicator weight table rather than that file's.
+ *
+ * `candles` must be closed H1 bars, oldest → newest.
+ */
+export function computeProSignal(
   candles: Candle[],
-  currentPrice: number,
   priceChange24h: number,
-  regime: ProMarketRegimeResult,
   fearGreedIndex: number = 50
 ): ProSignalResult {
-  const closes = candles.map((c) => c.close);
+  const prices = candles.map((c) => c.close);
   const volumes = candles.map((c) => c.volume);
+  const historical: HistoricalPrice[] = candles.map((c) => ({ timestamp: c.timestamp, price: c.close, volume: c.volume }));
+  const currentPrice = prices[prices.length - 1];
+
+  const rsi = calculateRSI(prices);
+  const ma20 = calculateMovingAverage(prices, 20);
+  const bb = calculateBollingerBands(prices);
+  const vp = calculateVolumeProfile(historical, volumes);
+  const macd = calculateMACD(prices);
+  const stochastic = calculateStochastic(
+    candles.map((c) => c.high),
+    candles.map((c) => c.low),
+    prices
+  );
+
   const signals: ProIndicatorSignal[] = [];
-  const penalties: string[] = [];
+  voteRsi(rsi, signals);
+  voteMa(currentPrice, ma20, signals);
+  voteMacd(macd, signals);
+  voteBollinger(bb, currentPrice, signals);
+  voteStochastic(stochastic, signals);
+  voteVolumeProfile(vp, signals);
+  voteSentiment(fearGreedIndex, signals);
+  voteMomentum24h(priceChange24h, signals);
 
-  // 1. MACD 12/26/9 (weight 20)
-  const ema12 = calculateEMA(closes, 12);
-  const ema26 = calculateEMA(closes, 26);
-  const macdLine = ema12.map((v, i) => v - ema26[i]);
-  const signalLine = calculateEMA(macdLine, 9);
-  const curMacd = macdLine[macdLine.length - 1] || 0;
-  const curSignal = signalLine[signalLine.length - 1] || 0;
-  const prevMacd = macdLine[macdLine.length - 2] || curMacd;
-  const prevSignal = signalLine[signalLine.length - 2] || curSignal;
-  const macdCrossUp = prevMacd <= prevSignal && curMacd > curSignal;
-  const macdCrossDown = prevMacd >= prevSignal && curMacd < curSignal;
-  if (curMacd > curSignal) {
-    const strength = macdCrossUp ? (curMacd > 0 ? 1.0 : 0.85) : 0.7;
-    signals.push({ name: 'MACD (12/26/9)', weight: 20, signal: 'BUY', strength, value: `MACD ${formatDynamicPrice(curMacd)} > Signal ${formatDynamicPrice(curSignal)}`, reason: 'MACD חיובי' });
-  } else if (curMacd < curSignal) {
-    const strength = macdCrossDown ? (curMacd < 0 ? 1.0 : 0.85) : 0.7;
-    signals.push({ name: 'MACD (12/26/9)', weight: 20, signal: 'SELL', strength, value: `MACD ${formatDynamicPrice(curMacd)} < Signal ${formatDynamicPrice(curSignal)}`, reason: 'MACD שלילי' });
-  } else {
-    signals.push({ name: 'MACD (12/26/9)', weight: 20, signal: 'NEUTRAL', strength: 0, value: 'MACD נייטרלי', reason: 'ללא אות מובהק' });
-  }
-
-  // 2. EMA 20/50 (weight 18)
-  const ema20 = calculateEMA(closes, 20);
-  const ema50 = calculateEMA(closes, 50);
-  const curEma20 = ema20[ema20.length - 1] || currentPrice;
-  const curEma50 = ema50[ema50.length - 1] || currentPrice;
-  const prevEma20 = ema20[ema20.length - 2] || curEma20;
-  const prevEma50 = ema50[ema50.length - 2] || curEma50;
-  const goldenCross = prevEma20 <= prevEma50 && curEma20 > curEma50;
-  const deathCross = prevEma20 >= prevEma50 && curEma20 < curEma50;
-  if (curEma20 > curEma50) {
-    signals.push({ name: 'EMA 20/50', weight: 18, signal: 'BUY', strength: goldenCross ? 1.0 : 0.8, value: `EMA20 $${formatDynamicPrice(curEma20)} > EMA50 $${formatDynamicPrice(curEma50)}`, reason: goldenCross ? 'Golden Cross' : 'EMA20 מעל EMA50' });
-  } else if (curEma20 < curEma50) {
-    signals.push({ name: 'EMA 20/50', weight: 18, signal: 'SELL', strength: deathCross ? 1.0 : 0.8, value: `EMA20 $${formatDynamicPrice(curEma20)} < EMA50 $${formatDynamicPrice(curEma50)}`, reason: deathCross ? 'Death Cross' : 'EMA20 מתחת EMA50' });
-  } else {
-    signals.push({ name: 'EMA 20/50', weight: 18, signal: 'NEUTRAL', strength: 0, value: 'EMA 20/50 שוויון', reason: 'ממוצעים נפגשים' });
-  }
-
-  // 3. RSI(14) (weight 12): <=25 BUY(1.0), <35 BUY(0.8), >=75 SELL(1.0), >65 SELL(0.8), else NEUTRAL
-  let rsi = 50;
-  if (closes.length >= 15) {
-    let gains = 0, losses = 0;
-    for (let i = 1; i <= 14; i++) {
-      const diff = closes[i] - closes[i - 1];
-      if (diff >= 0) gains += diff; else losses += Math.abs(diff);
-    }
-    let avgGain = gains / 14, avgLoss = losses / 14;
-    for (let i = 15; i < closes.length; i++) {
-      const diff = closes[i] - closes[i - 1];
-      avgGain = (avgGain * 13 + (diff > 0 ? diff : 0)) / 14;
-      avgLoss = (avgLoss * 13 + (diff < 0 ? Math.abs(diff) : 0)) / 14;
-    }
-    rsi = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
-  }
-  if (rsi <= 25) signals.push({ name: 'RSI(14)', weight: 12, signal: 'BUY', strength: 1.0, value: `RSI ${rsi.toFixed(1)}`, reason: 'מכירת יתר קיצונית' });
-  else if (rsi < 35) signals.push({ name: 'RSI(14)', weight: 12, signal: 'BUY', strength: 0.8, value: `RSI ${rsi.toFixed(1)}`, reason: 'מכירת יתר' });
-  else if (rsi >= 75) signals.push({ name: 'RSI(14)', weight: 12, signal: 'SELL', strength: 1.0, value: `RSI ${rsi.toFixed(1)}`, reason: 'קניית יתר קיצונית' });
-  else if (rsi > 65) signals.push({ name: 'RSI(14)', weight: 12, signal: 'SELL', strength: 0.8, value: `RSI ${rsi.toFixed(1)}`, reason: 'קניית יתר' });
-  else signals.push({ name: 'RSI(14)', weight: 12, signal: 'NEUTRAL', strength: 0, value: `RSI ${rsi.toFixed(1)}`, reason: 'טווח ניטרלי' });
-
-  // 4. Bollinger Bands 20/2 (weight 12)
-  const recentCloses = closes.slice(-20);
-  const bbMean = recentCloses.reduce((a, b) => a + b, 0) / Math.max(1, recentCloses.length);
-  const bbStdDev = Math.sqrt(recentCloses.reduce((s, v) => s + (v - bbMean) ** 2, 0) / Math.max(1, recentCloses.length));
-  const bbUpper = bbMean + 2 * bbStdDev;
-  const bbLower = bbMean - 2 * bbStdDev;
-  if (currentPrice < bbLower) signals.push({ name: 'Bollinger Bands (20/2)', weight: 12, signal: 'BUY', strength: 1.0, value: `מחיר מתחת ל-$${formatDynamicPrice(bbLower)}`, reason: 'פריצה מתחת לרצועה תחתונה' });
-  else if (currentPrice > bbUpper) signals.push({ name: 'Bollinger Bands (20/2)', weight: 12, signal: 'SELL', strength: 1.0, value: `מחיר מעל $${formatDynamicPrice(bbUpper)}`, reason: 'פריצה מעל הרצועה עליונה' });
-  else signals.push({ name: 'Bollinger Bands (20/2)', weight: 12, signal: 'NEUTRAL', strength: 0, value: 'בתוך הרצועות', reason: 'ללא קיצון' });
-
-  // 5. Volume Surge (weight 18): graded strength instead of all-or-nothing
-  const recentVolumes = volumes.slice(-21, -1);
-  const avgVol20 = recentVolumes.length ? recentVolumes.reduce((a, b) => a + b, 0) / recentVolumes.length : 1;
-  const latestVol = volumes[volumes.length - 1] || 0;
-  const volumeRatio = avgVol20 > 0 ? latestVol / avgVol20 : 1;
-  const isPriceUp = priceChange24h > 0 || (closes.length >= 2 && closes[closes.length - 1] > closes[closes.length - 2]);
-  let volumeStrength = 0;
-  if (volumeRatio >= 1.5) volumeStrength = 1.0;
-  else if (volumeRatio >= 1.2) volumeStrength = 0.7;
-  else if (volumeRatio >= 0.9) volumeStrength = 0.4;
-  else volumeStrength = 0.2;
-  signals.push({ name: 'Volume Surge', weight: 18, signal: volumeRatio >= 1.5 ? (isPriceUp ? 'BUY' : 'SELL') : 'NEUTRAL', strength: volumeStrength, value: `נפח פי ${volumeRatio.toFixed(2)}`, reason: volumeRatio >= 1.5 ? 'זינוק נפח מאשש' : 'נפח ממוצע/חלש' });
-
-  // 6. Supertrend (weight 12)
-  signals.push({
-    name: 'Supertrend (10/3)',
-    weight: 12,
-    signal: regime.supertrend.direction === 'BULL' ? 'BUY' : 'SELL',
-    strength: 1.0,
-    value: `Supertrend $${formatDynamicPrice(regime.supertrend.value)} (${regime.supertrend.direction})`,
-    reason: regime.supertrend.direction === 'BULL'
-      ? 'Supertrend BULL — מחזק צד LONG'
-      : 'Supertrend BEAR — מחזק צד SHORT'
-  });
-
-  // 7. Stochastic 14/3 (weight 8): K<20 & D<25 -> BUY(0.85); K>80 & D>75 -> SELL(0.85); else NEUTRAL
-  let stochK = 50, stochD = 50;
-  if (candles.length >= 14) {
-    const recent = candles.slice(-14);
-    const hh = Math.max(...recent.map((c) => c.high));
-    const ll = Math.min(...recent.map((c) => c.low));
-    const diff = hh - ll;
-    stochK = diff > 0 ? ((currentPrice - ll) / diff) * 100 : 50;
-    stochD = stochK;
-  }
-  if (stochK < 20 && stochD < 25) signals.push({ name: 'Stochastic (14/3)', weight: 8, signal: 'BUY', strength: 0.85, value: `K ${stochK.toFixed(1)} / D ${stochD.toFixed(1)}`, reason: 'מכירת יתר' });
-  else if (stochK > 80 && stochD > 75) signals.push({ name: 'Stochastic (14/3)', weight: 8, signal: 'SELL', strength: 0.85, value: `K ${stochK.toFixed(1)} / D ${stochD.toFixed(1)}`, reason: 'קניית יתר' });
-  else signals.push({ name: 'Stochastic (14/3)', weight: 8, signal: 'NEUTRAL', strength: 0, value: `K ${stochK.toFixed(1)} / D ${stochD.toFixed(1)}`, reason: 'טווח אמצע' });
-
-  // RawConfidence = Σ(weight×strength) per side, action = higher side
-  let buyScore = 0, sellScore = 0;
+  // §2's scoring: weighted = weight × (confidence/100), routed to whichever
+  // bucket the indicator voted for; totalWeight sums every indicator's OWN
+  // weight regardless of which bucket it fed.
+  let buyScore = 0, sellScore = 0, holdScore = 0, totalWeight = 0;
   for (const s of signals) {
-    if (s.signal === 'BUY') buyScore += s.weight * s.strength;
-    else if (s.signal === 'SELL') sellScore += s.weight * s.strength;
+    const weighted = s.weight * (s.confidence / 100);
+    if (s.signal === 'BUY') buyScore += weighted;
+    else if (s.signal === 'SELL') sellScore += weighted;
+    else holdScore += weighted;
+    totalWeight += s.weight;
   }
   buyScore = Number(buyScore.toFixed(2));
   sellScore = Number(sellScore.toFixed(2));
+  holdScore = Number(holdScore.toFixed(2));
 
-  let action: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
-  let rawConfidence = 0;
-  if (buyScore > sellScore) { action = 'BUY'; rawConfidence = buyScore; }
-  else if (sellScore > buyScore) { action = 'SELL'; rawConfidence = sellScore; }
-  else { rawConfidence = Math.max(buyScore, sellScore); }
+  const maxScore = Math.max(buyScore, sellScore, holdScore);
+  // Tie-break not specified by §2: HOLD wins a draw, as the safer default.
+  const action: 'BUY' | 'SELL' | 'HOLD' =
+    maxScore === holdScore ? 'HOLD' : maxScore === buyScore ? 'BUY' : 'SELL';
 
-  // §2 Volume-confirmation penalty: Volume Surge NEUTRAL -> ×0.6
-  // §3 Ranging penalty: ADX<20 (RANGING) -> ×0.7
-  // Both documented explicitly in alg.md Layer 1 and applied here — the
-  // current tradeEngine.ts implementation does not apply either.
-  let confidence = rawConfidence;
-  const volumeSignal = signals.find((s) => s.name === 'Volume Surge');
-  if (volumeSignal && volumeSignal.signal === 'NEUTRAL') {
-    confidence = confidence * 0.6;
-    penalties.push('קנס חוסר נפח: Volume Surge נייטרלי — Confidence × 0.6');
-  }
-  if (regime.regime === 'RANGING') {
-    confidence = confidence * 0.7;
-    penalties.push('קנס שוק דשדוש: ADX < 20 — Confidence × 0.7');
-  }
-  confidence = Number(confidence.toFixed(2));
+  const secondScore = [buyScore, sellScore, holdScore].sort((a, b) => b - a)[1] ?? 0;
+  const dominance = totalWeight > 0 ? maxScore / totalWeight : 0;
+  const margin = maxScore > 0 ? (maxScore - secondScore) / maxScore : 0;
+  const coverage = Math.min(1, totalWeight / PRO_COVERAGE_FULL_WEIGHT);
 
-  if (fearGreedIndex < 25) penalties.push(`סנטימנט שוק: פחד קיצוני (${fearGreedIndex}/100)`);
-  else if (fearGreedIndex > 75) penalties.push(`סנטימנט שוק: חמדנות קיצונית (${fearGreedIndex}/100)`);
-
-  return { action, buyScore, sellScore, rawConfidence, confidence, signals, penalties };
-}
-
-// ── LAYER 1.5 — ENTRY TIMING (limit-order pullback) ─────────────────────────
-// alg.md has no explicit entry-timing layer, but entering at the live market
-// price every time causes chasing and unnecessary slippage. This layer adds
-// a simple but effective pullback filter: if price is already extended beyond
-// the trigger level, defer the entry to a better level.
-
-export interface ProEntryTimingResult {
-  shouldEnter: boolean;
-  entryPrice: number;
-  sizeMultiplier: number;
-  reason: string;
-  indicators: {
-    rsi: number;
-    ema20: number;
-    bbUpper: number;
-    bbLower: number;
-  };
-}
-
-export function calculateProOptimalEntry(
-  currentPrice: number,
-  atr: number,
-  side: 'LONG' | 'SHORT' | 'BUY' | 'SELL',
-  candles: Candle[],
-  confidence: number = 50,
-  pullbackFactor: number = 0.35,
-  minRelativeVolume: number = MIN_ENTRY_RELATIVE_VOLUME
-): ProEntryTimingResult {
-  const isLong = side === 'LONG' || side === 'BUY';
-  const closes = candles.map((c) => c.close);
-  const ema20Series = calculateEMA(closes, 20);
-  const ema20 = ema20Series[ema20Series.length - 1] || currentPrice;
-
-  // Bollinger Bands (20, 2)
-  const recentCloses = closes.slice(-20);
-  const bbMean = recentCloses.reduce((a, b) => a + b, 0) / Math.max(1, recentCloses.length);
-  const bbStdDev = Math.sqrt(recentCloses.reduce((s, v) => s + (v - bbMean) ** 2, 0) / Math.max(1, recentCloses.length));
-  const bbUpper = bbMean + 2 * bbStdDev;
-  const bbLower = bbMean - 2 * bbStdDev;
-
-  // RSI(14)
-  let rsi = 50;
-  if (closes.length >= 15) {
-    let gains = 0, losses = 0;
-    for (let i = 1; i <= 14; i++) {
-      const diff = closes[i] - closes[i - 1];
-      if (diff >= 0) gains += diff; else losses += Math.abs(diff);
-    }
-    let avgGain = gains / 14, avgLoss = losses / 14;
-    for (let i = 15; i < closes.length; i++) {
-      const diff = closes[i] - closes[i - 1];
-      avgGain = (avgGain * 13 + (diff > 0 ? diff : 0)) / 14;
-      avgLoss = (avgLoss * 13 + (diff < 0 ? Math.abs(diff) : 0)) / 14;
-    }
-    rsi = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
-  }
-
-  // Adaptive pullback: high-confidence signals get a tighter limit (closer to
-  // market price) so the order fills before the window expires. Low-confidence
-  // signals keep the wider pullback to avoid chasing.
-  const adaptivePullbackFactor = confidence >= 75 ? 0.2 : confidence >= 60 ? 0.35 : 0.5;
-  const atrPullback = atr * adaptivePullbackFactor;
-
-  // Volume confirmation — same rationale as the legacy engine's entry layer:
-  // the limit order below rests into a pullback, and a pullback on no volume
-  // is drift rather than a defended level.
-  const relativeVolume = computeRelativeVolume(candles);
-  if (relativeVolume !== undefined && relativeVolume < minRelativeVolume) {
-    return {
-      shouldEnter: false,
-      entryPrice: currentPrice,
-      sizeMultiplier: 0,
-      reason: `נפח כניסה נמוך מדי (${relativeVolume.toFixed(2)}x < ${minRelativeVolume}x מהממוצע) — אין עניין בשוק`,
-      indicators: { rsi, ema20, bbUpper, bbLower }
-    };
-  }
-
-  // Instead of hard-blocking on extended price, reduce position size. This
-  // lets high-confidence signals enter even when price is extended, while
-  // still protecting capital by scaling down exposure.
-  let sizeMultiplier = 1.0;
-  const protectionNotes: string[] = [];
-
-  if (isLong) {
-    if (rsi > 70) {
-      sizeMultiplier = Math.min(sizeMultiplier, 0.5);
-      protectionNotes.push(`RSI קנוי-יתר (${rsi.toFixed(1)} > 70) — גודל מצומצם`);
-    }
-    if (currentPrice > bbUpper) {
-      sizeMultiplier = Math.min(sizeMultiplier, 0.5);
-      protectionNotes.push(`מחיר מעל רצועת Bollinger עליונה — גודל מצומצם`);
-    }
-    if (currentPrice > ema20 + atr * 1.5) {
-      sizeMultiplier = Math.min(sizeMultiplier, 0.7);
-      protectionNotes.push(`מחיר מורחק מ-EMA20 — גודל מצומצם`);
-    }
-    const entryPrice = Math.max(1e-8, currentPrice - atrPullback);
-    const reason = protectionNotes.length > 0
-      ? `Limit BUY @ ${formatDynamicPrice(entryPrice)} (pullback ${(adaptivePullbackFactor * 100).toFixed(0)}% ATR, גודל ${(sizeMultiplier * 100).toFixed(0)}%) | ${protectionNotes.join('; ')}`
-      : `Limit BUY @ ${formatDynamicPrice(entryPrice)} (pullback ${(adaptivePullbackFactor * 100).toFixed(0)}% ATR)`;
-    return { shouldEnter: true, entryPrice: Number(entryPrice.toFixed(8)), sizeMultiplier, reason, indicators: { rsi, ema20, bbUpper, bbLower } };
-  } else {
-    if (rsi < 30) {
-      sizeMultiplier = Math.min(sizeMultiplier, 0.5);
-      protectionNotes.push(`RSI מכירת-יתר (${rsi.toFixed(1)} < 30) — גודל מצומצם`);
-    }
-    if (currentPrice < bbLower) {
-      sizeMultiplier = Math.min(sizeMultiplier, 0.5);
-      protectionNotes.push(`מחיר מתחת לרצועת Bollinger תחתונה — גודל מצומצם`);
-    }
-    if (currentPrice < ema20 - atr * 1.5) {
-      sizeMultiplier = Math.min(sizeMultiplier, 0.7);
-      protectionNotes.push(`מחיר מורחק מתחת ל-EMA20 — גודל מצומצם`);
-    }
-    const entryPrice = currentPrice + atrPullback;
-    const reason = protectionNotes.length > 0
-      ? `Limit SELL/SHORT @ ${formatDynamicPrice(entryPrice)} (pullback ${(adaptivePullbackFactor * 100).toFixed(0)}% ATR, גודל ${(sizeMultiplier * 100).toFixed(0)}%) | ${protectionNotes.join('; ')}`
-      : `Limit SELL/SHORT @ ${formatDynamicPrice(entryPrice)} (pullback ${(adaptivePullbackFactor * 100).toFixed(0)}% ATR)`;
-    return { shouldEnter: true, entryPrice: Number(entryPrice.toFixed(8)), sizeMultiplier, reason, indicators: { rsi, ema20, bbUpper, bbLower } };
-  }
-}
-
-// ── LAYER 2 — TRADE TYPE ROUTER ─────────────────────────────────────────────
-
-export type ProTradeType = 'SPOT' | 'FUTURES' | 'HOLD';
-export type ProTradeSide = 'LONG' | 'SHORT' | 'BUY' | 'SELL' | 'NONE';
-
-export interface ProRouterResult {
-  type: ProTradeType;
-  side: ProTradeSide;
-  hardGateBlocked?: boolean;
-  blockReason?: string;
-  reason: string;
-}
-
-export interface ProRouterOptions {
-  hasExistingFutures?: boolean;
-  isDailyBlocked?: boolean;
-  isWeeklyLocked?: boolean;
-  /** Override for SOFT_TREND confidence base threshold (default 65). Used by backtest sweep. */
-  softTrendBaseOverride?: number;
-}
-
-// ═══════════════════════════════════════════════════════
-// DYNAMIC CONFIDENCE THRESHOLDS
-// ═══════════════════════════════════════════════════════
-// Same formula as tradeEngine.ts: static base thresholds are safe in LOW
-// volatility but become dangerously loose as ATR rises. Ramps by up to
-// +15 points from 2% ATR to 8% ATR.
-// Formula: base + ((atrPercent - 2) / 6) * 15, clamped to [base, base+15]
-
-/** Pro Spot base threshold, owned by this engine. */
-export const PRO_SPOT_BASE_THRESHOLD = 60;
-
-/** Pro Futures base threshold, owned by this engine. Unlike Legacy this one
- *  stays at 72 — alg.md specifies it and Pro is the literal implementation of
- *  that document. The two engines are allowed to disagree; what is not allowed
- *  is a second copy of either number living in the UI or the worker. */
-export const PRO_FUTURES_BASE_THRESHOLD = 72;
-
-export function dynamicConfidenceThreshold(baseThreshold: number, atrPercent: number): number {
-  // Ramps only once ATR% is genuinely extended (>=4%): keeping the base
-  // threshold flat through the typical 2-4% crypto range was making entries
-  // unreachable in exactly the regimes the bots see most of the day.
-  if (atrPercent <= 4) return baseThreshold;
-  if (atrPercent >= 8) return baseThreshold + 15;
-  return baseThreshold + ((atrPercent - 4) / 4) * 15;
-}
-
-// ═══════════════════════════════════════════════════════
-// LAYER 2 — TRADE TYPE ROUTING
-// ═══════════════════════════════════════════════════════
-
-export function routeProTradeType(signal: ProSignalResult, regime: ProMarketRegimeResult, options: ProRouterOptions = {}): ProRouterResult {
-  const softTrendBase = options.softTrendBaseOverride ?? 65;
-  // THE routing number. Every threshold comparison below reads this one value.
-  //
-  // It used to be rawConfidence here while proAdapter.normalize() gated on the
-  // post-penalty `confidence`, so the two layers could disagree: routing
-  // approved a trade on a score the penalties had already withdrawn, and the
-  // adapter blocked it one stage later under gate MIN_CONFIDENCE. Worse, the
-  // approval strings printed `signal.confidence` — the number that had NOT been
-  // compared — so the log said "confidence 61 >= 60" for a trade routed on a
-  // raw 74. Penalties exist to withdraw a signal; a signal they withdrew must
-  // not reach Layer 2 intact.
-  //
-  // `?? rawConfidence` covers synthetic callers (tests, the backtest sweep)
-  // that build a ProSignalResult without running the penalty pass.
-  const routingConfidence = signal.confidence ?? signal.rawConfidence;
-  if (options.isWeeklyLocked) {
-    return { type: 'HOLD', side: 'NONE', hardGateBlocked: true, blockReason: 'WEEKLY_DRAWDOWN_LOCK', reason: 'נעילת מערכת שבועית (הפסד >= 15%) — נדרש שחרור ידני' };
-  }
-  if (options.isDailyBlocked) {
-    return { type: 'HOLD', side: 'NONE', hardGateBlocked: true, blockReason: 'DAILY_DRAWDOWN_BLOCK', reason: 'הגנת תיק יומית (הפסד >= 8%) — חסימת כניסות חדשות עד יום המסחר הבא' };
-  }
-  if (regime.regime === 'TRANSITIONAL') {
-    // SOFT_TREND carve-out: regime direction agrees with the side we are
-    // about to take → Spot allowed with a higher bar.
-    //
-    // `regime.direction` is derived in detectProRegime from
-    // `currentPrice >= supertrend.value` (BULL when price is above the
-    // Supertrend line), so it is exactly the price-vs-Supertrend test but
-    // WITHOUT requiring the caller to pass currentPrice into this router.
-    // Previously this gate used `supertrend.direction` directly, which IS the
-    // same value — but the strict `=== 'BULL'` variant dead-locked
-    // transitional coins whose price sat just on/above the line and whose
-    // direction displayed as BULL anyway (observed live: XRP 83%+ confidence,
-    // ADX 21.7, "TRANSITIONAL / BULL" — yet blocked).
-    //
-    // Soft-trend also opens at ADX >= 20 (not > 22) for very strong signals
-    // (rawConfidence >= 80): a high-confidence setup in an otherwise
-    // directionless transitional tape is exactly where a pure "all-or-nothing"
-    // lock costs the bot its best opportunities.
-    const supertrendAgrees =
-      (signal.action === 'BUY' && regime.direction === 'BULL') ||
-      (signal.action === 'SELL' && regime.direction === 'BEAR');
-    const softTrend = supertrendAgrees && (regime.adx > 22 || routingConfidence >= 80);
-    if (!softTrend) {
-      return { type: 'HOLD', side: 'NONE', hardGateBlocked: true, blockReason: 'TRANSITIONAL_HARD_BLOCK', reason: `TRANSITIONAL MARKET REGIME: כניסות חדשות חסומות (ADX ${regime.adx.toFixed(1)})` };
-    }
-    // Fall through to Spot/Futures routing with higher Spot threshold
-  }
-  if (signal.action === 'HOLD') {
-    return { type: 'HOLD', side: 'NONE', reason: `ללא יתרון כיווני מובהק (BUY ${signal.buyScore} vs SELL ${signal.sellScore})` };
-  }
-
-  // FUTURES — ALL 5 conditions per alg.md §Layer2.1 (no extra Supertrend-match
-  // gate — that condition exists in tradeEngine.ts but is not in the spec):
-  // 1. regime TRENDING  2. post-penalty confidence>=dynamic(72)  3. volatility LOW/NORMAL
-  // 4. ADX>25  5. no existing Futures position on this asset
-  // HIGH-volatility carve-out (aligned with intradayEngine.ts and
-  // tradeEngine.ts): normally FUTURES is blocked in HIGH vol, which mutes
-  // SHORT in sharp down-moves while LONG still trades via SPOT. When the
-  // trend is confirmed AND the (already elevated) futures threshold is met,
-  // trade the trend's direction.
-  const isTrending = regime.regime === 'TRENDING' && regime.adx > 25;
-  const isFuturesVolOk = regime.volatility === 'LOW' || regime.volatility === 'NORMAL';
-  const futuresThreshold = dynamicConfidenceThreshold(PRO_FUTURES_BASE_THRESHOLD, regime.atrPercent);
-  const isFuturesScoreOk = routingConfidence >= futuresThreshold;
-  const isHighVolCarveOut = regime.volatility === 'HIGH' && isTrending && isFuturesScoreOk;
-  if (isTrending && (isFuturesVolOk || isHighVolCarveOut) && isFuturesScoreOk && !options.hasExistingFutures) {
-    const side: ProTradeSide = signal.action === 'BUY' ? 'LONG' : 'SHORT';
-    const volNote = isHighVolCarveOut
-      ? `HIGH VOL carve-out (סף ${futuresThreshold.toFixed(1)} הושג)`
-      : `תנודתיות ${regime.volatility}`;
-    return { type: 'FUTURES', side, reason: `כל תנאי Futures התקיימו: TRENDING (ADX ${regime.adx.toFixed(1)}), confidence ${routingConfidence} >= ${futuresThreshold.toFixed(1)}, ${volNote}` };
-  }
-
-  // SPOT — confidence>=dynamic(60), regime TRENDING or RANGING (or SOFT_TREND with higher bar)
-  const isSpotRegimeOk = regime.regime === 'TRENDING' || regime.regime === 'RANGING' || (regime.regime === 'TRANSITIONAL' && regime.adx > 22);
-  const softTrendSpot = regime.regime === 'TRANSITIONAL' && regime.adx > 22;
-  const spotThreshold = dynamicConfidenceThreshold(PRO_SPOT_BASE_THRESHOLD, regime.atrPercent);
-  const requiredSpotScore = softTrendSpot ? dynamicConfidenceThreshold(softTrendBase, regime.atrPercent) : spotThreshold;
-  if (isSpotRegimeOk && routingConfidence >= requiredSpotScore) {
-    // Spot cannot short (no margin on the spot book): a SELL signal that
-    // fails Futures routing must not surface as a "ready" SPOT SELL only to be
-    // silently dropped by the execution layer (proSimExecution.ts skips
-    // SPOT SELL entries). Block it here with an honest reason instead.
-    if (signal.action === 'SELL') {
-      return { type: 'HOLD', side: 'NONE', blockReason: 'SPOT_SELL_UNSUPPORTED', reason: 'אות SELL לא עמד בסף Futures — Spot SELL אינו נתמך, נחסם' };
-    }
-    const side: ProTradeSide = 'BUY';
-    const reason = softTrendSpot
-      ? `עסקת Spot מאושרת: confidence ${routingConfidence} >= ${requiredSpotScore.toFixed(1)} ב-SOFT_TREND (ADX ${regime.adx.toFixed(1)})`
-      : `עסקת Spot מאושרת: confidence ${routingConfidence} >= ${requiredSpotScore.toFixed(1)} במצב ${regime.regime}`;
-    return { type: 'SPOT', side, reason };
-  }
-
-  return { type: 'HOLD', side: 'NONE', reason: routingConfidence < requiredSpotScore ? `confidence ${routingConfidence} מתחת לסף המינימלי (${requiredSpotScore.toFixed(1)})` : 'לא עומד בתנאי הבטיחות של Spot או Futures' };
-}
-
-// ── LAYER 3 — RISK MANAGEMENT ────────────────────────────────────────────────
-
-export interface ProClosedTradeMetric {
-  pnl: number;
-  /** Capital at risk at ENTRY — see ClosedTradeMetric.riskUsd in tradeEngine.ts
-   *  for why this is snapshotted rather than derived at close. */
-  riskUsd?: number;
-}
-
-export interface ProRiskResult {
-  stopLoss: number;
-  takeProfit1?: number;
-  takeProfit2?: number;
-  takeProfit?: number;
-  leverage: number;
-  betSizeUsd: number;
-  positionPercentOfPortfolio: number;
-  riskRewardRatio: number;
-  kellyFraction: number;
-}
-
-export function calculateProRisk(
-  entryPrice: number,
-  tradeType: 'SPOT' | 'FUTURES',
-  side: ProTradeSide,
-  atr: number,
-  volatility: ProVolatilityType,
-  confidence: number,
-  portfolioValue: number,
-  closedTrades: ProClosedTradeMetric[] = [],
-  openPositionsCount: number = 0,
-  openFuturesCount: number = 0,
-  currentLeveragedExposureUsd: number = 0,
-  dailyDrawdownPercent: number = 0,
-  /** Performance-adaptive size multiplier (adaptiveRisk.ts). When supplied it
-   *  REPLACES the local drawdown-only adjustment below — it already folds the
-   *  drawdown factor in along with the loss streak and win rate, and applying
-   *  both would compound the same term twice. Left undefined (direct callers,
-   *  tests) the drawdown-only behaviour is preserved. */
-  sizingMultiplier?: number,
-  /** Optional SL clamp override for backtesting. Defaults to MIN_STOP_PERCENT/MAX_STOP_PERCENT. */
-  slConfig?: { minStop: number; maxStop: number },
-  /** Optional max positions override. Defaults to 7. */
-  maxPositions: number = 7,
-  /** Optional max futures positions override. Defaults to 2. */
-  maxOpenFutures: number = 2
-): ProRiskResult | null {
-  if (entryPrice <= 0 || atr <= 0 || portfolioValue <= 0) return null;
-
-  // §Layer3.4 — portfolio capacity gates
-  // Max total open positions = maxPositions (default 7)
-  // Max Futures positions = maxOpenFutures (default 2)
-  if (openPositionsCount >= maxPositions) return null;
-  if (tradeType === 'FUTURES' && openFuturesCount >= maxOpenFutures) return null;
-
-  // Resolve SL clamp (allows backtest sweep)
-  const slMin = slConfig?.minStop ?? MIN_STOP_PERCENT;
-  const slMax = slConfig?.maxStop ?? MAX_STOP_PERCENT;
-
-  // ATR-normalised SL clamped to [slMin, slMax], with TP derived from it so the
-  // reward:risk ratio is invariant across volatility regimes. Identical to
-  // tradeEngine.calculateRiskParameters — see the rationale there.
-  const riskRewardRatio = SL_TP_REWARD_RISK; // 1.67, unchanged
-  const rawSlPercent = (atr * SL_ATR_MULTIPLIER / entryPrice) * 100;
-  const slPercent = Math.min(Math.max(rawSlPercent, slMin), slMax);
-  const slDistance = entryPrice * slPercent / 100;
-  const tpDistance = slDistance * riskRewardRatio;
-
-  let stopLoss: number, takeProfit1: number | undefined, takeProfit2: number | undefined, takeProfit: number | undefined;
-  if (tradeType === 'SPOT') {
-    stopLoss = Math.max(1e-8, entryPrice - slDistance);
-    takeProfit = entryPrice + tpDistance;
-  } else if (side === 'LONG') {
-    stopLoss = Math.max(1e-8, entryPrice - slDistance);
-    takeProfit1 = entryPrice + tpDistance;
-    takeProfit2 = entryPrice + tpDistance * 1.5;
-  } else {
-    stopLoss = entryPrice + slDistance;
-    takeProfit1 = Math.max(1e-8, entryPrice - tpDistance);
-    takeProfit2 = Math.max(1e-8, entryPrice - tpDistance * 1.5);
-  }
-
-  // §Layer3.2 — leverage
-  let leverage = 1;
-  if (tradeType === 'FUTURES') {
-    // High confidence (>=72) bypasses the HIGH volatility block — a strong
-    // signal in a volatile market is still worth trading with reduced size.
-    if (volatility === 'HIGH' && confidence < 72) return null;
-    let base = volatility === 'LOW' ? 5 : 3;
-    if (confidence >= 80) base = Math.min(5, base + 1);
-    leverage = Math.min(5, Math.max(1, base));
-  }
-
-  // §Layer3.3 — Kelly Criterion DIRECTLY sizes the bet (not a risk multiplier
-  // like tradeEngine.ts's approach): BetSize = Portfolio × clamp(Kelly ×
-  // KELLY_MULTIPLIER, 0, 0.10), default 6% below KELLY_MIN_SAMPLE closed trades.
-  // Drawdown adjustment: reduce bet size when the portfolio is in drawdown to
-  // avoid compounding losses during a losing streak.
-  //
-  // The payoff ratio comes from kellyPayoffRatio(), which prefers R-multiples
-  // over dollar PnL — in dollars the ratio is contaminated by position size and
-  // the estimate feeds on its own output. See adaptiveRisk.ts.
-  let kellyFraction = 0;
-  let betFraction = 0.06;
-  if (closedTrades.length >= KELLY_MIN_SAMPLE) {
-    const winRate = closedTrades.filter((t) => t.pnl > 0).length / closedTrades.length;
-    const payoff = kellyPayoffRatio(closedTrades);
-    const R = payoff && payoff.r > 0 ? payoff.r : riskRewardRatio;
-    kellyFraction = R > 0 ? winRate - (1 - winRate) / R : 0;
-    betFraction = Math.min(Math.max(0, kellyFraction * KELLY_MULTIPLIER), 0.10);
-  }
-  // Adaptive sizing, applied to BOTH branches: the pre-Kelly 6% default used
-  // to ignore the drawdown entirely, so the earliest trades — the ones taken
-  // with the least evidence of an edge — were the only ones never de-risked.
-  const adaptiveFactor = sizingMultiplier !== undefined
-    ? Math.max(0, sizingMultiplier)
-    : computeDrawdownFactor(dailyDrawdownPercent);
-  betFraction = Math.min(Math.max(0, betFraction * adaptiveFactor), 0.10);
-  let betSizeUsd = portfolioValue * betFraction;
-
-  // Exchange minimum ($5), floored before the caps — see the identical
-  // treatment in tradeEngine.calculateRiskParameters. A zero-size bet still
-  // returns null: Kelly clamps betFraction to 0 when the measured edge is
-  // negative, and those used to pass through as quantity-0 positions that
-  // closed at pnl exactly 0, neither win nor loss, yet still counted in
-  // closedTrades.length — inflating the Kelly denominator that produced them.
-  if (betSizeUsd <= 0) return null;
-  if (betSizeUsd < 5) betSizeUsd = 5;
-
-  // §Layer3.4 — total leveraged exposure cap (Futures only; betSizeUsd is the
-  // capital COMMITTED — margin for Futures, full notional for Spot — so
-  // leveraged/notional exposure = betSizeUsd × leverage).
-  // Unconditional: the confidence >= 72 exemption was removed for the reason
-  // given at the same cap in tradeEngine.ts.
-  if (tradeType === 'FUTURES') {
-    const notionalUsd = betSizeUsd * leverage;
-    const maxAllowedLeveragedExposure = portfolioValue * 0.20;
-    if (currentLeveragedExposureUsd + notionalUsd > maxAllowedLeveragedExposure) return null;
-  }
-
-  // Both checks now happen above, before the exposure cap, so a floored order
-  // cannot slip past the cap unexamined.
+  const rawConfidence = 50 + (dominance * 45 + margin * 25) * coverage - (1 - coverage) * 10;
+  // §2 does not state a clamp; confidence is reported as a percentage
+  // everywhere downstream, so it is bounded to [0,100] rather than left to
+  // exceed that range on an edge case.
+  const confidence = Number(Math.max(0, Math.min(100, rawConfidence)).toFixed(1));
 
   return {
-    stopLoss: Number(stopLoss.toFixed(8)),
-    takeProfit1: takeProfit1 !== undefined ? Number(takeProfit1.toFixed(8)) : undefined,
-    takeProfit2: takeProfit2 !== undefined ? Number(takeProfit2.toFixed(8)) : undefined,
-    takeProfit: takeProfit !== undefined ? Number(takeProfit.toFixed(8)) : undefined,
-    leverage,
-    betSizeUsd: Number(betSizeUsd.toFixed(2)),
-    positionPercentOfPortfolio: Number(((betSizeUsd / portfolioValue) * 100).toFixed(2)),
-    riskRewardRatio: Number(riskRewardRatio.toFixed(2)),
-    kellyFraction: Number(kellyFraction.toFixed(4))
+    action,
+    buyScore,
+    sellScore,
+    holdScore,
+    totalWeight,
+    confidence,
+    signals,
+    indicators: { rsi, ma20, volumeTrend: 'stable', bollingerBands: bb, volumeProfile: vp, macd, stochastic }
   };
 }
 
-// ── LAYER 4 — EXIT ENGINE ─────────────────────────────────────────────────
+/** For the reasoning line — reuses the existing composite technical score. */
+export function proTechnicalScore(result: ProSignalResult): number {
+  return calculateTechnicalScore(result.indicators);
+}
 
-export interface ProActivePosition {
-  type: 'SPOT' | 'FUTURES';
-  side: 'BUY' | 'SELL' | 'LONG' | 'SHORT';
+// ── §3 — risk-level thresholds ───────────────────────────────────────────────
+
+export type ProRiskLevel = 'low' | 'medium' | 'high';
+
+/** §3's table, literally: minConfidence / allocation% per risk level. */
+export const PRO_CONFIDENCE_BY_RISK: Record<ProRiskLevel, number> = { low: 55, medium: 40, high: 25 };
+export const PRO_ALLOCATION_BY_RISK: Record<ProRiskLevel, number> = { low: 0.15, medium: 0.25, high: 0.40 };
+
+/** §3: `minConfidenceOverride > 0 ? minConfidenceOverride : CONFIDENCE_BY_RISK[riskLevel]`. */
+export function proMinConfidence(riskLevel: ProRiskLevel, override?: number): number {
+  return typeof override === 'number' && override > 0 ? override : PRO_CONFIDENCE_BY_RISK[riskLevel];
+}
+
+/** §3/§6: allocation is a function of risk level alone — there is no override
+ *  for it in §3, unlike the confidence threshold. */
+export function proAllocationPercent(riskLevel: ProRiskLevel): number {
+  return PRO_ALLOCATION_BY_RISK[riskLevel];
+}
+
+// ── §5 — fixed exit percentages ──────────────────────────────────────────────
+
+/** §5, literally: "Take Profit 3%, Stop Loss 4.2%". Not ATR-scaled. */
+export const PRO_TAKE_PROFIT_PERCENT = 3;
+export const PRO_STOP_LOSS_PERCENT = 4.2;
+
+// ── Warm-up floor ─────────────────────────────────────────────────────────────
+
+/** Candles needed before every indicator above can compute (MACD's 26+9 is
+ *  the longest). Not part of §2 — alg.md does not state a warm-up
+ *  requirement, this is purely "how much history the math needs". */
+export const MIN_PRO_CANDLES = 40;
+
+// ── §4/§5 — position-level exit ──────────────────────────────────────────────
+
+export interface ProPositionView {
   entryPrice: number;
-  stopLoss: number;
-  takeProfit1?: number;
-  takeProfit2?: number;
-  tp1Hit?: boolean;
-  highestPrice?: number;
-  lowestPrice?: number;
-  highestPriceSinceTP1?: number;
-  lowestPriceSinceTP1?: number;
-  openTimestamp: number;
 }
 
 export interface ProExitDecision {
   shouldExit: boolean;
-  exitType: 'FULL' | 'PARTIAL_50' | 'NONE';
   reason: string;
 }
 
-/** alg.md §Layer4.4 checkpoints the Futures time stop at 24h. A position
- *  already working in our favour gets one extension to this hour instead. */
-export const PRO_FUTURES_TIME_STOP_EXTENDED_HOURS = TIME_STOP_EXTENDED_HOURS;
-
-/** Favourable progress (in R) required at the 24h checkpoint to earn the
- *  extension. Matches the intraday engine's own time-stop progress bar. */
-export const PRO_FUTURES_TIME_STOP_MIN_PROGRESS_R = TIME_STOP_MIN_PROGRESS_R;
-
+/**
+ * §5's fixed-percentage exit, plus §4's "holding + a fresh SELL signal that
+ * clears the confidence bar" exit. Both apply regardless of trend or ATR —
+ * §5 gives no exception for either.
+ */
 export function evaluateProExit(
-  pos: ProActivePosition,
+  pos: ProPositionView,
   currentPrice: number,
-  currentAtr: number,
-  currentSignalScores: { buy: number; sell: number },
-  portfolioStats: { dailyDrawdownPercent: number; weeklyDrawdownPercent: number; systemLocked?: boolean }
+  currentSignal: ProSignalResult,
+  minConfidence: number
 ): ProExitDecision {
-  const isFutures = pos.type === 'FUTURES';
-  const isLong = pos.side === 'LONG' || pos.side === 'BUY';
-  const isShort = pos.side === 'SHORT' || pos.side === 'SELL';
+  const changePercent = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
 
-  // §Layer4.5 — weekly emergency flatten
-  if (portfolioStats.weeklyDrawdownPercent >= WEEKLY_DRAWDOWN_LOCK_PERCENT || portfolioStats.systemLocked) {
-    return { shouldExit: true, exitType: 'FULL', reason: `הגנת תיק שבועית (Drawdown ${portfolioStats.weeklyDrawdownPercent.toFixed(1)}% >= 15%) — כיבוי מלא` };
+  if (changePercent <= -PRO_STOP_LOSS_PERCENT) {
+    return { shouldExit: true, reason: `Stop Loss: שינוי ${changePercent.toFixed(2)}% <= -${PRO_STOP_LOSS_PERCENT}%` };
   }
-
-  // §Layer4.1 — stop loss (full close, both Spot and Futures)
-  if (isLong && currentPrice <= pos.stopLoss) return { shouldExit: true, exitType: 'FULL', reason: `Stop Loss ב-$${formatDynamicPrice(pos.stopLoss)} (מחיר $${formatDynamicPrice(currentPrice)})` };
-  if (isShort && currentPrice >= pos.stopLoss) return { shouldExit: true, exitType: 'FULL', reason: `Stop Loss ב-$${formatDynamicPrice(pos.stopLoss)} (מחיר $${formatDynamicPrice(currentPrice)})` };
-
-  if (!isFutures) {
-    // §Layer4.1 — Spot TP (full close)
-    if (pos.takeProfit1 && currentPrice >= pos.takeProfit1) {
-      return { shouldExit: true, exitType: 'FULL', reason: `Take Profit ב-Spot הושג ($${formatDynamicPrice(currentPrice)} >= $${formatDynamicPrice(pos.takeProfit1)})` };
-    }
-    // §Layer4.2 — Spot trailing: 1.3×ATR below peak, once in profit
-    // Only activate after the position has reached at least the first take-profit
-    // level (3%) — prevents exiting before meaningful profit.
-    const highestPrice = Math.max(pos.highestPrice || pos.entryPrice, currentPrice);
-    const tp1Level = pos.takeProfit1 ?? pos.entryPrice * 1.03;
-    if (highestPrice >= tp1Level) {
-      const trailingSL = highestPrice - currentAtr * 1.3;
-      if (currentPrice <= trailingSL) {
-        return { shouldExit: true, exitType: 'FULL', reason: `Trailing Stop ב-Spot (שיא $${formatDynamicPrice(highestPrice)}, 1.3 ATR)` };
-      }
-    }
-  } else if (isLong) {
-    if (pos.takeProfit2 && currentPrice >= pos.takeProfit2) {
-      return { shouldExit: true, exitType: 'FULL', reason: `TP2 הושג במלואו ($${formatDynamicPrice(currentPrice)} >= $${formatDynamicPrice(pos.takeProfit2)})` };
-    }
-    if (!pos.tp1Hit && pos.takeProfit1 && currentPrice >= pos.takeProfit1) {
-      return { shouldExit: true, exitType: 'PARTIAL_50', reason: `TP1 הושג ($${formatDynamicPrice(currentPrice)} >= $${formatDynamicPrice(pos.takeProfit1)}) — סגירת 50% והפעלת Trailing` };
-    }
-    if (pos.tp1Hit) {
-      const peak = Math.max(pos.highestPriceSinceTP1 || pos.entryPrice, currentPrice);
-      const trailingSL = peak - currentAtr * 1.0;
-      if (currentPrice <= trailingSL) {
-        return { shouldExit: true, exitType: 'FULL', reason: `Trailing Stop הופעל (שיא $${formatDynamicPrice(peak)}, 1.0 ATR)` };
-      }
-    }
-  } else if (isShort) {
-    if (pos.takeProfit2 && currentPrice <= pos.takeProfit2) {
-      return { shouldExit: true, exitType: 'FULL', reason: `TP2 הושג במלואו ($${formatDynamicPrice(currentPrice)} <= $${formatDynamicPrice(pos.takeProfit2)})` };
-    }
-    if (!pos.tp1Hit && pos.takeProfit1 && currentPrice <= pos.takeProfit1) {
-      return { shouldExit: true, exitType: 'PARTIAL_50', reason: `TP1 הושג ($${formatDynamicPrice(currentPrice)} <= $${formatDynamicPrice(pos.takeProfit1)}) — סגירת 50% והפעלת Trailing` };
-    }
-    if (pos.tp1Hit) {
-      const valley = Math.min(pos.lowestPriceSinceTP1 || pos.entryPrice, currentPrice);
-      const trailingSL = valley + currentAtr * 1.0;
-      if (currentPrice >= trailingSL) {
-        return { shouldExit: true, exitType: 'FULL', reason: `Trailing Stop הופעל (שפל $${formatDynamicPrice(valley)}, 1.0 ATR)` };
-      }
-    }
+  if (changePercent >= PRO_TAKE_PROFIT_PERCENT) {
+    return { shouldExit: true, reason: `Take Profit: שינוי ${changePercent.toFixed(2)}% >= ${PRO_TAKE_PROFIT_PERCENT}%` };
   }
-
-  // §Layer4.3 — reversal
-  // Don't exit on reversal before the position has reached at least the
-  // first take-profit level (3%) or stop-loss level (1.8%) — prevents
-  // closing a winning position too early on a temporary signal flip.
-  const tpLevel = pos.takeProfit1 ?? (isLong ? pos.entryPrice * 1.03 : pos.entryPrice * 0.97);
-  const slLevel = pos.stopLoss;
-  const beyondTp = isLong ? currentPrice >= tpLevel : currentPrice <= tpLevel;
-  const beyondSl = isLong ? currentPrice <= slLevel : currentPrice >= slLevel;
-  if (beyondTp || beyondSl) {
-    if (isLong && currentSignalScores.sell >= 65) {
-      return { shouldExit: true, exitType: 'FULL', reason: `היפוך אותות: SELL confidence ${currentSignalScores.sell.toFixed(1)} >= 65` };
-    }
-    if (isShort && currentSignalScores.buy >= 65) {
-      return { shouldExit: true, exitType: 'FULL', reason: `היפוך אותות: BUY confidence ${currentSignalScores.buy.toFixed(1)} >= 65` };
-    }
+  if (currentSignal.action === 'SELL' && currentSignal.confidence >= minConfidence) {
+    return { shouldExit: true, reason: `היפוך אות: SELL בביטחון ${currentSignal.confidence.toFixed(1)} >= ${minConfidence}` };
   }
-
-  // §Layer4.4 — time-based. The rule now lives in adaptiveRisk.ts so Legacy and
-  // Pro cut stagnant positions by the same measure; the progress reprieve this
-  // engine already had is part of it. What changed here is that the exit is
-  // reachable at all: it used to sit behind `beyondTp1 || beyondSl`, a condition
-  // the stop-loss and take-profit checks above had already claimed.
-  const heldMs = Date.now() - (pos.openTimestamp || Date.now());
-  const timeStop = evaluateTimeStop({
-    heldMs,
-    isFutures,
-    progressR: progressInR(pos.entryPrice, currentPrice, pos.stopLoss, isLong),
-    tp1Hit: pos.tp1Hit
-  });
-  if (timeStop.action !== 'NONE') {
-    return {
-      shouldExit: true,
-      exitType: timeStop.action === 'PARTIAL_50' ? 'PARTIAL_50' : 'FULL',
-      reason: timeStop.reason
-    };
-  }
-  // A reprieve carries its own explanation: the position stays open BECAUSE it
-  // passed the checkpoint, which is worth saying in the decision log rather than
-  // letting it fall through to the generic "still running".
-  if (timeStop.reason) {
-    return { shouldExit: false, exitType: 'NONE', reason: timeStop.reason };
-  }
-
-  return { shouldExit: false, exitType: 'NONE', reason: 'הפוזיציה ממשיכה לפעול' };
+  return { shouldExit: false, reason: '' };
 }

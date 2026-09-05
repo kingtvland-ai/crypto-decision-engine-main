@@ -36,9 +36,11 @@ describe('routeTradeType', () => {
     expect(result.type).toBe('HOLD');
   });
 
-  it('returns HOLD when confidence below spot minimum (58)', () => {
+  it('routes a low score that the old 58 bar refused', () => {
+    // The score gates were removed: they refused 87.7% of bars while the
+    // survivors won 43.3% of the time. Regime and direction decide now.
     const result = routeTradeType(makeSignal({ action: 'BUY', signalScore: 50 }), trendingLayer0);
-    expect(result.type).toBe('HOLD');
+    expect(result.type).toBe('FUTURES');
   });
 
   it('routes to FUTURES LONG when all conditions met (Score >= 72)', () => {
@@ -77,24 +79,30 @@ describe('routeTradeType', () => {
     expect(result.hardGateBlocked).toBe(true);
   });
 
-  it('allows SPOT in TRANSITIONAL regime for high-confidence aligned signals (ADX >= 20, score >= 80)', () => {
+  it('no longer lets a high score buy its way past the TRANSITIONAL block', () => {
+    // The carve-out used to open on `adx > 22 || score >= 80`. The ADX half is
+    // a judgement about the market and stays; the score half was an escape
+    // hatch for the very filter that was removed, so it went with it.
     const result = routeTradeType(makeSignal({ action: 'BUY', signalScore: 80 }), transitionalLayer0);
-    expect(result.type).toBe('SPOT');
-    expect(result.side).toBe('BUY');
+    expect(result.type).toBe('HOLD');
   });
 
-  it('routes to SPOT in HIGH VOL when Score >= dynamic threshold', () => {
+  it('takes the HIGH-VOL carve-out in a confirmed trend', () => {
+    // The carve-out required a confirmed trend AND an elevated score. The trend
+    // half remains; with the score half gone a trending HIGH-VOL bar now routes
+    // FUTURES in the trend's direction rather than dropping to SPOT.
     const highVolRegime = makeRegime({ regime: 'TRENDING', volatility: 'HIGH', atrPercent: 6.5, adx: 30 });
     const result = routeTradeType(makeSignal({ action: 'BUY', signalScore: 72 }), highVolRegime);
-    expect(result.type).toBe('SPOT');
-    expect(result.side).toBe('BUY');
+    expect(result.type).toBe('FUTURES');
+    expect(result.side).toBe('LONG');
   });
 
-  it('blocks SPOT in HIGH VOL when Score < 58', () => {
+  it('treats a weak score in HIGH VOL exactly like a strong one', () => {
+    // SPOT_SCORE_BELOW_HIGH_VOL_THRESHOLD is unreachable now: the block it
+    // reported no longer exists. Same regime, half the score, same routing.
     const highVolRegime = makeRegime({ regime: 'TRENDING', volatility: 'HIGH', atrPercent: 6.5, adx: 30 });
     const result = routeTradeType(makeSignal({ action: 'BUY', signalScore: 55 }), highVolRegime);
-    expect(result.type).toBe('HOLD');
-    expect(result.hardGateBlocked).toBe(true);
-    expect(result.blockReason).toBe('SPOT_SCORE_BELOW_HIGH_VOL_THRESHOLD');
+    expect(result.type).toBe('FUTURES');
+    expect(result.blockReason).toBeUndefined();
   });
 });

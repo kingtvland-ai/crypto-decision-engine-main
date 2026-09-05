@@ -84,7 +84,12 @@ describe('evaluateExit', () => {
     expect(result.exitType).toBe('PARTIAL_50');
   });
 
-  it('returns TRAILING_STOP for futures LONG after TP1', () => {
+  it('does NOT trail a futures LONG after TP1 — the remainder runs to TP2', () => {
+    // The trailing stop was removed. It accounted for 43.3% of this engine's
+    // exits over six months while ZERO trades ever reached their take-profit,
+    // so it was not protecting gains — it was ending winners before the target
+    // could arrive. A position that has pulled back from its peak but is still
+    // above its stop and below TP2 now simply stays open.
     const pos = makePosition({
       type: 'FUTURES',
       side: 'LONG',
@@ -95,8 +100,19 @@ describe('evaluateExit', () => {
       entryPrice: 100
     });
     const result = evaluateExit(pos, 113, 2, { buy: 0, sell: 0 }, { dailyDrawdownPercent: 0, weeklyDrawdownPercent: 0 });
+    expect(result.shouldExit).toBe(false);
+    expect(result.exitType).not.toBe('TRAILING_STOP');
+  });
+
+  it('still exits the futures LONG at TP2', () => {
+    // Removing the trail must not have removed the target it was pre-empting.
+    const pos = makePosition({
+      type: 'FUTURES', side: 'LONG', takeProfit1: 110, takeProfit2: 120,
+      tp1Hit: true, highestPriceSinceTP1: 115, entryPrice: 100
+    });
+    const result = evaluateExit(pos, 121, 2, { buy: 0, sell: 0 }, { dailyDrawdownPercent: 0, weeklyDrawdownPercent: 0 });
     expect(result.shouldExit).toBe(true);
-    expect(result.exitType).toBe('TRAILING_STOP');
+    expect(result.exitType).toBe('FULL');
   });
 
   it('returns REVERSAL on strong opposite signal for LONG beyond TP1', () => {

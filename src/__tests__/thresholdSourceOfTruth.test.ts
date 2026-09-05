@@ -1,6 +1,9 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import {
   routeTradeType,
+  evaluateExit,
   dynamicConfidenceThreshold,
   LEGACY_SPOT_BASE_THRESHOLD,
   LEGACY_FUTURES_BASE_THRESHOLD
@@ -50,45 +53,50 @@ function signal(over: Partial<SignalEngineResult> = {}): SignalEngineResult {
   } as SignalEngineResult;
 }
 
-describe('Test 7 — Legacy Spot threshold is dynamic, not a fixed 58', () => {
-  it('sits at the base when volatility is calm', () => {
-    // 58 is enough at 2% ATR: below it the score is refused, at it approved.
+describe('Legacy routes on regime and direction, not on a score bar', () => {
+  // The score gates were REMOVED. Measured over six months they refused 87.7%
+  // of all bars while the survivors won 43.3% of the time — a filter that
+  // discards nine bars in ten without improving the tenth is not selecting, it
+  // is only shrinking the sample. dynamicConfidenceThreshold and the two base
+  // constants still exist and are still exported: they describe what the bot
+  // USED to require, and the UI still reports them. They no longer gate.
+
+  it('routes a low-scoring BUY that used to be refused', () => {
     const calm = regime({ regime: 'RANGING', adx: 15, atrPercent: 2 });
-    expect(routeTradeType(signal({ signalScore: 57, confidence: 57 }), calm).type).toBe('HOLD');
-    expect(routeTradeType(signal({ signalScore: 58, confidence: 58 }), calm).type).toBe('SPOT');
+    // 40 is far under the old base of 58.
+    expect(routeTradeType(signal({ signalScore: 40, confidence: 40 }), calm).type).toBe('SPOT');
   });
 
-  it('rises with ATR — the same 58 no longer clears at 8% ATR', () => {
+  it('does not tighten with volatility any more', () => {
     const wild = regime({ regime: 'RANGING', adx: 15, atrPercent: 8 });
-    // The regression: this used to route SPOT, because 58 was a constant.
-    expect(routeTradeType(signal({ signalScore: 58, confidence: 58 }), wild).type).toBe('HOLD');
-    // The ramp is +15 by 8% ATR, so 73 is the bar there.
-    expect(dynamicConfidenceThreshold(LEGACY_SPOT_BASE_THRESHOLD, 8)).toBe(73);
-    expect(routeTradeType(signal({ signalScore: 73, confidence: 73 }), wild).type).toBe('SPOT');
+    // The old ramp put the bar at 73 here; the same score now routes.
+    expect(routeTradeType(signal({ signalScore: 58, confidence: 58 }), wild).type).toBe('SPOT');
   });
 
-  it('uses the SAME ramp as the Futures leg — one mechanism, two bases', () => {
-    for (const atr of [2, 4, 5, 6, 8, 12]) {
-      const spread = dynamicConfidenceThreshold(LEGACY_FUTURES_BASE_THRESHOLD, atr)
-        - dynamicConfidenceThreshold(LEGACY_SPOT_BASE_THRESHOLD, atr);
-      expect(spread).toBeCloseTo(LEGACY_FUTURES_BASE_THRESHOLD - LEGACY_SPOT_BASE_THRESHOLD, 10);
-    }
+  it('still refuses when there is no directional edge', () => {
+    // Direction is the algorithm's own judgement, not a threshold, and it stays.
+    const calm = regime({ regime: 'RANGING', adx: 15, atrPercent: 2 });
+    expect(routeTradeType(signal({ action: 'HOLD', signalScore: 90, confidence: 90 }), calm).type).toBe('HOLD');
   });
-});
 
-describe('Test 8 — Legacy Futures base is 70', () => {
-  it('exports 70, not 72', () => {
-    expect(LEGACY_FUTURES_BASE_THRESHOLD).toBe(70);
+  it('still refuses SPOT in a TRANSITIONAL regime with weak ADX', () => {
+    // The regime gate is a judgement about the market, not about the score, so
+    // it survives — including for a signal that scores well.
+    const transitional = regime({ regime: 'TRANSITIONAL', adx: 18, atrPercent: 2 });
+    expect(routeTradeType(signal({ signalScore: 95, confidence: 95 }), transitional).type).toBe('HOLD');
+  });
+
+  it('still routes FUTURES only in a confirmed trend at safe volatility', () => {
+    // Regime conditions are untouched: TRENDING + ADX>25 + LOW/NORMAL vol.
+    const trending = regime({ regime: 'TRENDING', adx: 30, atrPercent: 2 });
+    expect(routeTradeType(signal({ signalScore: 40, confidence: 40 }), trending).type).toBe('FUTURES');
+    const ranging = regime({ regime: 'RANGING', adx: 15, atrPercent: 2 });
+    expect(routeTradeType(signal({ signalScore: 99, confidence: 99 }), ranging).type).toBe('SPOT');
+  });
+
+  it('keeps the base constants exported for reporting', () => {
     expect(LEGACY_SPOT_BASE_THRESHOLD).toBe(58);
-  });
-
-  it('routes FUTURES at exactly 70 in calm volatility', () => {
-    const calm = regime({ atrPercent: 2 });
-    expect(routeTradeType(signal({ signalScore: 69, confidence: 69 }), calm).type).not.toBe('FUTURES');
-    expect(routeTradeType(signal({ signalScore: 70, confidence: 70 }), calm).type).toBe('FUTURES');
-  });
-
-  it('70 is a BASE, not a ceiling: it still ramps to 85 at 8% ATR', () => {
+    expect(LEGACY_FUTURES_BASE_THRESHOLD).toBe(70);
     expect(dynamicConfidenceThreshold(LEGACY_FUTURES_BASE_THRESHOLD, 8)).toBe(85);
   });
 });
@@ -120,11 +128,12 @@ function proSignal(rawConfidence: number, confidence = rawConfidence): ProSignal
 }
 
 describe('Test 9 — Pro routes on the post-penalty confidence', () => {
-  it('blocks a trade whose penalties took it below the Spot bar', () => {
-    // raw 74 clears both bars; the penalties leave 55, which clears neither.
+  it('routes on the post-penalty number, and says so', () => {
+    // The score gates are gone, so a penalised signal is no longer BLOCKED by
+    // one — but which number the engine reports must still be the one it used.
+    // Printing the post-penalty confidence for a decision the raw score made
+    // was the original defect, and it would still be a lie today.
     const routed = routeProTradeType(proSignal(74, 55), proRegime());
-    expect(routed.type).toBe('HOLD');
-    // And the reason quotes the number that was actually compared.
     expect(routed.reason).toContain('55');
     expect(routed.reason).not.toContain('74');
   });
@@ -138,16 +147,12 @@ describe('Test 9 — Pro routes on the post-penalty confidence', () => {
     expect(routed.reason).toContain('confidence 75');
   });
 
-  it('an unpenalised signal is unchanged — this is not a new tax', () => {
-    // Backward compatibility: when nothing was withdrawn, confidence ===
-    // rawConfidence and every routing decision is exactly what it always was.
+  it('routes every score the same way once the gates are gone', () => {
+    // Regime decides, not the number. In a confirmed trend at safe volatility
+    // every one of these routes FUTURES — including the 55 that the old base of
+    // 72 refused.
     for (const score of [55, 60, 65, 70, 72, 80]) {
-      const before = routeProTradeType(proSignal(score), proRegime());
-      expect(before.type).toBe(
-        score >= proDynamicConfidenceThreshold(PRO_FUTURES_BASE_THRESHOLD, 2) ? 'FUTURES'
-          : score >= proDynamicConfidenceThreshold(PRO_SPOT_BASE_THRESHOLD, 2) ? 'SPOT'
-            : 'HOLD'
-      );
+      expect(routeProTradeType(proSignal(score), proRegime()).type).toBe('FUTURES');
     }
   });
 
@@ -220,5 +225,48 @@ describe('Test 10 — minConfidenceOverride changes trade eligibility', () => {
     const out = new ProAdapter().normalize(routed, ctx(undefined));
     expect(out.outcome).toBe('SIGNAL');
     expect(out.gate).toBe('COMPLETE');
+  });
+});
+
+// ── The exit engines must not read the wall clock ────────────────────────────
+//
+// `evaluateExit` and `evaluateProExit` computed hold time as
+// `Date.now() - openTimestamp`. In production that is right. In a replay of
+// 2025 data it made every position look about a year old, so the 72-hour
+// max-hold rule fired on the first exit check and no trade ever reached its
+// stop or its target. Every Legacy and Pro backtest run before this fix was
+// measuring a one-bar-hold strategy under those engines' names.
+
+describe('exit timing is injected, not read from the clock', () => {
+  const heldPosition = {
+    id: 'x', symbol: 'BTC', type: 'SPOT' as const, side: 'BUY' as const,
+    quantity: 1, entryPrice: 100, currentPrice: 101, avgPrice: 100,
+    leverage: 1, marginUsd: 100, notionalUsd: 100,
+    stopLoss: 95, takeProfit1: 110, takeProfit2: 120,
+    highestPrice: 101, lowestPrice: 100, tp1Hit: false,
+    openedAt: '', openTimestamp: Date.UTC(2025, 0, 1), entryFee: 0, reason: '', confidence: 50
+  };
+  const flat = { dailyDrawdownPercent: 0, weeklyDrawdownPercent: 0, systemLocked: false };
+  const scores = { buy: 0, sell: 0 };
+
+  it('does not time out a position that is one hour old on the bar’s clock', () => {
+    const oneHourIn = heldPosition.openTimestamp + 3_600_000;
+    const decision = evaluateExit(heldPosition, 101, 1, scores, { ...flat, now: oneHourIn });
+    expect(decision.exitType).not.toBe('TIME_BASED');
+  });
+
+  it('DOES time out the same position once the hold budget passes', () => {
+    // MAX_HOLD_HOURS.spot is 72.
+    const wellPast = heldPosition.openTimestamp + 80 * 3_600_000;
+    const decision = evaluateExit(heldPosition, 101, 1, scores, { ...flat, now: wellPast });
+    expect(decision.shouldExit).toBe(true);
+    expect(decision.exitType).toBe('TIME_BASED');
+  });
+
+  it('the backtest runner passes the bar timestamp, never Date.now()', () => {
+    const runner = readFileSync(join(process.cwd(), 'server/backtestRunner.ts'), 'utf8');
+    expect(runner).toContain('now: candle.timestamp');
+    // Two call sites: checkExitLegacy and checkExitPro.
+    expect(runner.match(/now: candle\.timestamp/g)?.length).toBeGreaterThanOrEqual(2);
   });
 });

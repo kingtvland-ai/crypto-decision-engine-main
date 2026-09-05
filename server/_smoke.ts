@@ -1,4 +1,4 @@
-import { detectMarketRegime, evaluateSignals, routeTradeType, calculateRiskParameters, evaluateExit, calculateTradingFee, simulateSlippage, calculateATR } from '@cde/engine/execution';
+import { detectMarketRegime, calculateTradingFee, simulateSlippage, calculateATR } from '@cde/engine/execution';
 import { coinGeckoApi } from '../src/services/coinGeckoApi';
 import { bybitApi } from '../src/services/bybitApi';
 

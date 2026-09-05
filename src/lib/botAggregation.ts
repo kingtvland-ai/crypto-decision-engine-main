@@ -13,7 +13,6 @@
  */
 
 import { SIM_BOT_STORAGE_KEY } from '../hooks/useSimulationBot';
-import { LEGACY_SIM_BOT_STORAGE_KEY } from '../hooks/useLegacySimulationBot';
 import { PRO_SIM_BOT_STORAGE_KEY } from '../hooks/useProSimulationBot';
 import { PATH_SIM_BOT_LAST_KNOWN_RUNNING_KEY } from '../contexts/PathSimulationBotContext';
 
@@ -30,7 +29,10 @@ import { PATH_SIM_BOT_LAST_KNOWN_RUNNING_KEY } from '../contexts/PathSimulationB
 export const SIM_CACHE_KEYS = [
   SIM_BOT_STORAGE_KEY,
   'simulation-bot-state-v1',
-  LEGACY_SIM_BOT_STORAGE_KEY,
+  // The Legacy bot itself is deleted, but a browser that ran it before this
+  // still has its snapshot cached under this literal key — there is no hook
+  // left to import the constant from, so it is spelled out once here.
+  'legacy-simulation-bot-state-v1',
   PRO_SIM_BOT_STORAGE_KEY,
   // The Path bot keeps no snapshot in the browser (it is server-only), but it
   // does remember whether it was running. Leaving that behind made a cleared

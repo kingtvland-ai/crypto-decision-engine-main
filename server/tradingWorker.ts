@@ -17,16 +17,13 @@ import { dirname, join } from 'node:path';
 import { config as loadEnv } from 'dotenv';
 // Server-side simulation engine (runs the bot 24/7 without a browser).
 import { createSimEngine, SimSnapshot } from './simEngine.ts';
-// Server-side legacy simulation engine (original alg.md algorithm) — same
-// server, same infra, only the decision logic differs (see legacySimEngine.ts).
-import { createLegacySimEngine, LegacySimSnapshot } from './legacySimEngine.ts';
 // Server-side "Bot Pro" — a literal, verified-faithful implementation of
 // ASSETS/alg.md, independent from the (drifted) legacy engine above. Same
 // server, same infra, only the decision logic differs (see proSimEngine.ts).
 import { createProSimEngine, ProSimSnapshot } from './proSimEngine.ts';
 // Fourth bot: trades a measured 15-minute slot inside the current 4H bar
 // rather than a chart score (see pathSimEngine.ts).
-import { createPathSimEngine, PathSimSnapshot, getPathTableStatus } from './pathSimEngine.ts';
+import { createPathSimEngine, installValidatedTable, PathSimSnapshot, getPathTableStatus } from './pathSimEngine.ts';
 // Core decision engine — single source of truth for Layers 0-3 (intraday MTF).
 import { evaluateIntradayDecision, IntradayDecision, IntradayTradeType as TradeType } from '@cde/engine/analysis';
 import { buildPortfolioRiskStats } from '@cde/engine';
@@ -35,12 +32,17 @@ import { buildPortfolioRiskStats } from '@cde/engine';
 // BOT_RISK_LEVEL) is layered on top below and stays owned by this file — the
 // browser cannot see those variables, which is exactly why they are NOT in the
 // shared module pretending to be defaults both runtimes agree on.
-import { simBotDefaults } from '@cde/engine/execution';
+import type { SimBotConfig, SimBotId } from '@cde/engine/execution';
+import {
+  simBotDefaults,
+  SIM_BOTS,
+  UI_FACING_SIM_PREFIXES,
+  type SimEnvOverrides
+} from '@cde/engine/execution';
 import { getMultiTimeframeData, exportMarketDataCache, importMarketDataCache, TIMEFRAME_SPECS, TIMEFRAME_ORDER, type TimeframeCacheEntry } from '@cde/engine/market-data';
 import { toBybitSymbol } from '@cde/engine/market-data';
 import { TARGET_SYMBOLS } from '@cde/engine/market-data';
 import { createKVStore, isDurableStorageConfigured } from './kvStore';
-import { runBacktestSweep } from './backtestRunner';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Local development reads the repository .env; Render variables retain precedence.
@@ -83,7 +85,14 @@ function optionalBoundedNumber(name: string, min: number, max: number): number |
 }
 // Optional floor across all three sims. Unset (the normal case) leaves each bot
 // on its own calibrated threshold — Intraday 52, Legacy 58, Pro 58.
+// A SCORE, applied to the three score-scaled bots. simBotDefaults() refuses to
+// apply it to the probability-scaled one; see ConfidenceScale in simDefaults.ts.
 const minConfidenceOverrideEnv = optionalBoundedNumber('BOT_MIN_CONFIDENCE', 1, 100);
+// The same knob for the one bot that speaks probabilities. Separate on purpose:
+// at BOT_MIN_CONFIDENCE=60 the Path bot was being asked for a bucket that hits
+// 60% of the time at a 1.5R target, which does not exist — so the single shared
+// knob silenced it entirely while reading as an ordinary setting.
+const pathMinConfidenceEnv = optionalBoundedNumber('BOT_PATH_MIN_CONFIDENCE', 1, 100);
 const positionPercent = boundedNumber('BOT_POSITION_PERCENT', 10, 0.1, 100);
 // ONE position cap for the live bot and for all three simulations. They used to
 // disagree (live 5, sims 7), which meant the sims were measuring a strategy the
@@ -105,10 +114,8 @@ const REQUEST_TIMEOUT_MS = boundedNumber('BOT_REQUEST_TIMEOUT_MS', 15000, 1000, 
 // results were produced by a different algorithm than the current one.
 export const ENGINE_VERSIONS = {
   intraday: '1.0.0',
-  legacy: '1.0.0',
   pro: '1.0.0',
   path: '1.0.0',
-  backtest: '1.0.0',
 } as const;
 
 
@@ -289,6 +296,29 @@ async function readJsonBody(req: { on: (event: string, handler: (chunk?: string 
   });
 }
 
+/**
+ * Route prefixes the browser reaches without a token.
+ *
+ * The four sim prefixes come from the registry rather than being listed here.
+ * They used to be a hand-written chain of `!startsWith(...)`, and it omitted
+ * `/api/path-sim/` — so all six of bot 4's endpoints answered 401 to a frontend
+ * that sends no Authorization header. Nothing failed loudly: start, stop,
+ * reset, config, state and table all just refused, the bot never received a
+ * start command, and the UI rendered a card that never moved. Deriving the list
+ * makes that omission unrepresentable.
+ *
+ * The REAL trading bot is deliberately NOT here. `/api/bot`, `/api/account` and
+ * `/api/decisions` move actual money and stay behind the token.
+ */
+const UNAUTHENTICATED_PREFIXES = [
+  ...UI_FACING_SIM_PREFIXES,
+  '/api/public'
+];
+
+function isUnauthenticatedRoute(pathname: string): boolean {
+  return UNAUTHENTICATED_PREFIXES.some((prefix) => pathname.startsWith(`${prefix}/`));
+}
+
 function authorized(req: { headers: { authorization?: string } }): boolean {
   if (!adminToken) return false;
   const header = req.headers.authorization || '';
@@ -450,12 +480,22 @@ async function checkClosedFuturesPositions(ctx: Awaited<ReturnType<typeof getAcc
 // Engine versions — bumped when the decision algorithm changes.
 
 const store = createKVStore('bot-state', join(DATA_DIR, 'bot-state.json'));
-const simStore = createKVStore('sim-state', join(DATA_DIR, 'sim-state.json'));
-const legacySimStore = createKVStore('legacy-sim-state', join(DATA_DIR, 'legacy-sim-state.json'));
-const proSimStore = createKVStore('pro-sim-state', join(DATA_DIR, 'pro-sim-state.json'));
-const pathSimStore = createKVStore('path-sim-state', join(DATA_DIR, 'path-sim-state.json'));
+/** Every sim bot's store, keyed off the registry so a new bot cannot be given a
+ *  key by hand that disagrees with its route. */
+function simStoreFor(id: keyof typeof SIM_BOTS) {
+  const key = SIM_BOTS[id].storeKey;
+  return createKVStore(key, join(DATA_DIR, `${key}.json`));
+}
+
+const simStore = simStoreFor('intraday');
+const proSimStore = simStoreFor('pro');
+const pathSimStore = simStoreFor('path');
+/** The validated 4H path table. Durable like every other artifact the worker
+ *  depends on — it used to be read from a gitignored local file that simply did
+ *  not exist on the server, so the bot silently fell back to an in-sample
+ *  rebuild while reporting nothing about the difference. */
+const pathTableStore = createKVStore('path-table', join(DATA_DIR, 'path-table.json'));
 const configStore = createKVStore('config', join(DATA_DIR, 'config.json'));
-const backtestStore = createKVStore('backtest-results', join(DATA_DIR, 'backtest-results.json'));
 
 const SIM_STATE_FILE = join(DATA_DIR, 'sim-state.json');
 const SIM_LEADER_TIMEOUT_MS = 8000;
@@ -507,14 +547,14 @@ function sanitizeSimConfig(cfg: Record<string, unknown>): Record<string, unknown
  *  capital it opened with, so retro-fitting a new number onto a run already in
  *  progress produces figures that describe no actual account — which is what
  *  editing that field used to do. Returns true when the run was reset. */
-function applySimConfigPatch<T extends { config: Record<string, unknown>; snapshot: unknown | null; running: boolean }>(
+function applySimConfigPatch<T extends { config: SimBotConfig; snapshot: unknown | null; running: boolean }>(
   state: T,
-  defaults: Record<string, unknown>,
+  defaults: SimBotConfig,
   patch: Record<string, unknown>,
   engine: { reset: (c: never) => void; getSnapshot: () => unknown; getInitialAmount: () => number }
 ): boolean {
   const before = engine.getInitialAmount();
-  state.config = { ...defaults, ...state.config, ...sanitizeSimConfig({ ...patch }) };
+  state.config = { ...defaults, ...state.config, ...sanitizeSimConfig({ ...patch }) } as SimBotConfig;
   const after = Number(state.config.initialAmount);
   if (!Number.isFinite(after) || after === before) return false;
   engine.reset(state.config as never);
@@ -522,11 +562,16 @@ function applySimConfigPatch<T extends { config: Record<string, unknown>; snapsh
   return true;
 }
 
-const DEFAULT_SIM_CONFIG = {
-  ...simBotDefaults('intraday'),
-  riskLevel, maxPositions: maxOpenPositions, positionPercent,
-  ...(minConfidenceOverrideEnv === undefined ? {} : { minConfidenceOverride: minConfidenceOverrideEnv })
+/** The deploy-time layer, gathered once and handed to the registry. */
+const SIM_ENV: SimEnvOverrides = {
+  minConfidence: minConfidenceOverrideEnv,
+  pathMinConfidence: pathMinConfidenceEnv,
+  positionPercent,
+  maxPositions: maxOpenPositions,
+  riskLevel
 };
+
+const DEFAULT_SIM_CONFIG = simBotDefaults('intraday', SIM_ENV);
 const simState = {
   running: false, config: { ...DEFAULT_SIM_CONFIG } as typeof DEFAULT_SIM_CONFIG,
   snapshot: null as unknown | null, leaderId: null as string | null,
@@ -559,39 +604,7 @@ async function persistSim() {
   }));
 }
 
-const DEFAULT_LEGACY_SIM_CONFIG = {
-  ...simBotDefaults('legacy'),
-  riskLevel, maxPositions: maxOpenPositions, positionPercent,
-  ...(minConfidenceOverrideEnv === undefined ? {} : { minConfidenceOverride: minConfidenceOverrideEnv })
-};
-const legacySimState = { running: false, config: { ...DEFAULT_LEGACY_SIM_CONFIG } as typeof DEFAULT_LEGACY_SIM_CONFIG, snapshot: null as unknown | null, updatedAt: 0, engineVersion: ENGINE_VERSIONS.legacy as string };
-
-const legacySimEngine = createLegacySimEngine(() => symbols);
-
-async function hydrateLegacySim() {
-  const saved = await legacySimStore.get('state');
-  if (!saved) return;
-  const s = JSON.parse(saved) as Record<string, unknown>;
-  legacySimState.running = typeof s.running === 'boolean' ? s.running : false;
-  legacySimState.config = { ...DEFAULT_LEGACY_SIM_CONFIG, ...sanitizeSimConfig(typeof s.config === 'object' && s.config !== null ? { ...s.config as Record<string, unknown> } : {}) };
-  legacySimState.snapshot = s.snapshot ?? null;
-  legacySimState.updatedAt = typeof s.updatedAt === 'number' ? s.updatedAt : 0;
-  legacySimState.engineVersion = typeof s.engineVersion === 'string' ? s.engineVersion : ENGINE_VERSIONS.legacy;
-}
-
-async function persistLegacySim() {
-  await legacySimStore.set('state', JSON.stringify({
-    running: legacySimState.running, config: legacySimState.config,
-    snapshot: legacySimState.snapshot, updatedAt: legacySimState.updatedAt,
-    engineVersion: legacySimState.engineVersion
-  }));
-}
-
-const DEFAULT_PRO_SIM_CONFIG = {
-  ...simBotDefaults('pro'),
-  riskLevel, maxPositions: maxOpenPositions, positionPercent,
-  ...(minConfidenceOverrideEnv === undefined ? {} : { minConfidenceOverride: minConfidenceOverrideEnv })
-};
+const DEFAULT_PRO_SIM_CONFIG = simBotDefaults('pro', SIM_ENV);
 const proSimState = { running: false, config: { ...DEFAULT_PRO_SIM_CONFIG } as typeof DEFAULT_PRO_SIM_CONFIG, snapshot: null as unknown | null, updatedAt: 0, engineVersion: ENGINE_VERSIONS.pro as string };
 
 const proSimEngine = createProSimEngine(() => symbols);
@@ -619,16 +632,35 @@ async function persistProSim() {
 // Same config shape and the same shared defaults as the other three: the point
 // of the fourth bot is to isolate its DECISION layer, so every other variable
 // (capital, position cap, costs, sizing ceiling) is deliberately identical.
-// maxFuturesPositions is 0 and minConfidenceOverride is 33 (a probability, not
-// a score) — both come from the shared table, where the reasoning lives.
-const DEFAULT_PATH_SIM_CONFIG = {
-  ...simBotDefaults('path'),
-  riskLevel, maxPositions: maxOpenPositions, positionPercent,
-  ...(minConfidenceOverrideEnv === undefined ? {} : { minConfidenceOverride: minConfidenceOverrideEnv })
-};
+// maxFuturesPositions is 0 (spot-only) and the confidence floor is a
+// PROBABILITY, so BOT_MIN_CONFIDENCE deliberately does not reach it — only
+// BOT_PATH_MIN_CONFIDENCE does. The registry enforces that, not this line.
+const DEFAULT_PATH_SIM_CONFIG = simBotDefaults('path', SIM_ENV);
 const pathSimState = { running: false, config: { ...DEFAULT_PATH_SIM_CONFIG } as typeof DEFAULT_PATH_SIM_CONFIG, snapshot: null as unknown | null, updatedAt: 0, engineVersion: ENGINE_VERSIONS.path as string };
 
 const pathSimEngine = createPathSimEngine(() => symbols);
+
+/**
+ * Installs the validated 4H table from durable storage at boot.
+ *
+ * Boot, not tick: `buildEvaluations` is synchronous, so a network read inside it
+ * would either block the tick or resolve after the decision it was meant to
+ * inform. Failure is not fatal — the bot falls back to its in-sample rebuild and
+ * `/api/path-sim/table` reports `source` so the difference is visible rather
+ * than assumed.
+ */
+async function hydratePathTable() {
+  try {
+    const saved = await pathTableStore.get('table');
+    if (!saved) {
+      console.log('[path-table] none stored — the Path bot will rebuild in-sample until one is published');
+      return;
+    }
+    installValidatedTable(JSON.parse(saved));
+  } catch (e) {
+    console.warn('[path-table] unreadable, falling back to the in-sample rebuild:', e instanceof Error ? e.message : String(e));
+  }
+}
 
 async function hydratePathSim() {
   const saved = await pathSimStore.get('state');
@@ -647,85 +679,6 @@ async function persistPathSim() {
     snapshot: pathSimState.snapshot, updatedAt: pathSimState.updatedAt,
     engineVersion: pathSimState.engineVersion
   }));
-}
-
-// ── Backtest state ──────────────────────────────────────────────────────────
-import type { SweepResult } from './backtestRunner';
-
-interface BacktestState {
-  status: 'idle' | 'running' | 'done' | 'error';
-  startedAt: number | null;
-  finishedAt: number | null;
-  results: SweepResult[];
-  error: string | null;
-  engine: string | null;
-  days: number | null;
-  engineVersion: string;
-}
-
-const backtestState: BacktestState = {
-  status: 'idle', startedAt: null, finishedAt: null, results: [], error: null, engine: null, days: null, engineVersion: '1.0.0'
-};
-
-async function hydrateBacktest(): Promise<void> {
-  const saved = await backtestStore.get('state');
-  if (!saved) return;
-  const s = JSON.parse(saved) as BacktestState;
-  const hydratedStatus = s.status ?? 'idle';
-  if (hydratedStatus === 'running') {
-    backtestState.status = 'error';
-    backtestState.error = 'interrupted by restart';
-    backtestState.startedAt = null;
-    backtestState.finishedAt = Date.now();
-    await persistBacktest();
-  } else {
-    backtestState.status = hydratedStatus;
-    backtestState.startedAt = s.startedAt ?? null;
-    backtestState.finishedAt = s.finishedAt ?? null;
-  }
-  backtestState.results = Array.isArray(s.results) ? s.results : [];
-  backtestState.error = s.error ?? null;
-  backtestState.engine = s.engine ?? null;
-  backtestState.days = s.days ?? null;
-  backtestState.engineVersion = typeof s.engineVersion === 'string' ? s.engineVersion : ENGINE_VERSIONS.backtest;
-}
-
-const BACKTEST_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-
-async function persistBacktest(): Promise<void> {
-  await backtestStore.set('state', JSON.stringify({
-    ...backtestState,
-    engineVersion: ENGINE_VERSIONS.backtest,
-  }), BACKTEST_TTL_MS);
-}
-
-// Run backtest for both engines in background
-async function runBacktestInBackground(): Promise<void> {
-  const DAYS = 120;
-  const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT', 'AVAXUSDT', 'AAVEUSDT'];
-  try {
-    // Run legacy first, then pro
-    const legacyResults = await runBacktestSweep({
-      engine: 'legacy', days: DAYS, symbols: SYMBOLS, concurrency: 4,
-      onProgress: (msg) => console.log(`[backtest] legacy: ${msg}`),
-    });
-    const proResults = await runBacktestSweep({
-      engine: 'pro', days: DAYS, symbols: SYMBOLS, concurrency: 4,
-      onProgress: (msg) => console.log(`[backtest] pro: ${msg}`),
-    });
-    backtestState.status = 'done';
-    backtestState.finishedAt = Date.now();
-    backtestState.results = [...legacyResults, ...proResults];
-    backtestState.engine = 'legacy+pro';
-    backtestState.days = DAYS;
-    backtestState.error = null;
-  } catch (e: unknown) {
-    backtestState.status = 'error';
-    backtestState.finishedAt = Date.now();
-    backtestState.error = e instanceof Error ? e.message : String(e);
-  } finally {
-    await persistBacktest();
-  }
 }
 
 function serializeState(): string {
@@ -1252,7 +1205,6 @@ createServer(async (req: BotRequest, res: BotResponse) => {
   if (req.method === 'GET' && url.pathname === '/api/public/sim-defaults') {
     return json(res, 200, {
       intraday: DEFAULT_SIM_CONFIG,
-      legacy: DEFAULT_LEGACY_SIM_CONFIG,
       pro: DEFAULT_PRO_SIM_CONFIG,
       path: DEFAULT_PATH_SIM_CONFIG,
       // Which of the four environment variables are actually set here. The
@@ -1260,6 +1212,7 @@ createServer(async (req: BotRequest, res: BotResponse) => {
       // deployments that disagree does.
       envOverrides: {
         minConfidence: minConfidenceOverrideEnv ?? null,
+        pathMinConfidence: pathMinConfidenceEnv ?? null,
         positionPercent,
         maxOpenPositions,
         riskLevel
@@ -1273,7 +1226,7 @@ createServer(async (req: BotRequest, res: BotResponse) => {
     return json(res, 200, { value: fg.value, value_classification: fg.value_classification, timestamp: fg.timestamp, cachedAt: fg.at });
   }
 
-  if (url.pathname.startsWith('/api/') && !url.pathname.startsWith('/api/sim/') && !url.pathname.startsWith('/api/legacy-sim/') && !url.pathname.startsWith('/api/pro-sim/') && !url.pathname.startsWith('/api/backtest/') && !url.pathname.startsWith('/api/public/') && !authorized(req)) {
+  if (url.pathname.startsWith('/api/') && !isUnauthenticatedRoute(url.pathname) && !authorized(req)) {
     return json(res, 401, { error: 'Unauthorized' });
   }
 
@@ -1395,42 +1348,6 @@ createServer(async (req: BotRequest, res: BotResponse) => {
     return json(res, 200, simState);
   }
 
-  if (req.method === 'GET' && url.pathname === '/api/legacy-sim/state') {
-    return json(res, 200, legacySimState);
-  }
-
-  if (req.method === 'POST' && url.pathname === '/api/legacy-sim/start') {
-    legacySimState.running = true;
-    await persistLegacySim();
-    return json(res, 200, legacySimState);
-  }
-
-  if (req.method === 'POST' && url.pathname === '/api/legacy-sim/stop') {
-    legacySimState.running = false;
-    await persistLegacySim();
-    return json(res, 200, legacySimState);
-  }
-
-  if (req.method === 'POST' && url.pathname === '/api/legacy-sim/reset') {
-    legacySimState.running = false;
-    legacySimEngine.reset(legacySimState.config);
-    legacySimState.snapshot = legacySimEngine.getSnapshot();
-    legacySimState.updatedAt = Date.now();
-    await persistLegacySim();
-    return json(res, 200, legacySimState);
-  }
-
-  if (req.method === 'POST' && url.pathname === '/api/legacy-sim/config') {
-    const body = await readJsonBody(req);
-    if (body && typeof body.config === 'object' && body.config !== null) {
-      if (applySimConfigPatch(legacySimState, DEFAULT_LEGACY_SIM_CONFIG, body.config as Record<string, unknown>, legacySimEngine)) {
-        legacySimState.updatedAt = Date.now();
-      }
-    }
-    await persistLegacySim();
-    return json(res, 200, legacySimState);
-  }
-
   if (req.method === 'GET' && url.pathname === '/api/pro-sim/state') {
     return json(res, 200, proSimState);
   }
@@ -1474,6 +1391,26 @@ createServer(async (req: BotRequest, res: BotResponse) => {
 
   // Table telemetry: an empty table and a quiet market both produce no trades,
   // and they are not the same situation.
+  // Publishing a table CHANGES WHAT THE BOT TRADES, so unlike the rest of the
+  // path-sim namespace this one is not UI-facing and stays behind the token.
+  // scripts/pathStudy.ts publish is the intended caller.
+  if (req.method === 'POST' && url.pathname === '/api/path-sim/table') {
+    if (!authorized(req)) return json(res, 401, { error: 'Unauthorized' });
+    const body = await readJsonBody(req);
+    if (!body || !Array.isArray((body as { table?: unknown }).table)) {
+      return json(res, 400, { error: 'expected { table: PathBucket[] , … }' });
+    }
+    const serialised = JSON.stringify(body);
+    // Firestore caps a document at 1MiB. Refuse loudly rather than write a
+    // document that silently fails to save.
+    if (serialised.length > 900_000) {
+      return json(res, 413, { error: `table too large (${serialised.length} bytes; cap ~900KB)` });
+    }
+    await pathTableStore.set('table', serialised);
+    const installed = installValidatedTable(body as Parameters<typeof installValidatedTable>[0]);
+    return json(res, 200, { ok: installed, buckets: (body as { table: unknown[] }).table.length });
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/path-sim/table') {
     return json(res, 200, getPathTableStatus());
   }
@@ -1510,26 +1447,6 @@ createServer(async (req: BotRequest, res: BotResponse) => {
     return json(res, 200, pathSimState);
   }
 
-  // ── Backtest endpoints ───────────────────────────────────────────────────
-  if (req.method === 'GET' && url.pathname === '/api/backtest/results') {
-    return json(res, 200, backtestState);
-  }
-
-  if (req.method === 'POST' && url.pathname === '/api/backtest/run') {
-    if (backtestState.status === 'running') {
-      return json(res, 409, { error: 'Backtest already running', startedAt: backtestState.startedAt });
-    }
-    backtestState.status = 'running';
-    backtestState.startedAt = Date.now();
-    backtestState.finishedAt = null;
-    backtestState.results = [];
-    backtestState.error = null;
-    await persistBacktest();
-    // Run in background — return immediately
-    void runBacktestInBackground();
-    return json(res, 202, { status: 'running', startedAt: backtestState.startedAt });
-  }
-
   return json(res, 404, { error: 'Not found' });
 }).listen(port, async () => {
   // On a free-tier host the local disk is wiped on every restart/spin-down —
@@ -1545,13 +1462,11 @@ createServer(async (req: BotRequest, res: BotResponse) => {
   await hydrateMarketCache();
   await hydrateSim();
   if (simState.snapshot) simEngine.hydrate(simState.snapshot as SimSnapshot);
-  await hydrateLegacySim();
-  if (legacySimState.snapshot) legacySimEngine.hydrate(legacySimState.snapshot as LegacySimSnapshot);
   await hydrateProSim();
   if (proSimState.snapshot) proSimEngine.hydrate(proSimState.snapshot as ProSimSnapshot);
   await hydratePathSim();
+  await hydratePathTable();
   if (pathSimState.snapshot) pathSimEngine.hydrate(pathSimState.snapshot as PathSimSnapshot);
-  await hydrateBacktest();
   console.log('[cors] allowed origins: [' + allowedOrigins.join(', ') + ']' + (allowedOrigins.length === 0 ? ' (wildcard)' : ''));
   console.log(`Trading worker listening on ${port} | mode=${testnet ? 'testnet' : 'live'} | dryRun=${dryRun} | symbols=${symbols.length} | risk=${riskLevel} | cors=${allowedOrigins.join(',') || '*'}`);
   if (state.running) void scan();
@@ -1588,25 +1503,6 @@ createServer(async (req: BotRequest, res: BotResponse) => {
     }
   }, SELF_PING_INTERVAL_MS);
 
-  // Weekly auto-run backtest: check every hour if 7 days have passed since last run
-  const WEEKLY_BACKTEST_CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
-  const WEEKLY_BACKTEST_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-  setInterval(async () => {
-    if (backtestState.status === 'running') return;
-    const lastFinished = backtestState.finishedAt;
-    const shouldRun = !lastFinished || (Date.now() - lastFinished > WEEKLY_BACKTEST_INTERVAL_MS);
-    if (shouldRun) {
-      console.log('[backtest] weekly auto-run triggered');
-      backtestState.status = 'running';
-      backtestState.startedAt = Date.now();
-      backtestState.finishedAt = null;
-      backtestState.results = [];
-      backtestState.error = null;
-      await persistBacktest();
-      void runBacktestInBackground();
-    }
-  }, WEEKLY_BACKTEST_CHECK_INTERVAL_MS);
-
   // Each sim engine still TICKS every 4s (evaluation + mark-to-market + order
   // fills need that cadence to stay responsive), but the snapshot it produces
   // was previously PERSISTED (Firestore PATCH + local-file read-modify-write)
@@ -1618,108 +1514,68 @@ createServer(async (req: BotRequest, res: BotResponse) => {
   // call persistX() directly at their own call sites) and on shutdown below,
   // so at most SIM_PERSIST_INTERVAL_MS of history is at risk on a hard crash.
   const SIM_PERSIST_INTERVAL_MS = 30_000;
-  let lastSimPersistAt = 0;
-  let lastLegacySimPersistAt = 0;
-  let lastProSimPersistAt = 0;
 
-  let simTickInProgress = false;
+  // Fear & Greed is one number for the whole market, so the four bots share one
+  // fetch rather than pulling it four times a minute between them.
   let cachedSimFearGreed = 50;
   let lastFgFetchAt = 0;
-  setInterval(async () => {
-    if (!simState.running || simTickInProgress) return;
-    simTickInProgress = true;
-    try {
-      const now = Date.now();
-      if (now - lastFgFetchAt > 15 * 60 * 1000) {
-        cachedSimFearGreed = await fetchFearGreed();
-        lastFgFetchAt = now;
-      }
-      const snap = await simEngine.tick(simState.config, cachedSimFearGreed);
-      simState.snapshot = snap;
-      simState.updatedAt = Date.now();
-      if (now - lastSimPersistAt >= SIM_PERSIST_INTERVAL_MS) {
-        await persistSim();
-        lastSimPersistAt = now;
-      }
-    } catch (e: unknown) {
-      console.warn('[sim-engine] tick failed:', e instanceof Error ? e.message : String(e));
-    } finally {
-      simTickInProgress = false;
+  async function currentFearGreed(now: number): Promise<number> {
+    if (now - lastFgFetchAt > 15 * 60 * 1000) {
+      cachedSimFearGreed = await fetchFearGreed();
+      lastFgFetchAt = now;
     }
-  }, 4000);
+    return cachedSimFearGreed;
+  }
 
-  let legacySimTickInProgress = false;
-  setInterval(async () => {
-    if (!legacySimState.running || legacySimTickInProgress) return;
-    legacySimTickInProgress = true;
-    try {
-      const now = Date.now();
-      if (now - lastFgFetchAt > 15 * 60 * 1000) {
-        cachedSimFearGreed = await fetchFearGreed();
-        lastFgFetchAt = now;
-      }
-      const snap = await legacySimEngine.tick(legacySimState.config, cachedSimFearGreed);
-      legacySimState.snapshot = snap;
-      legacySimState.updatedAt = Date.now();
-      if (now - lastLegacySimPersistAt >= SIM_PERSIST_INTERVAL_MS) {
-        await persistLegacySim();
-        lastLegacySimPersistAt = now;
-      }
-    } catch (e: unknown) {
-      console.warn('[legacy-sim-engine] tick failed:', e instanceof Error ? e.message : String(e));
-    } finally {
-      legacySimTickInProgress = false;
-    }
-  }, 4000);
+  /**
+   * One ticker, driven by the registry.
+   *
+   * This replaced four near-identical 25-line loops that differed only in which
+   * state object, engine and persist function they named. Four copies of a loop
+   * is four places to fix a bug in it, and — as the auth guard's exempt list
+   * showed — one place to forget a bot entirely.
+   *
+   * The 4s interval is the engine's own cadence: pending orders have an
+   * execution delay measured in seconds and need that responsiveness. Persisting
+   * on every tick was ~900 writes/hour per engine, so writes are throttled to
+   * SIM_PERSIST_INTERVAL_MS while the in-memory snapshot (what /state serves)
+   * still updates every tick. start/stop/reset/config force an unthrottled
+   * flush at their own call sites, and so does shutdown, so a hard crash risks
+   * at most one interval of history.
+   */
+  function startSimTicker(
+    id: SimBotId,
+    state: { running: boolean; config: SimBotConfig; snapshot: unknown | null; updatedAt: number },
+    engine: { tick: (config: SimBotConfig, fearGreed: number) => Promise<unknown> },
+    persist: () => Promise<void>
+  ): void {
+    const logPrefix = `[${SIM_BOTS[id].storeKey.replace('-state', '')}-engine]`;
+    let tickInProgress = false;
+    let lastPersistAt = 0;
 
-  let proSimTickInProgress = false;
-  setInterval(async () => {
-    if (!proSimState.running || proSimTickInProgress) return;
-    proSimTickInProgress = true;
-    try {
-      const now = Date.now();
-      if (now - lastFgFetchAt > 15 * 60 * 1000) {
-        cachedSimFearGreed = await fetchFearGreed();
-        lastFgFetchAt = now;
+    setInterval(async () => {
+      if (!state.running || tickInProgress) return;
+      tickInProgress = true;
+      try {
+        const now = Date.now();
+        const snap = await engine.tick(state.config, await currentFearGreed(now));
+        state.snapshot = snap;
+        state.updatedAt = Date.now();
+        if (now - lastPersistAt >= SIM_PERSIST_INTERVAL_MS) {
+          await persist();
+          lastPersistAt = now;
+        }
+      } catch (e: unknown) {
+        console.warn(`${logPrefix} tick failed:`, e instanceof Error ? e.message : String(e));
+      } finally {
+        tickInProgress = false;
       }
-      const snap = await proSimEngine.tick(proSimState.config, cachedSimFearGreed);
-      proSimState.snapshot = snap;
-      proSimState.updatedAt = Date.now();
-      if (now - lastProSimPersistAt >= SIM_PERSIST_INTERVAL_MS) {
-        await persistProSim();
-        lastProSimPersistAt = now;
-      }
-    } catch (e: unknown) {
-      console.warn('[pro-sim-engine] tick failed:', e instanceof Error ? e.message : String(e));
-    } finally {
-      proSimTickInProgress = false;
-    }
-  }, 4000);
+    }, 4000);
+  }
 
-  let pathSimTickInProgress = false;
-  let lastPathSimPersistAt = 0;
-  setInterval(async () => {
-    if (!pathSimState.running || pathSimTickInProgress) return;
-    pathSimTickInProgress = true;
-    try {
-      const now = Date.now();
-      if (now - lastFgFetchAt > 15 * 60 * 1000) {
-        cachedSimFearGreed = await fetchFearGreed();
-        lastFgFetchAt = now;
-      }
-      const snap = await pathSimEngine.tick(pathSimState.config, cachedSimFearGreed);
-      pathSimState.snapshot = snap;
-      pathSimState.updatedAt = Date.now();
-      if (now - lastPathSimPersistAt >= SIM_PERSIST_INTERVAL_MS) {
-        await persistPathSim();
-        lastPathSimPersistAt = now;
-      }
-    } catch (e: unknown) {
-      console.warn('[path-sim-engine] tick failed:', e instanceof Error ? e.message : String(e));
-    } finally {
-      pathSimTickInProgress = false;
-    }
-  }, 4000);
+  startSimTicker('intraday', simState, simEngine, persistSim);
+  startSimTicker('pro', proSimState, proSimEngine, persistProSim);
+  startSimTicker('path', pathSimState, pathSimEngine, persistPathSim);
 });
 
 async function shutdown(signal: string): Promise<void> {
@@ -1731,7 +1587,6 @@ async function shutdown(signal: string): Promise<void> {
   // Force-flush the throttled sim snapshots too — otherwise up to
   // SIM_PERSIST_INTERVAL_MS of in-memory-only history is lost on restart.
   try { await persistSim(); } catch { /* ignore */ }
-  try { await persistLegacySim(); } catch { /* ignore */ }
   try { await persistProSim(); } catch { /* ignore */ }
   process.exit(0);
 }

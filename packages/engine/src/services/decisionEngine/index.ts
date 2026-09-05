@@ -3,13 +3,18 @@
  * ============================================================================
  * Public API for the DecisionEngine module.
  *
+ * Only Intraday (the real bot's multi-timeframe engine) and Path (bot 4) use
+ * this pipeline framework. Legacy has been deleted, and Pro's alg.md algorithm
+ * is a single weighted score with no stages to pipeline — it calls
+ * `computeProSignal` / `generateProOrders` directly (see
+ * `server/proSimEngine.ts`), the same way Path used to be the odd one out.
+ *
  * Usage:
- *   import { DecisionEngine, IntradayAdapter, LegacyAdapter, ProAdapter } from './decisionEngine';
+ *   import { DecisionEngine, IntradayAdapter, PathAdapter } from './decisionEngine';
  *
  *   const engine = new DecisionEngine();
  *   engine.registerAdapter(new IntradayAdapter());
- *   engine.registerAdapter(new LegacyAdapter());
- *   engine.registerAdapter(new ProAdapter());
+ *   engine.registerAdapter(new PathAdapter());
  *
  *   const result = await engine.evaluate({
  *     symbol: 'BTCUSDT',
@@ -26,8 +31,6 @@ export { DecisionEngine } from './orchestrator';
 export type { DecisionEngineOptions } from './orchestrator';
 
 export { IntradayAdapter } from './adapters/intradayAdapter';
-export { LegacyAdapter } from './adapters/legacyAdapter';
-export { ProAdapter } from './adapters/proAdapter';
 export { PathAdapter } from './adapters/pathAdapter';
 export type { PathEngineParams } from './adapters/pathAdapter';
 

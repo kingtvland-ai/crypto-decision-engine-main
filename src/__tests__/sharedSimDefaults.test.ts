@@ -60,9 +60,11 @@ describe('no second copy of the defaults survives', () => {
   it('the worker builds every sim config from the shared module', () => {
     const worker = read('server/tradingWorker.ts');
     for (const bot of BOTS) {
-      expect(worker).toContain(`simBotDefaults('${bot}')`);
+      // Built from the registry, with the environment layer passed IN rather
+      // than spread over the result afterwards — that spread was how the
+      // score-scaled BOT_MIN_CONFIDENCE reached the probability-scaled bot.
+      expect(worker).toContain(`simBotDefaults('${bot}', SIM_ENV)`);
     }
-    // The old literals: `minConfidenceOverride: minConfidenceOverrideEnv ?? 58`.
     expect(worker).not.toMatch(/minConfidenceOverrideEnv \?\? \d+/);
   });
 
@@ -117,10 +119,14 @@ describe('config bootstrap endpoint', () => {
   });
 
   it('is public, like /api/public/universe — it carries no credential', () => {
-    // The auth guard exempts the /api/public/ prefix; a route outside it would
+    // The auth guard exempts the /api/public prefix; a route outside it would
     // 401 the very unauthenticated callers that already read /api/sim/state.
+    // The exempt list is now derived (see simBotRegistry.test.ts) rather than
+    // being a hand-written chain, so assert the list, not the old expression.
     expect(ROUTE.startsWith('/api/public/')).toBe(true);
-    expect(read('server/tradingWorker.ts')).toContain("!url.pathname.startsWith('/api/public/')");
+    const worker = read('server/tradingWorker.ts');
+    expect(worker).toContain('UNAUTHENTICATED_PREFIXES');
+    expect(worker).toContain("'/api/public'");
   });
 
   it('the client calls the same path the worker serves', () => {

@@ -329,6 +329,16 @@ export interface PathTableStatus {
     snapshotTo?: string;
     survivors?: number;
   } | null;
+  /** Why the table is the size it is — an empty table has two very different
+   *  causes and the bucket count alone cannot tell them apart.
+   *  'ok'                 — the rebuild ran on real history.
+   *  'warming-up'         — every symbol was skipped for want of candles. Clears
+   *                          itself as the series fills; NOT a strategy result.
+   *  'no-validated-table' — running the in-sample fallback; nothing published. */
+  readiness?: 'ok' | 'warming-up' | 'no-validated-table';
+  skippedForHistory?: number;
+  symbolsSeen?: number;
+  minCandlesRequired?: number;
   builtAt: number;
   sourceBars: number;
   minSamples: number;

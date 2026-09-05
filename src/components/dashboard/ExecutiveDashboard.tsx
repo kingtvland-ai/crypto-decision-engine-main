@@ -22,7 +22,6 @@ import {
 import { createTradingApiClient } from '@/services/tradingApiClient';
 import type { WorkerAccountSummary, WorkerBotState } from '@/services/tradingApiClient';
 import { useSimulationBotContextSafe } from '@/contexts/SimulationBotContext';
-import { useLegacySimulationBotContextSafe } from '@/contexts/LegacySimulationBotContext';
 import { useProSimulationBotContextSafe } from '@/contexts/ProSimulationBotContext';
 import type { SimPosition, SimTrade } from '@/hooks/useSimulationBot';
 import { useWorkerAuth } from '@/contexts/WorkerAuthContext';
@@ -41,7 +40,6 @@ export const ExecutiveDashboard: React.FC = () => {
   // the dashboard reflects real-time data). Falls back to the last persisted
   // snapshot in localStorage when the provider is unavailable.
   const sim = useSimulationBotContextSafe();
-  const legacy = useLegacySimulationBotContextSafe();
   const pro = useProSimulationBotContextSafe();
 
   interface SimSource {
@@ -114,7 +112,6 @@ export const ExecutiveDashboard: React.FC = () => {
   };
 
   const simState = deriveSimState(sim, 'simulation-bot-state-v2', 'sim-bot-last-known-running');
-  const legacyState = deriveSimState(legacy, 'legacy-simulation-bot-state-v1', 'legacy-sim-bot-last-known-running');
   const proState = deriveSimState(pro, 'pro-simulation-bot-state-v1', 'pro-sim-bot-last-known-running');
 
   // Shared with RealTradingBot.tsx via context (lives above the router, so it
@@ -369,62 +366,6 @@ export const ExecutiveDashboard: React.FC = () => {
           </CardContent>
         </Card>
 
-        {/* Legacy Simulation Bot */}
-        <Card className="border-border/60 bg-card hover:border-cyan-400/40 transition-all shadow-md">
-          <CardHeader className="pb-3 flex flex-row items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <div className="p-2 rounded-lg bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
-                <Bot className="w-5 h-5" />
-              </div>
-              <div>
-                <CardTitle className="text-base font-bold font-mono">מנוע מקורי · Confidence Score</CardTitle>
-                <p className="text-xs text-muted-foreground font-mono">ציון משוקלל 7 אינדיקטורים</p>
-              </div>
-            </div>
-            <Badge variant="outline" className="font-mono text-xs text-cyan-400 border-cyan-500/30">
-              {legacyState?.isRunning
-                ? (legacyState.positionsCount > 0 ? `🟢 ${legacyState.positionsCount} פוזיציות פעילות` : "🟢 פועל — ממתין לאותות")
-                : legacyState && legacyState.positionsCount > 0
-                  ? `🟡 מושהה • ${legacyState.positionsCount} פוזיציות`
-                  : "ממתין לאותות"}
-            </Badge>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid grid-cols-3 gap-2 text-center">
-              <div className="p-2.5 rounded-lg bg-background/80 border border-border/40">
-                <div className="text-[11px] text-muted-foreground font-mono">יתרת סימולציה</div>
-                <div className="text-lg font-bold font-mono text-foreground mt-0.5">
-                  ${legacyState?.cash.toLocaleString('en-US', { maximumFractionDigits: 0 }) ?? '$10,000'}
-                </div>
-              </div>
-              <div className="p-2.5 rounded-lg bg-background/80 border border-border/40">
-                <div className="text-[11px] text-muted-foreground font-mono">סך רווח / הפסד</div>
-                <div className={`text-lg font-bold font-mono mt-0.5 ${(legacyState?.totalProfit || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                  {(legacyState?.totalProfit || 0) >= 0 ? '+' : ''}${legacyState?.totalProfit.toFixed(0) ?? '0'}
-                </div>
-              </div>
-              <div className="p-2.5 rounded-lg bg-background/80 border border-border/40">
-                <div className="text-[11px] text-muted-foreground font-mono">אחוז הצלחה</div>
-                <div className="text-lg font-bold font-mono text-cyan-400 mt-0.5">
-                  {legacyState?.winRate.toFixed(1) ?? '0'}%
-                </div>
-              </div>
-            </div>
-            <div className="flex items-center justify-between pt-2 border-t border-border/40">
-              <div className="text-xs text-muted-foreground font-mono flex items-center gap-1.5">
-                <Activity className="w-3.5 h-3.5 text-cyan-400" />
-                <span>מנוע מקורי · Confidence Score</span>
-              </div>
-              <Link to="/simulation-bot">
-                <Button variant="ghost" size="sm" className="font-mono text-xs gap-1 h-7 px-2 text-primary hover:text-primary">
-                  כניסה לסימולציה
-                  <ChevronRight className="w-3.5 h-3.5" />
-                </Button>
-              </Link>
-            </div>
-          </CardContent>
-        </Card>
-
         {/* Pro Simulation Bot */}
         <Card className="border-border/60 bg-card hover:border-amber-400/40 transition-all shadow-md">
           <CardHeader className="pb-3 flex flex-row items-center justify-between">
@@ -434,7 +375,7 @@ export const ExecutiveDashboard: React.FC = () => {
               </div>
               <div>
                 <CardTitle className="text-base font-bold font-mono">בוט פרו · alg.md</CardTitle>
-                <p className="text-xs text-muted-foreground font-mono">מימוש מדויק של alg.md — Kelly, קנסות</p>
+                <p className="text-xs text-muted-foreground font-mono">מימוש מדויק של alg.md — ציון משוקלל 8 אינדיקטורים</p>
               </div>
             </div>
             <Badge variant="outline" className="font-mono text-xs text-amber-400 border-amber-500/30">

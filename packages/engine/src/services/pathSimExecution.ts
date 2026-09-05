@@ -33,10 +33,29 @@ import { PATH_MAX_HOLD_MS, PATH_TIME_STOP_MS } from './pathEngine';
 import { pathKellyFraction } from './pathEngine';
 import type { PathBucket } from './pathStudy';
 
+
 export const uid = (p: string) => `path-${p}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
-/** H1 candles needed before the engine can build 61 closed 4H bars. */
-export const MIN_PATH_CANDLES = 244;
+/**
+ * H1 candles the Path engine needs before it can build a usable 4H series.
+ *
+ * DERIVED, not chosen. It was written as a bare 244 while the fetcher's own
+ * spec asks for 240 (TIMEFRAME_SPECS['1h'].targetCandles), so on a cold start
+ * every symbol failed this check and the table came back empty — a bot that
+ * looked like it had found nothing when in fact it had never been given
+ * anything to look at. In steady state the delta merge grows the series well
+ * past either number, which is precisely why the mismatch survived: it only
+ * bites the first few hours after a fresh deploy, when nobody is watching the
+ * one metric that would show it.
+ *
+ * Two numbers that must agree get written once. This one is what the engine
+ * structurally needs; TIMEFRAME_SPECS['1h'].targetCandles is what the fetcher
+ * delivers, and it is now sized to cover this. `simDefaults.test.ts` asserts
+ * the relationship holds, so raising the requirement without raising the fetch
+ * fails a test instead of quietly reintroducing the cold-start hole.
+ */
+export const PATH_MIN_H4_BARS = 62;
+export const MIN_PATH_CANDLES = PATH_MIN_H4_BARS * 4;
 
 const PATH_ENTRY_ORDER_SIDES = new Set(['buy', 'sell', 'long', 'short']);
 

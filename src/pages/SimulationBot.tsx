@@ -374,11 +374,16 @@ const SimulationBotPage = () => {
               // list and are worth completely different things.
               !path.table
                 ? 'פירוק נר 4H ל-16 נתחי 15 דק׳ · טבלת הסתברויות נטענת'
-                : path.table.source === 'validated'
-                  ? `נתחי 15 דק׳ בתוך נר 4H · ${path.table.buckets} דליים מאומתים (walk-forward)`
-                  : path.table.source === 'live-in-sample'
-                    ? `נתחי 15 דק׳ בתוך נר 4H · ${path.table.buckets} דליים IN-SAMPLE — לא אומת`
-                    : 'נתחי 15 דק׳ בתוך נר 4H · אין טבלה — הבוט נמנע'
+                : path.table.readiness === 'warming-up'
+                  // Zero buckets because no symbol has enough history yet is
+                  // NOT the same as zero buckets because nothing cleared the
+                  // bar, and the count alone reads identically for both.
+                  ? `נתחי 15 דק׳ בתוך נר 4H · אוסף היסטוריה (${path.table.skippedForHistory}/${path.table.symbolsSeen} מטבעות מתחת ל-${path.table.minCandlesRequired} נרות)`
+                  : path.table.source === 'validated'
+                    ? `נתחי 15 דק׳ בתוך נר 4H · ${path.table.buckets} דליים מאומתים (walk-forward)`
+                    : path.table.source === 'live-in-sample'
+                      ? `נתחי 15 דק׳ בתוך נר 4H · ${path.table.buckets} דליים IN-SAMPLE — לא אומת`
+                      : 'נתחי 15 דק׳ בתוך נר 4H · אין טבלה — הבוט נמנע'
             }
             accentClass="text-violet-400"
             cryptoData={cryptoData}

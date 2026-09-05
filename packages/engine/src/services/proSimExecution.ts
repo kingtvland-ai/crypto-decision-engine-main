@@ -1,241 +1,199 @@
-// Shared engine core for "Bot Pro" — a literal implementation of
-// ASSETS/alg.md, independent from both existing engines (see the header
-// comment in proAlgEngine.ts for the specific, verified differences from
-// tradeEngine.ts, which is what the legacy bot actually runs today).
-// Mirrors the role legacySimExecution.ts plays for the legacy bot: one
-// evaluation/order-generation core shared by the server's 24/7 engine
-// (server/proSimEngine.ts) and the browser fallback hook
-// (src/hooks/useProSimulationBot.ts). Order EXECUTION (fillDueOrders) is
-// identical fee/slippage/reanchor mechanics for every bot in this app, so
-// that stays imported directly from simExecution.ts — no separate copy here.
-import { CryptoData, MarketRegimeResult } from '../types/crypto';
+/**
+ * "Bot Pro" — order generation for the alg.md engine.
+ * ============================================================================
+ * Mirrors the shape every other bot's order-generation layer uses (build a
+ * per-symbol SignalEvaluation, then turn evaluations + open positions into
+ * pending orders), but the gates inside are §4's, not any other engine's:
+ *
+ *   §4 gate order, as implemented here:
+ *     1. Already holding this symbol, or an order already pending on it? → skip.
+ *     2. Portfolio circuit breaker tripped (daily/weekly drawdown lock)? → no
+ *        NEW entries (existing positions still exit normally — §4 gates
+ *        openings, §5's stop/target are not a "new position").
+ *     3. confidence >= minConfidence (§3)? else → no entry.
+ *     4. Capacity: openPositions + queuedBuys < maxPositions?
+ *     5. budget = min(initialAmount × allocation(riskLevel), cash); budget >= 5?
+ *     6. All pass → buy order queued.
+ *
+ * Spot only, per §4's explicit "the system does not open shorts": a SELL
+ * signal on a symbol with no open position produces no order at all, it only
+ * closes a position that already exists.
+ */
 import {
-  detectProRegime,
-  routeProTradeType,
-  calculateProRisk,
+  computeProSignal,
   evaluateProExit,
-  calculateProOptimalEntry,
-  ProActivePosition,
-  ProSignalResult,
-  ProIndicatorSignal,
-  ProTradeSide,
-  ProRiskResult
+  proMinConfidence,
+  proAllocationPercent,
+  proTechnicalScore,
+  MIN_PRO_CANDLES,
+  type ProSignalResult,
+  type ProRiskLevel
 } from './proAlgEngine';
-import { Candle, formatDynamicPrice } from './tradeEngine';
+import type { Candle } from './tradeEngine';
 import type { SignalEvaluation, DecisionFactor } from './intradayBridge';
-import { isInEntryCooldown, resolveEntryBudget } from './simExecution';
-import {
-  summarizeRecentPerformance,
-  computeSizingMultiplier,
-  streakCooldownFromHistory,
-  isInStreakCooldown,
-  streakCooldownReason,
-  ClosedTradeRecord,
-  MIN_RISK_REWARD_RATIO
-} from './adaptiveRisk';
-import {
-  evaluateCorrelationGate,
-  toPositionDirection,
-  CorrelatedHolding,
-  DEFAULT_CORRELATION_LOOKBACK,
-  DEFAULT_CORRELATION_THRESHOLD,
-  DEFAULT_MAX_CORRELATED
-} from './correlation';
-import type { SimPosition, PendingOrder, SimBotConfig } from './simExecution';
+import { isInEntryCooldown } from './simExecution';
+import type { SimPosition, PendingOrder } from './simExecution';
+import { DAILY_DRAWDOWN_BLOCK_PERCENT, WEEKLY_DRAWDOWN_LOCK_PERCENT } from './intradayParams';
 
 export const uid = (p: string) => `pro-${p}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
-// Same warm-up requirement as the legacy engine (EMA50 + RSI14 + BB20 + ADX14
-// all need history) — alg.md doesn't specify a candle count, this is purely
-// an indicator-warm-up floor, not part of the algorithm itself.
-export const MIN_PRO_CANDLES = 60;
+export { MIN_PRO_CANDLES };
 
-// No confidence-based bypass of the risk layer exists here.
-//
-// There used to be a HIGH_CONFIDENCE_BYPASS = 72 constant and a fallback
-// risk-plan builder that fabricated a fixed 1.8%/3% plan whenever the real risk
-// layer refused a trade, and both have been removed. Two reasons, and the second
-// is the one that matters:
-//
-//   1. Nothing ever called them. They were exported, documented, re-exported
-//      through execution.ts, and dead — the order generator below has always
-//      taken ev.stopLoss / ev.takeProfit straight from the engine's own plan.
-//   2. Had they been wired up they would have been the defect they describe:
-//      manufacturing a plan precisely when the risk layer said no, on the
-//      authority of an uncalibrated seven-indicator score. The portfolio caps in
-//      tradeEngine / proAlgEngine no longer have that exemption either.
+/**
+ * §2/§4 for one symbol: computes the weighted signal, checks it against §3's
+ * confidence floor, and reports the result as the same SignalEvaluation shape
+ * every other bot's UI column reads.
+ */
+export function buildProEvaluation(
+  symbol: string,
+  candles: Candle[],
+  currentPrice: number,
+  priceChange24h: number,
+  fearGreedIndex: number,
+  riskLevel: ProRiskLevel,
+  minConfidenceOverride: number | undefined
+): SignalEvaluation {
+  if (!candles || candles.length < MIN_PRO_CANDLES) {
+    return {
+      symbol, action: 'hold', tradeType: 'HOLD', tradeSide: 'NONE', confidence: 0,
+      price: currentPrice, priceChange24h, reasoning: `אין מספיק היסטוריה (נדרשים ${MIN_PRO_CANDLES} נרות)`,
+      status: 'NO_SIGNAL [NO_DATA]', willExecute: false, factors: [], confidenceGap: 0
+    };
+  }
 
-// ── 2. Order generation — exit checks (evaluateProExit) + new entries ──────
+  const signal = computeProSignal(candles, priceChange24h, fearGreedIndex);
+  const minConfidence = proMinConfidence(riskLevel, minConfidenceOverride);
+  const willExecute = signal.action === 'BUY' && signal.confidence >= minConfidence;
 
-export function activeMarketRegimesFrom(evaluations: SignalEvaluation[]): Record<string, MarketRegimeResult> {
-  const regimes: Record<string, MarketRegimeResult> = {};
-  for (const ev of evaluations) if (ev.regime) regimes[ev.symbol] = ev.regime;
-  return regimes;
+  const factors: DecisionFactor[] = signal.signals
+    .slice()
+    .sort((a, b) => (b.weight * b.confidence) - (a.weight * a.confidence))
+    .slice(0, 4)
+    .map((s) => ({
+      label: s.name,
+      value: s.reason,
+      impact: s.signal === (signal.action === 'HOLD' ? 'HOLD' : signal.action) ? 'positive' : 'neutral',
+      note: `משקל ${s.weight} · ביטחון ${s.confidence}`
+    }));
+
+  const reasoning = signal.action === 'HOLD'
+    ? `ללא יתרון כיווני מובהק (buy ${signal.buyScore.toFixed(1)} / sell ${signal.sellScore.toFixed(1)} / hold ${signal.holdScore.toFixed(1)}) · ציון טכני ${proTechnicalScore(signal).toFixed(0)}/100`
+    : signal.action === 'SELL'
+      ? `אות SELL — Spot אינו פותח שורט, נדרשת פוזיציה פתוחה כדי לסגור`
+      : willExecute
+        ? `אות BUY בביטחון ${signal.confidence.toFixed(1)} >= סף ${minConfidence} — מבצע קנייה`
+        : `אות BUY בביטחון ${signal.confidence.toFixed(1)} מתחת לסף ${minConfidence}`;
+
+  const tradeSide: SignalEvaluation['tradeSide'] = signal.action === 'BUY' ? 'BUY' : signal.action === 'SELL' ? 'SELL' : 'NONE';
+
+  return {
+    symbol,
+    action: signal.action.toLowerCase() as 'buy' | 'sell' | 'hold',
+    tradeType: willExecute ? 'SPOT' : 'HOLD',
+    tradeSide,
+    confidence: signal.confidence,
+    price: currentPrice,
+    priceChange24h,
+    reasoning,
+    status: willExecute ? 'SIGNAL SPOT BUY' : `NO_SIGNAL [${signal.action === 'HOLD' ? 'NO_DIRECTION' : signal.action === 'SELL' ? 'SPOT_SELL_UNSUPPORTED' : 'BELOW_THRESHOLD'}]`,
+    willExecute,
+    factors,
+    confidenceGap: Math.max(0, minConfidence - signal.confidence),
+    riskLevel,
+    stopLoss: undefined, // fixed % — resolved against the fill price at order time, not the signal price
+    takeProfit1: undefined
+  };
 }
-
-// ── 2. Order generation — exit checks (evaluateProExit) + new entries ──────
 
 export interface ProOrderGenContext {
   positions: SimPosition[];
   pending: PendingOrder[];
   evaluations: SignalEvaluation[];
+  /** Per-symbol current signal, for the exit check (§4's "flip to SELL"). */
+  signalsBySymbol: Record<string, ProSignalResult>;
+  minConfidence: number;
   executionDelaySec: number;
   dailyDrawdownPercent: number;
   weeklyDrawdownPercent: number;
   cash: number;
-  /** Portfolio equity — the denominator for the losing-streak cooldown's
-   *  big-loss escape hatch. */
-  equity: number;
-  /** SimBotConfig.positionPercent / .riskLevel — see the identical fields on
-   *  simExecution.ts's OrderGenContext. */
-  positionPercent?: number;
-  riskLevel?: 'low' | 'medium' | 'high';
+  initialAmount: number;
+  riskLevel: ProRiskLevel;
   exitCooldown: Record<string, number>;
   priceFor: (symbol: string) => number | undefined;
-  /** Single-timeframe (H1) candles keyed by BASE asset. */
-  candlesBySymbol: Record<string, Candle[]>;
-  /** Position-count caps — see the identical doc comment on simExecution.ts's
-   *  OrderGenContext.maxPositions for why a running check within this batch
-   *  (not just the per-symbol evaluations) is required. */
   maxPositions: number;
-  maxFuturesPositions: number;
-  /** Closed-trade history driving the post-losing-streak entry cooldown — see
-   *  the identical field on simExecution.ts's OrderGenContext. */
-  closedTradeMetrics?: ClosedTradeRecord[];
-  correlationThreshold?: number;
-  maxCorrelatedPositions?: number;
-  correlationLookback?: number;
 }
-
-const PRO_ENTRY_ORDER_SIDES = new Set(['buy', 'sell', 'long', 'short']);
 
 export function generateProOrders(ctx: ProOrderGenContext): PendingOrder[] {
   const {
-    positions, pending, evaluations, executionDelaySec, dailyDrawdownPercent, weeklyDrawdownPercent,
-    exitCooldown, priceFor, candlesBySymbol, maxPositions, maxFuturesPositions,
-    closedTradeMetrics = [],
-    correlationThreshold = DEFAULT_CORRELATION_THRESHOLD,
-    maxCorrelatedPositions = DEFAULT_MAX_CORRELATED,
-    correlationLookback = DEFAULT_CORRELATION_LOOKBACK
+    positions, pending, evaluations, signalsBySymbol, minConfidence, executionDelaySec,
+    dailyDrawdownPercent, weeklyDrawdownPercent, exitCooldown, priceFor, maxPositions, riskLevel
   } = ctx;
   const delayMs = Math.max(0, executionDelaySec) * 1000;
   const newOrders: PendingOrder[] = [];
 
-  // Per POSITION, not per symbol — see the identical loop in simExecution.ts.
+  // ── §5 fixed exit + §4 flip-to-SELL exit, per open position ───────────────
   for (const pos of positions) {
     const claimed = (o: PendingOrder) => (o.positionId ? o.positionId === pos.id : o.symbol === pos.symbol);
     if (pending.some(claimed) || newOrders.some(claimed)) continue;
 
     const livePrice = priceFor(pos.symbol) ?? pos.currentPrice;
-    const candles = candlesBySymbol[pos.symbol];
-    if (!candles || candles.length < MIN_PRO_CANDLES) continue;
-
-    const regime = detectProRegime(candles, livePrice);
-    const currentEval = evaluations.find((e) => e.symbol === pos.symbol);
-    const scores = currentEval
-      ? { buy: currentEval.action === 'buy' ? currentEval.confidence : 0, sell: currentEval.action === 'sell' ? currentEval.confidence : 0 }
-      : { buy: 0, sell: 0 };
-
-    const view: ProActivePosition = {
-      type: pos.type, side: pos.side, entryPrice: pos.entryPrice, stopLoss: pos.stopLoss,
-      takeProfit1: pos.takeProfit1, takeProfit2: pos.takeProfit2, tp1Hit: pos.tp1Hit,
-      highestPrice: pos.highestPrice, lowestPrice: pos.lowestPrice,
-      highestPriceSinceTP1: pos.highestPriceSinceTP1, lowestPriceSinceTP1: pos.lowestPriceSinceTP1,
-      openTimestamp: pos.openTimestamp
+    const signal = signalsBySymbol[pos.symbol];
+    // No fresh signal this tick (e.g. candle history briefly unavailable) —
+    // §5's fixed-percentage exit still has to run, so treat it as HOLD rather
+    // than skipping the position entirely.
+    const effectiveSignal: ProSignalResult = signal ?? {
+      action: 'HOLD', buyScore: 0, sellScore: 0, holdScore: 100, totalWeight: 0, confidence: 0, signals: [],
+      indicators: { rsi: 50, ma20: livePrice, volumeTrend: 'stable', bollingerBands: { upper: livePrice, middle: livePrice, lower: livePrice, position: 'between' }, volumeProfile: { poc: livePrice, valueAreaHigh: livePrice, valueAreaLow: livePrice, position: 'in_value_area' } }
     };
 
-    const exitCheck = evaluateProExit(view, livePrice, regime.atr, scores, { dailyDrawdownPercent, weeklyDrawdownPercent });
+    const exitCheck = evaluateProExit({ entryPrice: pos.entryPrice }, livePrice, effectiveSignal, minConfidence);
     if (!exitCheck.shouldExit) continue;
 
-    if (exitCheck.exitType === 'PARTIAL_50') {
-      newOrders.push({
-        id: uid(`${pos.symbol}-tp1-50`), symbol: pos.symbol, positionId: pos.id, type: pos.type, side: 'partial_tp1',
-        signalPrice: livePrice, quantity: pos.quantity * 0.5, reason: exitCheck.reason,
-        confidence: pos.confidence, executeAt: Date.now() + delayMs, createdAt: Date.now()
-      });
-    } else {
-      newOrders.push({
-        id: uid(`${pos.symbol}-exit`), symbol: pos.symbol, positionId: pos.id, type: pos.type,
-        side: pos.side === 'LONG' || pos.side === 'BUY' ? 'close_long' : 'close_short',
-        signalPrice: livePrice, quantity: pos.quantity, reason: exitCheck.reason,
-        confidence: pos.confidence, executeAt: Date.now() + delayMs, createdAt: Date.now()
-      });
-    }
+    newOrders.push({
+      id: uid(`${pos.symbol}-exit`), symbol: pos.symbol, positionId: pos.id, type: 'SPOT',
+      side: 'close_long', signalPrice: livePrice, quantity: pos.quantity, reason: exitCheck.reason,
+      confidence: pos.confidence ?? 0, executeAt: Date.now() + delayMs, createdAt: Date.now()
+    } as PendingOrder);
   }
 
-  // Per-symbol streak cooldown is handled in the evaluation loop above,
-  // not here. This is intentional — a losing streak on one symbol should not
-  // block entries on other symbols.
+  // §4 gate 2: portfolio circuit breaker blocks NEW entries only.
+  const circuitBreakerTripped = dailyDrawdownPercent >= DAILY_DRAWDOWN_BLOCK_PERCENT || weeklyDrawdownPercent >= WEEKLY_DRAWDOWN_LOCK_PERCENT;
+  if (circuitBreakerTripped) return newOrders;
 
-  const correlationBook: CorrelatedHolding[] = [
-    ...positions.map((p) => ({ symbol: p.symbol, direction: toPositionDirection(p.side) })),
-    ...pending
-      .filter((o) => PRO_ENTRY_ORDER_SIDES.has(o.side))
-      .map((o) => ({ symbol: o.symbol, direction: toPositionDirection(o.side) }))
-  ];
-
-  let totalPositionCount = positions.length + pending.filter((o) => PRO_ENTRY_ORDER_SIDES.has(o.side)).length;
-  let futuresPositionCount = positions.filter((p) => p.type === 'FUTURES').length +
-    pending.filter((o) => o.type === 'FUTURES' && PRO_ENTRY_ORDER_SIDES.has(o.side)).length;
-
-  // Cash consumed by this batch — see the identical note in simExecution.ts.
+  let totalPositionCount = positions.length + pending.filter((o) => o.side === 'buy').length;
   let workingCash = ctx.cash;
+  const allocation = proAllocationPercent(riskLevel);
 
   for (const ev of evaluations) {
-    if (!ev.willExecute || !ev.price || ev.tradeType === 'HOLD') continue;
-    // One position per symbol — see the identical guard in simExecution.ts.
+    if (!ev.willExecute || !ev.price) continue;
+    // §4 gate 1: already holding, or an order already exists for this symbol.
     if (positions.some((p) => p.symbol === ev.symbol)) continue;
     if (newOrders.some((o) => o.symbol === ev.symbol) || pending.some((o) => o.symbol === ev.symbol)) continue;
     if (isInEntryCooldown(exitCooldown[ev.symbol])) continue;
-    // Post-losing-streak pause. These helpers were imported here but never called.
-    if (isInStreakCooldown(streakCooldownFromHistory(closedTradeMetrics, ctx.equity, ev.symbol))) continue;
+    // §4 gate 4: capacity.
     if (totalPositionCount >= maxPositions) continue;
-    if (ev.tradeType === 'FUTURES' && futuresPositionCount >= maxFuturesPositions) continue;
 
-    // Spot cannot open short positions — skip SELL side for SPOT
-    // (Spot accounts don't support shorting without margin)
-    if (ev.tradeType !== 'FUTURES' && ev.tradeSide === 'SELL') continue;
-
-    const orderSide = ev.tradeType === 'FUTURES'
-      ? (ev.tradeSide === 'LONG' ? 'long' : 'short')
-      : (ev.tradeSide === 'BUY' ? 'buy' : 'sell');
-
-    const budget = resolveEntryBudget({
-      kellyBetSizeUsd: ev.betSizeUsd,
-      cash: workingCash,
-      tradeType: ev.tradeType === 'FUTURES' ? 'FUTURES' : 'SPOT',
-      positionPercent: ctx.positionPercent,
-      riskLevel: ctx.riskLevel
-    });
+    // §4 gate 5 / §6: budget = min(initialAmount × allocation, cash), >= $5.
+    const budget = Math.min(ctx.initialAmount * allocation, workingCash);
     if (budget < 5) continue;
-
-    // Within-batch correlation check — see the identical comment in
-    // legacySimExecution.ts for why the evaluation-time gate is not enough.
-    const evDirection = toPositionDirection(ev.tradeSide as string);
-    const gate = evaluateCorrelationGate({
-      symbol: ev.symbol,
-      direction: evDirection,
-      held: correlationBook,
-      candlesBySymbol,
-      threshold: correlationThreshold,
-      maxCorrelated: maxCorrelatedPositions,
-      lookback: correlationLookback
-    });
-    if (!gate.allowed) continue;
 
     totalPositionCount++;
     workingCash -= budget;
-    if (ev.tradeType === 'FUTURES') futuresPositionCount++;
-    correlationBook.push({ symbol: ev.symbol, direction: evDirection });
 
     newOrders.push({
-      id: uid(`${ev.symbol}-${orderSide}`), symbol: ev.symbol, type: ev.tradeType as 'SPOT' | 'FUTURES',
-      side: orderSide as PendingOrder['side'], signalPrice: ev.price, quantity: (budget * (ev.leverage || 1)) / ev.price,
-      budgetUsd: budget, leverage: ev.leverage || 1, stopLoss: ev.stopLoss, takeProfit1: ev.takeProfit1,
-      takeProfit2: ev.takeProfit2, takeProfit: ev.takeProfit, reason: ev.reasoning, confidence: ev.confidence,
+      id: uid(`${ev.symbol}-buy`), symbol: ev.symbol, type: 'SPOT', side: 'buy',
+      signalPrice: ev.price, quantity: budget / ev.price, budgetUsd: budget, leverage: 1,
+      reason: ev.reasoning, confidence: ev.confidence,
       executeAt: Date.now() + delayMs, createdAt: Date.now()
-    });
+    } as PendingOrder);
   }
 
   return newOrders;
+}
+
+// Kept for symmetry with the other engines' UI column, which reads it off
+// evaluations that carry a `regime` — Pro's alg.md has no regime classifier,
+// so this is always empty.
+export function activeMarketRegimesFrom(): Record<string, never> {
+  return {};
 }

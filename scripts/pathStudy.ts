@@ -34,7 +34,9 @@
  *
  * `snapshot` downloads 15-minute candles once and writes them to disk; `build`
  * replays that exact file, so two runs a week apart measure the same yardstick.
- * The output table is written to `path-study/table.json`, which
+ * The output table is written to `path-study/table.json`, then uploaded to the
+ * worker with `publish`. It is NOT read off disk by the bot — see cmdPublish. The
+ * local file is the build artifact; the worker's KV store is what it trades. It
  * server/pathSimEngine.ts loads in preference to its own runtime rebuild.
  */
 
@@ -68,9 +70,10 @@ import {
   type FearGreedSeries
 } from '../packages/engine/src/services/fearGreedHistory.js';
 import type { Candle } from '../packages/engine/src/services/tradeEngine.js';
+// Monthly archives instead of the paginated REST endpoint — see bulkKlines.ts.
+import { fetchBulkKlines } from './bulkKlines';
 
 const OUT_DIR = join(process.cwd(), 'path-study');
-const BINANCE = 'https://api.binance.com/api/v3';
 const DAY_MS = 86_400_000;
 
 /**
@@ -119,32 +122,6 @@ function num(name: string, fallback: number): number {
   return Number.isFinite(v) ? v : fallback;
 }
 
-async function fetchKlines15m(symbol: string, startMs: number, endMs: number): Promise<Candle[]> {
-  const out: Candle[] = [];
-  let cursor = startMs;
-  while (cursor < endMs) {
-    const url = `${BINANCE}/klines?symbol=${symbol}&interval=15m&startTime=${cursor}&endTime=${endMs}&limit=1000`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`${symbol} klines HTTP ${res.status}`);
-    const rows = (await res.json()) as unknown[][];
-    if (!rows.length) break;
-    for (const r of rows) {
-      out.push({
-        timestamp: Number(r[0]),
-        open: Number(r[1]),
-        high: Number(r[2]),
-        low: Number(r[3]),
-        close: Number(r[4]),
-        volume: Number(r[5])
-      });
-    }
-    const last = Number(rows[rows.length - 1][0]);
-    if (last <= cursor) break;
-    cursor = last + 1;
-    await new Promise((r) => setTimeout(r, 120)); // stay under the rate limit
-  }
-  return out;
-}
 
 async function cmdSnapshot(): Promise<void> {
   const from = arg('from');
@@ -160,7 +137,7 @@ async function cmdSnapshot(): Promise<void> {
 
   for (const symbol of SYMBOLS) {
     try {
-      const m15 = await fetchKlines15m(symbol, startMs, endMs);
+      const m15 = await fetchBulkKlines(symbol, '15m', from, to);
       if (m15.length < 4 * SLOTS_PER_BAR) {
         console.log(`  ${symbol} ... skipped (${m15.length} bars)`);
         continue;
@@ -398,15 +375,57 @@ function cmdShow(): void {
   }
 }
 
+/**
+ * Uploads the built table to the worker, which stores it durably and installs it.
+ *
+ * The bot used to read `path-study/table.json` off local disk. That directory is
+ * gitignored, so the file never existed on the server: the engine silently fell
+ * through to its in-sample rebuild on every deploy, and nothing in the logs or
+ * the UI distinguished that from having loaded a validated table. Durable state
+ * belongs in the KV store with everything else, and this is how it gets there.
+ *
+ * Behind the admin token on purpose — unlike the rest of the path-sim
+ * namespace, this call changes what the bot trades.
+ */
+async function cmdPublish(): Promise<void> {
+  const path = join(OUT_DIR, 'table.json');
+  if (!existsSync(path)) throw new Error(`no table at ${path} — run build first`);
+
+  const base = (process.env.WORKER_URL || '').replace(/\/+$/, '');
+  const token = process.env.BOT_ADMIN_TOKEN || '';
+  if (!base) throw new Error('set WORKER_URL to the base URL of the worker');
+  if (!token) throw new Error('set BOT_ADMIN_TOKEN — publishing changes what the bot trades');
+
+  const body = readFileSync(path, 'utf8');
+  const parsed = JSON.parse(body) as { table?: unknown[] };
+  const buckets = Array.isArray(parsed.table) ? parsed.table.length : 0;
+  if (buckets === 0) {
+    console.log('WARNING: publishing an EMPTY table. The bot will abstain —');
+    console.log('which is correct when nothing survived validation, but say it out loud.');
+  }
+
+  const res = await fetch(`${base}/api/path-sim/table`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`publish failed: ${res.status} ${text}`);
+  console.log(`published ${buckets} buckets → ${base}`);
+  console.log(text);
+}
+
 async function main(): Promise<void> {
   const cmd = process.argv[2];
   if (cmd === 'snapshot') return cmdSnapshot();
   if (cmd === 'build') return cmdBuild();
   if (cmd === 'show') return cmdShow();
-  console.log('usage: pathStudy.ts <snapshot|build|show> [options]');
+  if (cmd === 'publish') return cmdPublish();
+  console.log('usage: pathStudy.ts <snapshot|build|show|publish> [options]');
   console.log('  snapshot --from YYYY-MM-DD --to YYYY-MM-DD');
   console.log('  build [--min-samples 200] [--train-days 120] [--test-days 30] [--min-windows 2]');
   console.log('  show');
+  console.log('  publish        (needs WORKER_URL + BOT_ADMIN_TOKEN)');
   process.exitCode = 1;
 }
 
