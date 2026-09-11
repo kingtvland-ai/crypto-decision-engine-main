@@ -3,7 +3,7 @@
 // from useSimulationBot.ts was the one place app code reached from a service
 // into the hooks layer. See @cde/engine/execution.
 import type { SimBotConfig, SimTrade } from '@cde/engine/execution';
-import { resolveWorkerBaseUrl as resolveBaseUrl } from './workerConfig';
+import { resolveWorkerBaseUrl as resolveBaseUrl, resolvePublicBoardUrls } from './workerConfig';
 // The browser never holds the Bybit secret and never signs orders.
 // Base URL comes from VITE_TRADING_API_URL (set at build time for Netlify),
 // falling back to a manually configured worker URL.
@@ -554,10 +554,33 @@ export interface PublicBotsSummary {
   serverTime: number;
 }
 
+/**
+ * The public board's loader. Unlike every other call in this file it must work
+ * for a visitor who has never configured anything, so it walks
+ * `resolvePublicBoardUrls()` and falls through to the hardcoded production
+ * worker when the operator-configured one is unreachable (a stale localStorage
+ * entry, or a `localhost` URL that an https page blocks as mixed content — the
+ * browser reports both as a bare "Failed to fetch").
+ *
+ * Errors are rethrown in Hebrew and name the address that failed, because the
+ * board shows this string to a reader who cannot open a devtools console.
+ */
 export async function getPublicBotsSummary(configuredBaseUrl?: string): Promise<PublicBotsSummary> {
-  const base = resolveBaseUrl(configuredBaseUrl);
-  if (!base) throw new Error('כתובת Worker לא הוגדרה');
-  const res = await fetch(`${base}/api/public/bots-summary`);
-  if (!res.ok) throw new Error(`Failed to fetch board: ${res.status} ${res.statusText}`);
-  return (await res.json()) as PublicBotsSummary;
+  const candidates = resolvePublicBoardUrls(configuredBaseUrl);
+  if (candidates.length === 0) throw new Error('כתובת Worker לא הוגדרה');
+
+  let lastError = '';
+  for (const base of candidates) {
+    try {
+      const res = await fetch(`${base}/api/public/bots-summary`);
+      if (!res.ok) {
+        lastError = `${base} השיב ${res.status} ${res.statusText}`;
+        continue;
+      }
+      return (await res.json()) as PublicBotsSummary;
+    } catch (err) {
+      lastError = `לא ניתן להגיע אל ${base}${err instanceof Error && err.message ? ` (${err.message})` : ''}`;
+    }
+  }
+  throw new Error(`טעינת לוח התוצאות נכשלה — ${lastError}`);
 }

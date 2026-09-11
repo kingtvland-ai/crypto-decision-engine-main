@@ -59,6 +59,19 @@ const ACCENT: Record<string, { ring: string; text: string; glow: string; dot: st
 };
 const accentOf = (id: string) => ACCENT[id] ?? ACCENT.intraday;
 
+/** The worker returns whatever nickname the operator typed into the bot config
+ *  ("חדש", "פרו") — meaningless to a visitor. The board shows the strategy's
+ *  real name instead, and keeps the operator's nickname only as a fallback for
+ *  a bot id this map does not know. */
+const STRATEGY: Record<string, { name: string; blurb: string }> = {
+  intraday: { name: 'Multi-Timeframe', blurb: 'מגמה ב-H1, כניסה בתיקון על M5/M15' },
+  pro:      { name: 'Pro · אוסצילטורים', blurb: 'הצבעת RSI/MACD/Stoch/BB עם משקל קורלציה' },
+  path:     { name: 'Prev-4H Range',     blurb: 'פריצת טווח ארבע השעות הקודמות' },
+  bybit:    { name: 'TrendBreakout',     blurb: 'פריצת Donchian ב-M15 עם אישור ווליום' }
+};
+const strategyOf = (bot: PublicBotSummary) =>
+  STRATEGY[bot.id] ?? { name: bot.label, blurb: '' };
+
 function Stat({ label, value, tone = 'neutral', hint }: {
   label: string; value: string; tone?: 'up' | 'down' | 'neutral'; hint?: string;
 }) {
@@ -127,6 +140,7 @@ function BotCard({ bot, expanded, onToggle }: {
   bot: PublicBotSummary; expanded: boolean; onToggle: () => void;
 }) {
   const accent = accentOf(bot.id);
+  const strategy = strategyOf(bot);
   const up = (bot.pnl ?? 0) >= 0;
 
   if (!bot.hasData) {
@@ -134,7 +148,7 @@ function BotCard({ bot, expanded, onToggle }: {
       <div className="rounded-2xl border border-white/10 bg-slate-900/40 p-6">
         <div className="flex items-center gap-2 text-slate-300">
           <WifiOff className="h-4 w-4" />
-          <h3 className="font-semibold">{bot.label}</h3>
+          <h3 className="font-semibold">{strategy.name}</h3>
         </div>
         <p className="mt-3 text-sm text-slate-500">אין נתוני שרת עדיין.</p>
       </div>
@@ -154,7 +168,10 @@ function BotCard({ bot, expanded, onToggle }: {
           <div className="flex items-center gap-2.5">
             <span className={`h-2 w-2 rounded-full ${bot.running ? `${accent.dot} animate-pulse` : 'bg-slate-600'}`} />
             <div>
-              <h3 className={`text-base font-semibold ${accent.text}`}>{bot.label}</h3>
+              <h3 className={`text-base font-semibold ${accent.text}`}>{strategy.name}</h3>
+              {strategy.blurb && (
+                <p className="mt-0.5 text-[11px] leading-relaxed text-slate-400">{strategy.blurb}</p>
+              )}
               <p className="mt-0.5 text-[11px] text-slate-500">
                 {bot.running ? 'פעיל' : 'מושהה'} · הון התחלתי {usd(bot.initialAmount, 0)}
               </p>

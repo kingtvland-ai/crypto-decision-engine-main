@@ -13,6 +13,32 @@ export function resolveWorkerBaseUrl(configured?: string): string {
 
 export type UrlSource = 'manual' | 'localStorage' | 'env' | 'none';
 
+/**
+ * The production worker, hardcoded. This is ONLY for the public read-only board
+ * (`/live`), which anyone with the link must be able to open — it cannot depend
+ * on the operator's own localStorage or on a Netlify build variable that may
+ * not be set. The endpoint it serves (`/api/public/bots-summary`) is tokenless
+ * and read-only, so there is nothing secret about the address.
+ *
+ * Everything else in the app keeps using resolveWorkerBaseUrl() and stays
+ * operator-configurable.
+ */
+export const DEFAULT_PUBLIC_WORKER_URL = 'https://cde-main.onrender.com';
+
+/**
+ * Ordered, de-duplicated candidates for the public board: whatever the operator
+ * configured first (so a local worker still wins during development), the
+ * hardcoded production worker last. The board walks the list until one answers,
+ * which is what keeps a stale `workerConfig` in one person's browser from
+ * breaking a page meant for everybody.
+ */
+export function resolvePublicBoardUrls(configured?: string): string[] {
+  const preferred = resolveWorkerBaseUrl(configured);
+  return [preferred, DEFAULT_PUBLIC_WORKER_URL].filter(
+    (u, i, all) => !!u && all.indexOf(u) === i
+  );
+}
+
 export function resolveWorkerBaseUrlWithSource(configured?: string): { url: string; source: UrlSource } {
   if (configured && configured.trim()) {
     return { url: configured.trim().replace(/\/$/, ''), source: 'manual' };
