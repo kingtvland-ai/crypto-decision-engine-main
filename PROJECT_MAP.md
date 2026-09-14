@@ -47,7 +47,7 @@ crypto-decision-engine/
 | `prev4hRange.ts` + `prev4hRangeExecution.ts` | בוט **Prev-4H Range** (נתיב 4H) |
 | `trendBreakout.ts` + `trendBreakoutExecution.ts` | בוט **TrendBreakout** (Bybit) — סיגנל + scale-in + ניהול סטופ |
 | `simExecution.ts` | מנוע המילוי/עמלות/slippage/funding המשותף + `slot preemption` |
-| `proSimExecution.ts` / `pathSimExecution.ts` | שערי כניסה + יצירת פקודות ל-Pro / Path |
+| `proSimExecution.ts` | שערי כניסה + יצירת פקודות ל-Pro (`pathSimExecution.ts` הוסר 2026-09-14 — היה קוד מת, ראה BOTS_REFERENCE.md §3) |
 | `tradeEngine.ts` | primitives: `calculateEMA/ATR/ADX/Supertrend`, `BYBIT_FEES`, `simulateSlippage`, `roundToPriceScale` |
 | `exitPolicy.ts` | מדיניות יציאה משותפת: תקרת 4.2%, TP1 3% (50% החוצה), TP2 |
 | `adaptiveRisk.ts` | מכפיל סיכון לפי streak |

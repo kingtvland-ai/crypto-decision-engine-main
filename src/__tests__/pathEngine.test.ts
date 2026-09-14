@@ -15,7 +15,7 @@ import {
   SLOT_MS
 } from '@cde/engine/analysis';
 import type { PathBucket, PathOutcome, BarState } from '@cde/engine/analysis';
-import { pathEntryBudget, MIN_PATH_CANDLES } from '@cde/engine/execution';
+import { MIN_PATH_CANDLES } from '@cde/engine/execution';
 import type { Candle } from '@cde/engine';
 
 const HOUR = 3_600_000;
@@ -268,18 +268,9 @@ describe('sizing comes from the bucket, capped by the operator', () => {
     expect(pathKellyFraction(bucket(0.30, 1))).toBe(0);
   });
 
-  it('never exceeds the operator ceiling, however good the bucket looks', () => {
-    // 10% of 100k equity = 10,000; operator ceiling (positionPercent=10, $1k cash) = 100.
-    const budget = pathEntryBudget(bucket(0.45, 2), 100_000, 1000, 10, 'medium');
-    expect(budget).toBeCloseTo(100, 6);
-  });
-
-  it('sizes from equity when the ceiling is not binding', () => {
-    const budget = pathEntryBudget(bucket(0.36, 2), 10_000, 100_000, 10, 'medium');
-    expect(budget).toBeCloseTo(1000, 6);  // 10% of 10k equity
-  });
-
-  it('returns nothing without a bucket — no bucket, no measured bet', () => {
-    expect(pathEntryBudget(undefined, 10_000, 10_000, 10, 'medium')).toBe(0);
-  });
+  // `pathEntryBudget` (the old order-generator's own sizing helper) was
+  // removed 2026-09-14 along with the rest of pathSimExecution.ts — dead code,
+  // see that file's removal note in execution.ts. Nothing in the live
+  // DecisionEngine PathAdapter ever called it; pathKellyFraction above is the
+  // sizing input it actually uses.
 });

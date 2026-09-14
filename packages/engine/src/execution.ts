@@ -162,9 +162,16 @@ export {
 } from './services/adaptiveRisk';
 
 // ── 4H Path bot order generation ─────────────────────────────────────────────
-export { generatePathOrders, pathEntryBudget, MIN_PATH_CANDLES,
-  PATH_MIN_H4_BARS } from './services/pathSimExecution';
-export type { PathOrderGenContext } from './services/pathSimExecution';
+// `generatePathOrders` / `pathEntryBudget` / `PathOrderGenContext` (the old
+// single-timeframe empirical-bucket order generator, pathSimExecution.ts) were
+// REMOVED 2026-09-14 — server/pathSimEngine.ts has called
+// `generatePrev4hRangeOrders` (prev4hRangeExecution.ts) exclusively since the
+// Prev-4H Range rewrite, so that file had been dead code, invisibly, for the
+// life of the current "נתיב 4H" bot. It was discovered only because a profit-
+// ratchet fix was wired into it by mistake and never reached the live bot.
+// MIN_PATH_CANDLES / PATH_MIN_H4_BARS are still real (pathEngine.ts, used by
+// the DecisionEngine's PathAdapter) — re-exported from their actual source.
+export { MIN_PATH_CANDLES, PATH_MIN_H4_BARS } from './services/pathEngine';
 
 // ── Prev-4H Range ("נתיב 4H" sim bot) order generation ───────────────────────
 export {

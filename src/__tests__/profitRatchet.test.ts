@@ -189,3 +189,70 @@ describe('ratchetReason', () => {
     expect(partial).toContain('30%');
   });
 });
+
+// ── ratchetLevels — price-space view for the position chart (2026-09-14) ────
+
+import { ratchetLevels } from '@cde/engine/analysis';
+
+describe('ratchetLevels — replaces the misleading static "TP" chart line', () => {
+  it('below the first rung: nothing armed, next rung is the 1.8% floor', () => {
+    const lv = ratchetLevels({ entryPrice: ENTRY, peakPrice: at(1.0), livePrice: at(1.0), isLong: true });
+    expect(lv.armedSellPrice).toBeNull();
+    expect(lv.nextRungPct).toBe(RATCHET_FIRST_RUNG_PCT);
+    expect(lv.nextRungPrice).toBeCloseTo(at(RATCHET_FIRST_RUNG_PCT), 6);
+  });
+
+  it('peak just touched a rung (not yet retraced): armed is still null', () => {
+    // Mirrors evaluateRatchet: touching a rung on the way up is not "armed"
+    // for a sell — only a peak STRICTLY above it is.
+    const lv = ratchetLevels({ entryPrice: ENTRY, peakPrice: at(1.8), livePrice: at(1.8), isLong: true });
+    expect(lv.armedSellPrice).toBeNull();
+  });
+
+  it('peak +2.5%: the 1.8% floor is armed (a full close), next rung is 3%', () => {
+    const lv = ratchetLevels({ entryPrice: ENTRY, peakPrice: at(2.5), livePrice: at(2.5), isLong: true });
+    expect(lv.armedSellPrice).toBeCloseTo(at(1.8), 6);
+    expect(lv.armedIsFullClose).toBe(true);
+    expect(lv.nextRungPct).toBe(3);
+    expect(lv.nextRungPrice).toBeCloseTo(at(3), 6);
+  });
+
+  it('peak +4.2%: the lowest ARMED rung is 4% (a partial), next rung is 5%', () => {
+    const lv = ratchetLevels({ entryPrice: ENTRY, peakPrice: at(4.2), livePrice: at(4.0), isLong: true });
+    expect(lv.armedSellPrice).toBeCloseTo(at(4), 6);
+    expect(lv.armedIsFullClose).toBe(false);
+    expect(lv.nextRungPct).toBe(5);
+  });
+
+  it('a consumed rung is skipped — the NEXT lower armed rung becomes the trigger', () => {
+    const lv = ratchetLevels({ entryPrice: ENTRY, peakPrice: at(4.2), livePrice: at(3.5), isLong: true, consumed: [4] });
+    expect(lv.armedSellPrice).toBeCloseTo(at(3), 6);
+    expect(lv.armedIsFullClose).toBe(false);
+  });
+
+  it('every rung consumed: nothing left armed, even with a high peak', () => {
+    const lv = ratchetLevels({ entryPrice: ENTRY, peakPrice: at(4.2), livePrice: at(4.0), isLong: true, consumed: [1.8, 3, 4] });
+    expect(lv.armedSellPrice).toBeNull();
+  });
+
+  it('mirrors evaluateRatchet\'s own armed set on the operator\'s worked example', () => {
+    const input = { entryPrice: ENTRY, peakPrice: at(4.2), livePrice: at(4.0), isLong: true };
+    const decision = evaluateRatchet(input);
+    const lv = ratchetLevels(input);
+    expect(decision.action).toBe('PARTIAL');
+    expect(lv.armedSellPrice).toBeCloseTo(at(decision.rung!), 6);
+  });
+
+  it('shorts: measures the same way, downward', () => {
+    const lv = ratchetLevels({
+      entryPrice: ENTRY, peakPrice: ENTRY * (1 - 4.2 / 100), livePrice: ENTRY * (1 - 4.0 / 100), isLong: false
+    });
+    expect(lv.armedSellPrice).toBeCloseTo(ENTRY * (1 - 4 / 100), 6);
+  });
+
+  it('a broken entry price does not throw', () => {
+    const lv = ratchetLevels({ entryPrice: 0, peakPrice: 1, livePrice: 1, isLong: true });
+    expect(lv.armedSellPrice).toBeNull();
+    expect(Number.isFinite(lv.nextRungPrice)).toBe(true);
+  });
+});

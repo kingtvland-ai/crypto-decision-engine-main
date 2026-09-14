@@ -8,11 +8,11 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Play, Pause, Square, Zap, Settings, ArrowDownCircle, ArrowUpCircle, ChevronDown, FileText } from 'lucide-react';
 import PortfolioPulseCard from './PortfolioPulseCard';
-import ProfitScale from './ProfitScale';
 import LivePositionChart from './LivePositionChart';
 import type { CryptoData } from '@cde/engine';
 import type { SimBotConfig, SimPosition, SimTrade, SimPoint, PendingOrder, SignalEvaluation, DecisionFactor } from '@/hooks/useSimulationBot';
 import { tallyExitReasons } from '@/lib/botCsvExport';
+import { ratchetLevels } from '@cde/engine/analysis';
 
 const safeNumber = (value: unknown, fallback = 0): number => {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -31,6 +31,10 @@ const signedPct = (n: number): string => `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
 export interface EngineColumnProps {
   title: string;
   subtitle: string;
+  /** Stable per-bot id for `data-testid` (e.g. 'intraday' | 'pro' | 'path' |
+   *  'bybit') — the four columns are otherwise structurally identical, so
+   *  nothing else distinguishes "this bot's start button" in the DOM. */
+  testId: string;
   accentClass: string; // e.g. 'text-primary' or 'text-cyan-400' — column header + accent color
   /**
    * What "confidence" means for THIS engine's numbers.
@@ -79,7 +83,7 @@ export interface EngineColumnProps {
 // side (new intraday engine vs. the original alg.md confidence-score engine)
 // so both can be configured and watched independently for comparison.
 export default function SimulationEngineColumn({
-  title, subtitle, accentClass, cryptoData,
+  title, subtitle, testId, accentClass, cryptoData,
   cash, positions, positionsValue, equity, trades, history, hourlyHistory = [], pending,
   totalFees, totalSlippageCost, totalFunding = 0, winRate, totalTrades, closedTrades,
   evaluations, hasSavedSession, nextTickAt, config: botConfig, setConfig: setBotConfig,
@@ -155,7 +159,7 @@ export default function SimulationEngineColumn({
   );
 
   return (
-    <div className="flex flex-col h-full space-y-4">
+    <div className="flex flex-col h-full space-y-4" data-testid={`sim-bot-column-${testId}`}>
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div>
           <h2 className={`text-lg font-bold font-mono ${accentClass}`}>{title}</h2>
@@ -608,6 +612,18 @@ export default function SimulationEngineColumn({
                     // term. Multiplying again overstated an open FUTURES card by
                     // `leverage`x until the trade actually closed.
                     const pnl = priceDiff * pos.quantity;
+                    // The profit ratchet (2026-09-14), not takeProfit1, is what
+                    // actually closes this position now — every sim bot runs it.
+                    // Passing these replaces the chart's old static "TP" line
+                    // (which stopped meaning "the bot exits here" the day the
+                    // ratchet shipped) with the real armed trigger price.
+                    const ratchet = ratchetLevels({
+                      entryPrice: pos.entryPrice,
+                      peakPrice: (isLong ? pos.highestPrice : pos.lowestPrice) ?? pos.entryPrice,
+                      livePrice,
+                      isLong,
+                      consumed: pos.ratchetConsumed
+                    });
                     return (
                       <LivePositionChart
                         key={pos.id}
@@ -620,8 +636,9 @@ export default function SimulationEngineColumn({
                         openedAt={pos.openedAt}
                         openTimestamp={pos.openTimestamp}
                         stopLoss={pos.stopLoss}
-                        takeProfit={pos.takeProfit}
-                        takeProfit1={pos.takeProfit1}
+                        ratchetArmedPrice={ratchet.armedSellPrice}
+                        ratchetArmedIsFullClose={ratchet.armedIsFullClose}
+                        ratchetNextRungPrice={ratchet.nextRungPrice}
                         leverage={pos.leverage}
                         unrealizedPnl={pnl}
                         confidence={pos.confidence}

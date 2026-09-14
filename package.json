@@ -17,9 +17,13 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit -p tsconfig.app.json",
     "typecheck:worker": "tsc --noEmit -p tsconfig.worker.json",
+    "typecheck:e2e": "tsc --noEmit -p tsconfig.e2e.json",
     "preview": "vite preview",
     "start": "node dist/worker.js",
-    "worker": "node dist/worker.js"
+    "worker": "node dist/worker.js",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:report": "playwright show-report"
   },
   "dependencies": {
     "@capacitor/android": "^7.4.2",
@@ -83,6 +87,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.9.0",
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/typography": "^0.5.15",
     "@types/dotenv": "^6.1.1",
     "@types/node": "^22.20.1",

@@ -28,6 +28,7 @@ import { useBybitSimulationBotContextSafe, BYBIT_SIM_BOT_LAST_KNOWN_RUNNING_KEY 
 import type { SimPosition, SimTrade } from '@/hooks/useSimulationBot';
 import { useWorkerAuth } from '@/contexts/WorkerAuthContext';
 import { summarizeSimBot } from '@/lib/simBotSummary';
+import { ratchetLevels as summarizeRatchet } from '@cde/engine/analysis';
 import { useApiPolling } from '@/hooks/useApiPolling';
 
 
@@ -224,9 +225,20 @@ export const ExecutiveDashboard: React.FC = () => {
   const deriveSimState = (source: SimSource | null, fallbackKey: string | null, fallbackStatusKey: string) => {
     const mapPosition = (p: SimPosition) => {
       const notional = p.notionalUsd || p.quantity * p.currentPrice || 0;
-      const pnl = p.side === 'LONG' || p.side === 'BUY'
+      const isLong = p.side === 'LONG' || p.side === 'BUY';
+      const pnl = isLong
         ? ((p.currentPrice - p.entryPrice) / p.entryPrice) * 100 * (p.leverage || 1)
         : ((p.entryPrice - p.currentPrice) / p.entryPrice) * 100 * (p.leverage || 1);
+      // The profit ratchet (2026-09-14), not takeProfit1, is what actually
+      // closes this position — every sim bot runs it. See the identical fix
+      // in LivePositionChart.tsx / SimulationEngineColumn.tsx.
+      const ratchet = summarizeRatchet({
+        entryPrice: p.entryPrice,
+        peakPrice: (isLong ? p.highestPrice : p.lowestPrice) ?? p.entryPrice,
+        livePrice: p.currentPrice,
+        isLong,
+        consumed: p.ratchetConsumed
+      });
       return {
         symbol: p.symbol,
         side: p.side,
@@ -234,7 +246,9 @@ export const ExecutiveDashboard: React.FC = () => {
         currentPrice: p.currentPrice,
         pnlPercent: pnl,
         leverage: p.leverage || 1,
-        takeProfit: p.takeProfit1 || p.takeProfit,
+        ratchetPrice: ratchet.armedSellPrice ?? ratchet.nextRungPrice,
+        ratchetIsArmed: ratchet.armedSellPrice != null,
+        ratchetIsFullClose: ratchet.armedIsFullClose,
         stopLoss: p.stopLoss
       };
     };
@@ -559,9 +573,12 @@ export const ExecutiveDashboard: React.FC = () => {
                     <span>כניסה: ${p.entryPrice < 1 ? p.entryPrice.toFixed(4) : p.entryPrice.toFixed(2)}</span>
                     <span>נוכחי: ${p.currentPrice < 1 ? p.currentPrice.toFixed(4) : p.currentPrice.toFixed(2)}</span>
                   </div>
-                  {(p.takeProfit || p.stopLoss) && (
+                  {(p.ratchetPrice || p.stopLoss) && (
                     <div className="flex justify-between text-[10px] text-muted-foreground/80 pt-1 border-t border-border/30">
-                      <span>TP: ${p.takeProfit ? (p.takeProfit < 1 ? p.takeProfit.toFixed(4) : p.takeProfit.toFixed(2)) : '-'}</span>
+                      <span className={p.ratchetIsArmed ? 'text-amber-400/90' : ''}>
+                        {p.ratchetIsArmed ? (p.ratchetIsFullClose ? 'סגירה' : 'מימוש 30%') : 'מדרגה הבאה'}: $
+                        {p.ratchetPrice ? (p.ratchetPrice < 1 ? p.ratchetPrice.toFixed(4) : p.ratchetPrice.toFixed(2)) : '-'}
+                      </span>
                       <span>SL: ${p.stopLoss ? (p.stopLoss < 1 ? p.stopLoss.toFixed(4) : p.stopLoss.toFixed(2)) : '-'}</span>
                     </div>
                   )}

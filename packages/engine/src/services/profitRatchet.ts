@@ -162,3 +162,87 @@ export function ratchetReason(d: RatchetDecision): string {
   }
   return `סולם רווח: חזרה למדרגה ${rung}% ${ctx} — מימוש ${(RATCHET_PARTIAL_FRACTION * 100).toFixed(0)}%`;
 }
+
+export interface RatchetLevels {
+  /** Price that would sell RIGHT NOW if the live price fell to it — the
+   *  lowest unconsumed rung the peak has already cleared. `null` when nothing
+   *  is armed yet (the peak hasn't reached +1.8%), in which case the stop
+   *  loss is what actually governs the position, not this ladder. */
+  armedSellPrice: number | null;
+  /** True when `armedSellPrice` is the 1.8% floor (a full close) rather than
+   *  a 3%+ rung (a 30% partial). Meaningless when `armedSellPrice` is null. */
+  armedIsFullClose: boolean;
+  /** Price the PEAK still needs to reach to arm the next rung above the
+   *  current one (or above entry, if nothing is armed yet). Always defined —
+   *  there is always a next rung, the ladder has no ceiling. */
+  nextRungPrice: number;
+  nextRungPct: number;
+}
+
+/**
+ * Price-space view of the ladder for a chart or a position card — the UI
+ * layer that used to draw a static "TP" line at `takeProfit1` even though the
+ * ratchet, not that price, decides when the position actually sells. Callers
+ * should replace any "take profit" marker with `armedSellPrice` /
+ * `nextRungPrice` once the ratchet is in effect for that position.
+ */
+export function ratchetLevels(input: RatchetInput): RatchetLevels {
+  const { entryPrice, isLong } = input;
+  const consumed = (input.consumed ?? []).map(q);
+
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+    return { armedSellPrice: null, armedIsFullClose: false, nextRungPrice: entryPrice, nextRungPct: RATCHET_FIRST_RUNG_PCT };
+  }
+  const s = isLong ? 1 : -1;
+  const priceAt = (pct: number) => entryPrice * (1 + s * pct / 100);
+
+  // Single source of truth: ask the real decision function first. If it says
+  // anything but HOLD, a sell is firing on THIS tick (order generation would
+  // emit the same PARTIAL/FULL right now) — report that instead of a
+  // "preview", which matters on a gap that jumps clean through several rungs
+  // at once (evaluateRatchet dominant-closes at the LOWEST one breached, not
+  // the nearest).
+  const decision = evaluateRatchet(input);
+  const peakPnlPct = decision.peakPnlPct;
+  const crossed = rungsCrossed(peakPnlPct);
+
+  // The rung immediately above the highest one the peak has cleared — where
+  // price needs to climb to for a NEW rung to arm. The 1.8% floor is a
+  // one-off (not part of the +1%-forever sequence starting at 3%), so it is
+  // handled as its own case rather than folded into the arithmetic below.
+  // Valid regardless of whether a sale is also firing this tick — it is about
+  // the PEAK, not the live price.
+  const highestCrossed = crossed.length ? crossed[crossed.length - 1] : undefined;
+  const nextRungPct = highestCrossed === undefined
+    ? RATCHET_FIRST_RUNG_PCT
+    : highestCrossed < RATCHET_SECOND_RUNG_PCT - 1e-9
+      ? RATCHET_SECOND_RUNG_PCT
+      : q(highestCrossed + RATCHET_STEP_PCT);
+  const nextRungPrice = priceAt(nextRungPct);
+
+  if (decision.action !== 'HOLD') {
+    const rung = decision.rung ?? 0;
+    return {
+      armedSellPrice: priceAt(rung),
+      armedIsFullClose: decision.action === 'FULL',
+      nextRungPrice,
+      nextRungPct
+    };
+  }
+
+  // HOLD: every rung the peak has armed still sits BELOW the live price (or
+  // never armed at all) — otherwise evaluateRatchet would have fired above.
+  // The nearest one below the live price is the next sell trigger if price
+  // keeps falling; that is the LARGEST value in the ascending `crossed` list.
+  const armed = crossed.filter((r) => r < peakPnlPct - 1e-9 && !consumed.includes(r));
+  if (armed.length === 0) {
+    return { armedSellPrice: null, armedIsFullClose: false, nextRungPrice, nextRungPct };
+  }
+  const nearestBelow = armed[armed.length - 1];
+  return {
+    armedSellPrice: priceAt(nearestBelow),
+    armedIsFullClose: nearestBelow === q(RATCHET_FIRST_RUNG_PCT),
+    nextRungPrice,
+    nextRungPct
+  };
+}

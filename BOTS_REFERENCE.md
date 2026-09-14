@@ -120,7 +120,18 @@ to time-stop out flat." MEAN_REVERSION פטור לגמרי (`minTp1Distance = 0`
 "המחיר החי ≥ TP1". קודם השער נבדק מול המחיר החי, כך שרץ שנסוג מתחת ל-TP1 **כיבה
 את ה-trailing** בדיוק ברגע שהוא נחוץ (נצפה ב-worker: רץ ENA MEAN_REVERSION ב-+2.0R
 נסוג מתחת ל-TP1 והמשיך לרדת עם ה-SL הקשיח בלבד). התיקון רק **מוסיף** יציאה
-מוקדמת של רץ דועך → בטוח גם לבוט האמיתי.
+מוקדמת של רץ דועך → בטוח גם לבוט האמיתי. **זהו תיאור הבוט האמיתי** —
+`DEFAULT_INTRADAY_PARAMS` משאיר את `profitRatchet` לא מוגדר, כך שה-TP1/TP2/
+trailing שלמעלה עדיין פעילים שם במלואם.
+
+> ⚠️ **בסימולציה מוחלף ע"י סולם הרווח (`profitRatchet.ts`, 2026-09-14).**
+> `SIM_INTRADAY_PARAMS_OVERRIDE.profitRatchet = true` מדליק אותו, ואז TP1
+> החצי/TP2/הטריילינג שלמעלה מדולגים לגמרי (`intradayExit.ts`: `ratchet &&
+> ...` חוסם את כל שלושת הענפים) — היציאה היחידה מעל ה-SL היא הסולם
+> (1.8→3→4→5%…, 30% בחזרה למדרגה, סגירה מלאה ברצפת 1.8%). ה-SL, ה-Reversal
+> וסטופי הזמן עדיין גוברים; סטופי הזמן מושהים ברגע שנחצתה מדרגה. רמות
+> ה-SL/TP1/TP2 שלמעלה עדיין מחושבות ונשמרות על הפוזיציה — הן קובעות את
+> ה-R:R לשערי הכניסה, פשוט לא את היציאה בפועל. ראה "סולם רווח" ב-ALGO_MATH.md.
 
 **שער `RISK_VS_COST`** (`evaluateCostEdge`): נדחה כש-`riskPercent <
 minStopCostMultiple × totalCostPercent` — סטופ צר מכדי לשרוד את סבב
@@ -205,19 +216,25 @@ low/medium/high) קיימת כ**רפרנס בלבד** — `proMinConfidence()` �
 מוערך פעם אחת, על אצווה ממוינת ביטחון-יורד — כך שהסלוטים/המזומן מוקצים
 לאיתותים החזקים קודם.
 
-### גודל פוזיציה (§4 gate 7)
+### גודל פוזיציה (§4 gate 7) — `applyProEntryGates` ב-`proSimExecution.ts`
 ```
-budget = min(
-  initialAmount × (confidence > 80 ? 15% : 10%),   ← proAllocationPercent()
-  projectedCash,
-  equity × 8%                                       ← PER_ASSET_EXPOSURE_CAP_PERCENT
-)
+sizingBase     = resolveSizingBase(initialAmount, equity)   ← ההון ההתחלתי, לא equity חי
+targetNotional = sizingBase × PRO_ENTRY_ALLOCATION_PERCENT (10%)
+perAssetCap    = sizingBase × PER_ASSET_EXPOSURE_CAP_PERCENT (10%)
+budget         = min(targetNotional, projectedCash, perAssetCap)
 ```
-טבלת `PRO_ALLOCATION_BY_RISK` **הוסרה** (הייתה קוד מת — אף gate לא קרא לה).
+**תיקון תיעוד (2026-09-14):** הגרסה הישנה של הקטע הזה תיארה טבלת הקצאה
+לפי ביטחון (`confidence > 80 ? 15% : 10%`, `proAllocationPercent()`) ותקרת
+נכס בודד של 8%. שני הדברים שגויים בפועל: `proAllocationPercent()` **וטבלת
+`PRO_ALLOCATION_BY_RISK`** הוסרו — היו קוד מת שהפאנל הציג כאילו הוא חי, בעוד
+`applyProEntryGates` תמיד תיזמן לפי ביטחון בלבד, לא לפי `riskLevel`. הגודל
+היום הוא **מספר אחד קבוע (10%), בלי תלות בביטחון** — ראה
+`PRO_ENTRY_ALLOCATION_PERCENT`. תקרת הנכס הבודד היא **10%**, לא 8%
+(`PER_ASSET_EXPOSURE_CAP_PERCENT`), זהה לשלושת הבוטים האחרים.
+
 מינימום הזמנה בסימולציה: **$100** (`MIN_SIM_ENTRY_USD`) — budget מתחת לזה
-**מעוגל כלפי מעלה ל-$100** אם יש מזומן פנוי ו-equity ≥ $100 (עלול לחרוג
-מתקרת ה-8% לנכס בודד — פשרה מקובלת ל"מינימום $100 תמיד"); `NO_SIGNAL
-[NO_BUDGET]` רק כשאין $100 מזומן פנוי. חל על כל ארבעת בוטי הסימולציה.
+נדחה כ-`NO_SIGNAL [MIN_ORDER_EXCEEDS_POSITION_TARGET]`. חל על כל ארבעת
+בוטי הסימולציה.
 
 **תקרת מרחק ללימיט (2026-09-11):** `calculateOptimalEntryPrice` משקלל
 Bollinger-lower / MA20 / VAL / POC — מחיר "איפה התמיכה הקרובה", בלי שום קשר
@@ -241,14 +258,17 @@ Bollinger-lower / MA20 / VAL / POC — מחיר "איפה התמיכה הקרו�
 ### יציאה (`evaluateProExit`)
 ```
 SL   = ATR-scaled: clamp(atr%·1.6, 1.8%, 4.2%)   ·   תקרה PRO_STOP_LOSS_PERCENT 4.2%
-TP1  = max(1.5%, 1.5×SL)   ·   50% נסגר (TP1_EXIT_FRACTION)
-TP2  = TP1 × 1.5
-הרץ (50% שנותר) אחרי TP1 → סטופ עולה ל-BREAK-EVEN (2026-09-11). רץ ל-TP2 /
-     סטופ אמיתי / Flip-to-SELL. פעם נסגר על הטיק הראשון מתחת ל-TP1 — hair-trigger
-     זהה לזה שהוסר מ-Prev-4H, גזז את הרץ לפני TP2.
-Flip-to-SELL: SELL בביטחון ≥ סף → סוגר הכל. (בפועל כמעט אף פעם — SELL חסום ב-50, סף 60.)
+רווח = סולם רווח (profitRatchet.ts) — `proSimExecution.ts` מדליק
+       `profitRatchet: true` ללא תנאי בכל קריאה ל-`evaluateProExit`, כך
+       שהיציאה שלמעלה (TP1 חצי/TP2/break-even runner) **לעולם לא רצה
+       בסימולציה** — היא נשארת בקוד רק כברירת מחדל ל-`opts.profitRatchet`
+       שלא הועברה (למשל בדיקה שקוראת ל-evaluateProExit ישירות בלי opts).
+Flip-to-SELL: SELL בביטחון ≥ סף → סוגר הכל, גובר גם על סולם פעיל.
+     (בפועל כמעט אף פעם — SELL חסום ב-50, סף 60.)
 ```
-Spot בלבד — אין שורט, SELL על פוזיציה לא-מוחזקת מוצג בלבד.
+Spot בלבד — אין שורט, SELL על פוזיציה לא-מוחזקת מוצג בלבד. TP1/TP2 של
+תוכנית הכניסה (1.5%/1.5×SL, ×1.5) עדיין מחושבים ונשמרים על הפוזיציה
+לטלמטריה/R:R, אבל לא קובעים יציאה.
 
 ### מעגל שבירה
 זהה ל-Intraday (8%/15%), אבל **מיושם בקובץ שונה** — `proSimEngine.ts`
@@ -271,9 +291,21 @@ Spot בלבד — אין שורט, SELL על פוזיציה לא-מוחזקת מ
 > (`ASSETS/path-slot-study33/diagnostic.json`, 4.9M תוצאות) הראה **0 דליים עם
 > תוחלת חיובית אחרי עלויות** בכל regime — הקצה (~0.05R) קטן פי 5–10 מעלות
 > ה-round-trip (~0.28R). מודל הדליים, הטבלה, `/api/path-sim/table`
-> ו-`installValidatedTable` הוסרו. `pathEngine.ts`/`pathStudy.ts`/
-> `scripts/pathStudy.ts` נשארו על הדיסק (מספקים `aggregateToH4` וכו') אבל
-> **אף בוט לא קורא להם יותר**. סימולציה בלבד.
+> ו-`installValidatedTable` הוסרו. `pathStudy.ts`/`scripts/pathStudy.ts`
+> נשארו על הדיסק. `pathEngine.ts` עצמו **כן** עדיין חי — לא לסימולציה, אלא
+> כאסטרטגיה בתוך ה-DecisionEngine של הבוט האמיתי (`PathAdapter`,
+> `evaluatePathDecision`/`pathKellyFraction`). סימולציה בלבד.
+>
+> **⚠️ `pathSimExecution.ts` הוסר לגמרי (2026-09-14) — היה קוד מת.** זה היה
+> ה-order-generator **הקודם** של בוט הסימולציה (`generatePathOrders`),
+> ששימש את המנוע האמפירי הישן. כשהבוט עבר ל-Prev-4H Range,
+> `server/pathSimEngine.ts` עבר לקרוא ל-`generatePrev4hRangeOrders`
+> (`prev4hRangeExecution.ts`) **בלבד** — אבל `pathSimExecution.ts` נשאר על
+> הדיסק, מיוצא מה-barrel, בלי אף קורא אמיתי. תיקון סולם הרווח (ראה למטה)
+> חוּוט בטעות לתוכו בסבב עבודה קודם — הקוד עבר טסטים, טיפצ'ק ובנייה, כי שום
+> דבר לא בדק אינטגרציה מול השרת בפועל, ונשאר **לא פעיל בפועל על הבוט החי
+> בסימולציה** עד שאותרה ותוקנה כאן. `MIN_PATH_CANDLES`/`PATH_MIN_H4_BARS`
+> ממשיכים להתקיים — יוצאים עכשיו ישירות מ-`pathEngine.ts`, מקורם האמיתי.
 
 **קבצי מפתח:** `packages/engine/src/services/prev4hRange.ts` (הסיגנל),
 `prev4hRangeExecution.ts` (גודל + יציאות), `server/pathSimEngine.ts` (חיבור).
@@ -321,29 +353,35 @@ H = prev.high · L = prev.low · mid = (H+L)/2 · range = H−L · rangePct = ra
 משותף ל-Intraday/Pro/Bybit** — `BOT_MIN_CONFIDENCE` מגיע אליו עכשיו כמו לשאר
 (מנוע ה-Wilson/probability הישן נעלם).
 
-### גודל פוזיציה
+### גודל פוזיציה (`prev4hRangeExecution.ts` — לא risk-based, למרות שנראה כך)
 ```
-riskUsd  = equity × riskPerTrade (0.5%)
-notional = riskUsd / (R/entry)          ← R = |entry − mid| = range/2
-נחתך ב: נכס בודד 8% · חשיפה כוללת 20% (MAX_TOTAL_EXPOSURE_PERCENT) · רצפת $100 (MIN_SIM_ENTRY_USD)
+notional = sizingBase × positionTargetPct (10%)     ← ללא תלות במרחק ה-SL כלל
+sizingBase = resolveSizingBase(initialAmount, equity)  ← ההון ההתחלתי, לא ה-equity החי
+נחתך ב: נכס בודד 10% (PER_ASSET_EXPOSURE_CAP_PERCENT) · חשיפה כוללת 80%
+        (MAX_TOTAL_EXPOSURE_PERCENT) · מזומן פנוי · רצפת $100 (MIN_SIM_ENTRY_USD)
 ```
-פוזיציה אחת לסימבול, בלי scale-in.
+פוזיציה אחת לסימבול, בלי scale-in. ה-SL (`mid`) קובע רק כמה סיכון בדולרים
+נגזר מהגודל הקבוע — לא להפך. (התיעוד הישן כאן תיאר מודל risk-based ישן —
+נמחק מהקוד עצמו, הערת הכותרת של `prev4hRangeExecution.ts` מציינת זאת
+במפורש.)
 
-### יציאה
+### יציאה (`prev4hRangeExecution.ts`)
 ```
-SL   = mid (אמצע הטווח), נחתך לתקרת 4.2%
-TP1  = max(R×tpRangeMult, tp1FloorDistance)   R = |entry − mid|   ·   50% נסגר
-TP2  = TP1 × 1.5   ·   הרץ (50% שנותר):
-       אחרי TP1 → סטופ עולה ל-BREAK-EVEN (2026-09-10); רץ ל-TP2 / time-stop /
-       היפוך EMA. פעם נסגר על הטיק הראשון מתחת ל-TP1 — hair-trigger שגזז את
-       הרץ לפני TP2.
-Time stop: now >= pos.openTimestamp + BAR_MS  (4 שעות מהכניסה)
-היפוך: EMA20 (4H) התהפך לכיוון הנגדי (לא על בר שטוח — רק היפוך מובהק)
+SL     = mid (אמצע הטווח), נחתך לתקרת MAX_LOSS_PERCENT 4.2%
+רווח   = סולם רווח (profitRatchet.ts) — היציאה היחידה מעל SL, זהה לשאר 3
+         הבוטים: 1.8→3→4→5…, חזרה למדרגה ≥3% = מימוש 30%, חזרה ל-1.8% =
+         סגירה מלאה. TP1/TP2 של תוכנית הכניסה נשארים על הפוזיציה לטלמטריה
+         בלבד — הם לא קובעים יציאה יותר. ראה "סולם רווח" למעלה.
+Time stop: now >= pos.openTimestamp + BAR_MS (4 שעות)  — מושהה ברגע שנחצתה מדרגה
+היפוך: EMA20 (4H) התהפך לכיוון הנגדי — גובר גם על סולם פעיל (הבוט קיים רק כל
+       עוד המגמה מחזיקה)
 ```
+עד 2026-09-14 תיאר הקטע הזה TP1 חצי + break-even + TP2 — זו הייתה ההתנהגות
+**המתועדת**, לא זו שרצה בפועל (ראה אזהרת `pathSimExecution.ts` למעלה).
 
 ### מעגל שבירה ותקרת נכס
-זהה לשלושת האחרים (8%/15% drawdown, 8% תקרת נכס) — ב-
-`generatePrev4hRangeOrders`.
+זהה לשאר 3 הבוטים (8%/15% drawdown, 10% תקרת נכס בודד, 80% חשיפה כוללת) —
+ב-`generatePrev4hRangeOrders`.
 
 ### מה תוצאה בריאה אמורה להיראות
 - רוב הסימבולים: `NO_SIGNAL [AGAINST_TREND]` או `[NO_BREAKOUT]` — תקין,
@@ -386,12 +424,19 @@ H1 Supertrend 25 · H1 EMA 20 · פריצת M15 25 · אישור נפח 15 · א
 סף כניסה `MIN_CONFIDENCE = 70`. זהו **Score**, לא הסתברות — קנה מידה משותף
 ל-Intraday/Pro, שונה מ-Path.
 
-### גודל פוזיציה (§14 + §15)
-`riskUsd = equity × 0.5%` ; `fullNotional = riskUsd / (|entry−SL| / entry)`.
-נחתך קשיח ע"י התקרות המשותפות: נכס בודד ≤ 8% מ-equity
-(`PER_ASSET_EXPOSURE_CAP_PERCENT`), חשיפה כוללת ≤ 20%
-(`MAX_TOTAL_EXPOSURE_PERCENT`, `trendBreakoutExecution.ts`). **מכיוון שה-SL
-הדוק (1.5×ATR(M15)), תקרת ה-8% היא לרוב האילוץ הכובל — וזה מכוון.**
+### גודל פוזיציה (§14 + §15) — לא risk-based, זהה למודל של שאר 3 הבוטים
+```
+sizingBase   = resolveSizingBase(initialAmount, equity)
+fullNotional = sizingBase × positionTargetPct (10%)
+```
+**תיקון תיעוד (2026-09-14):** הגרסה הישנה תיארה `riskUsd = equity × 0.5%`
+(מודל risk-based) — לא כך זה עובד בפועל; `trendBreakoutExecution.ts` קורא
+ל-`sizingBase × p.positionTargetPct` בדיוק כמו Path/Pro/Intraday. ה-SL
+(1.5×ATR(M15)) קובע רק כמה סיכון בדולרים יוצא מהגודל הקבוע.
+
+נחתך קשיח ע"י התקרות המשותפות: נכס בודד ≤ 10% מ-equity
+(`PER_ASSET_EXPOSURE_CAP_PERCENT`, לא 8%), חשיפה כוללת ≤ 80%
+(`MAX_TOTAL_EXPOSURE_PERCENT`, לא 20%).
 
 ### Scale-in (§11) — מודל lots
 `fillDueOrders` לא יודע להוסיף לפוזיציה, לכן כל scale הוא `SimPosition` נפרד.
@@ -412,8 +457,15 @@ SCALE_3 רק מעל **+1.5R** + Supertrend עדיין בכיוון (הועבר �
 כלשהו יותר מ-4.2% בהפסד מהכניסה שלו → יציאת חירום. ליחיד-לוט אין שינוי.
 
 ### יציאות (§13)
-סטופ אפקטיבי נחצה · TP (2R) · היפוך H1 Supertrend נגד הפוזיציה · Time Stop
-אחרי 24 נרות H1. setup שהתבטל → חוסם scale-in נוסף, לא סוגר.
+```
+סטופ אפקטיבי נחצה  ·  סולם רווח (profitRatchet.ts, ללא תנאי — לא מאחורי
+    calmRegimeScalp)  ·  היפוך H1 Supertrend נגד הפוזיציה (גובר גם על סולם
+    פעיל — הבוט קיים רק כל עוד המגמה מחזיקה)  ·  Time Stop אחרי 24 נרות H1
+    (מושהה אם נחצתה מדרגה)
+```
+setup שהתבטל → חוסם scale-in נוסף, לא סוגר. **TP הישן (2R)** מחושב ונשמר
+על הפוזיציה לטלמטריה/R:R, אבל הסולם — לא נגיעה ב-TP — הוא שקובע יציאת רווח
+בפועל, מ-2026-09-14.
 
 ### מצב מילוי — MARKET בלבד (2026-09-10)
 הבוט **לא קורא** ב-`proLimitEntries`. לימיט נח מתחת לשוק הוא בחירה שלילית
@@ -452,6 +504,24 @@ SCALE_3 רק מעל **+1.5R** + Supertrend עדיין בכיוון (הועבר �
 | רצפת גודל בפחד (opt-in) | F&G 20–35 + MEAN_REVERSION BUY → מכפיל ≥ 0.9 | `simExecution.ts` — **Intraday בלבד** |
 | מדרגת Scalp קבועה (opt-in) | תמיד SL 2.3/TP1 1.8/TP2 3.5; גל קונים → סטופ רחב | `calmRegime.ts` — **כל 4 הבוטים** |
 | סולם רווח (opt-in) | 1.8→3→4→5…; חזרה למדרגה = 30%, רצפת 1.8% = סגירה | `profitRatchet.ts` — **כל 4 הבוטים** |
+| צינון כניסה חוזרת | 60 דק' אחרי **כל** יציאה מלאה | `ENTRY_COOLDOWN_MS` — **כל 4 הבוטים** |
+
+### צינון כניסה חוזרת — `ENTRY_COOLDOWN_MS` (2026-09-14)
+אחרי **כל** יציאה מלאה מסימבול, כניסה חדשה בו חסומה למשך **60 דקות** — גם אם
+האות ממשיך לירות. מימוש חלקי (רגל 30% של הסולם) **לא** רושם צינון: הפוזיציה
+עדיין פתוחה וזו לא כניסה חוזרת.
+
+שני באגים תוקנו כאן יחד, אחרי דיווח מריצה חיה של Pro:
+1. **`generateProOrders` מעולם לא קיבל את `exitCooldown`.** Pro היה הבוט היחיד
+   ללא צינון כניסה חוזרת בכלל. נצפה: B3 נסגר ב-+$12.23 ב-13:45, נקנה מחדש
+   ב-13:56, ונחתך ב--$20.59 ב-14:05 — ארבע עסקאות על סימבול אחד ב-65 דקות.
+2. **הליבה רשמה צינון רק על סגירה מפסידה** (`if (pnl < 0)`). יציאה **מרוויחה**
+   — הסיבה הטובה ביותר להניח לסימבול, כי התנועה כבר נגבתה — הייתה המקרה
+   היחיד שאיפשר כניסה מיידית. אסימטריה שאיש לא בחר בה.
+
+הצינון עלה 2 → 30 → **60** דקות. סימולציה בלבד: לבוט החי מנגנון נפרד
+(`REENTRY_COOLDOWN_MS` ב-`tradingWorker.ts`, ברירת מחדל 24 שעות) שלא הושפע.
+
 
 ### סולם רווח — `profitRatchet.ts` (2026-09-14)
 מחליף את **כל** יציאות הרווח בארבעת הבוטים: TP1 חלקי 50%, TP2, הטריילינג של

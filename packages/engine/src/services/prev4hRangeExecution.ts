@@ -17,6 +17,7 @@
 //     trend flip against the position.
 
 import { Candle, calculateEMA } from './tradeEngine';
+import { evaluateRatchet, ratchetReason } from './profitRatchet';
 import { aggregateToH4 } from './pathEngine';
 import { barOpenFor, BAR_MS } from './pathStudy';
 import type { SignalEvaluation } from './intradayBridge';
@@ -31,10 +32,8 @@ import {
 import {
   isLongSide,
   reachedStop,
-  reachedTarget,
   positionPnlPercent,
   capStopLoss,
-  TP1_EXIT_FRACTION,
   MAX_LOSS_PERCENT
 } from './exitPolicy';
 import {
@@ -133,34 +132,35 @@ export function generatePrev4hRangeOrders(ctx: Prev4hRangeOrderGenContext): Pend
     // signal-side cap existed (stored stop = range midpoint, which can sit
     // past 4.2%) has its effective stop pulled in here — never loosened.
     const effectiveStopLoss = capStopLoss(pos.entryPrice, pos.stopLoss, isLong);
-    // After TP1 the runner is protected at BREAK-EVEN and rides on to TP2, the
-    // 4H time stop, or an EMA reversal. It used to be closed on the FIRST tick
-    // back below TP1 — a hair-trigger that clipped the runner before it could
-    // reach the 2nd target (a 0.1% dip after a TP1 touch closed it). Break-even
-    // means the runner half can never turn into a loss.
-    const runnerStop = pos.tp1Hit
-      ? (isLong ? Math.max(effectiveStopLoss, pos.entryPrice) : Math.min(effectiveStopLoss, pos.entryPrice))
-      : effectiveStopLoss;
-    let reason = '';
 
-    // TP1 closes half and lets the rest run to TP2 (operator decision
-    // 2026-09-08). Checked before the full-exit branches so a position that
-    // reaches TP1 takes its partial rather than being closed whole.
-    const tp1 = pos.takeProfit1;
-    // `?? Infinity` would have inverted this for a SHORT (live <= Infinity is
-    // always true) — an absent TP2 means "not reached", never "reached".
-    const tp2Reached = pos.takeProfit2 !== undefined && reachedTarget(live, pos.takeProfit2, isLong);
-    if (!pos.tp1Hit && tp1 && reachedTarget(live, tp1, isLong) && !tp2Reached) {
+    // Profit ratchet (2026-09-14) — the ONLY profit exit, replacing TP1's 50%
+    // partial + the break-even-after-TP1 runner stop + TP2 outright. Rungs at
+    // 1.8/3/4/5%… are marked on the way up and sell nothing; coming back down
+    // to one sells 30% of the remainder, and the 1.8% floor closes the whole
+    // position. See profitRatchet.ts. Below the first rung the ORIGINAL stop
+    // (not a break-even one — the ratchet owns "protect the profit" now) still
+    // applies, unchanged.
+    const ratchet = evaluateRatchet({
+      entryPrice: pos.entryPrice,
+      peakPrice: (isLong ? pos.highestPrice : pos.lowestPrice) ?? pos.entryPrice,
+      livePrice: live,
+      isLong,
+      consumed: pos.ratchetConsumed
+    });
+
+    if (ratchet.action === 'PARTIAL') {
       closingSymbols.add(pos.symbol);
       newOrders.push({
-        id: uid(`${pos.symbol}-tp1`),
+        id: uid(`${pos.symbol}-ratchet`),
         symbol: pos.symbol,
         positionId: pos.id,
         type: pos.type,
         side: 'partial_tp1',
+        exitFraction: ratchet.fraction,
+        ratchetConsumed: ratchet.consumed,
         signalPrice: live,
-        quantity: pos.quantity * TP1_EXIT_FRACTION,
-        reason: `TP1 הושג ב-${tp1} (+${pnlPct.toFixed(2)}%) — סגירת ${(TP1_EXIT_FRACTION * 100).toFixed(0)}%`,
+        quantity: pos.quantity * (ratchet.fraction ?? 0),
+        reason: ratchetReason(ratchet),
         confidence: pos.confidence,
         executeAt: now + delayMs,
         createdAt: now
@@ -168,18 +168,20 @@ export function generatePrev4hRangeOrders(ctx: Prev4hRangeOrderGenContext): Pend
       continue;
     }
 
-    if (now >= pos.openTimestamp + BAR_MS) {
+    let reason = '';
+    if (reachedStop(live, effectiveStopLoss, isLong)) {
+      reason = `Stop Loss ב-${effectiveStopLoss} (${pnlPct.toFixed(2)}%, תקרה ${MAX_LOSS_PERCENT}%)`;
+    } else if (ratchet.action === 'FULL') {
+      reason = ratchetReason(ratchet);
+    } else if (ratchet.peakRung === undefined && now >= pos.openTimestamp + BAR_MS) {
+      // Suspended once a rung is crossed (operator decision 2026-09-14): a
+      // position already climbing the ladder runs to the ladder's own verdict
+      // instead of being cut off by the 4H window.
       reason = 'יציאה אחרי 4 שעות (time stop)';
-    } else if (reachedStop(live, runnerStop, isLong)) {
-      reason = pos.tp1Hit && Math.abs(runnerStop - pos.entryPrice) <= Math.abs(pos.entryPrice) * 1e-9
-        ? `Break-even stop אחרי TP1 ב-${runnerStop} (${pnlPct.toFixed(2)}%)`
-        : `Stop Loss ב-${runnerStop} (${pnlPct.toFixed(2)}%, תקרה ${MAX_LOSS_PERCENT}%)`;
-    } else if (tp2Reached) {
-      reason = `TP2 הושג ב-${pos.takeProfit2} (+${pnlPct.toFixed(2)}%)`;
     } else {
       const trend = h4EmaTrend(ctx.candlesBySymbol[pos.symbol]?.h1, p.emaPeriod);
-      // Close only on an outright REVERSAL (trend now points the other way),
-      // not on a merely-flat bar — that would churn the position out early.
+      // A confirmed trend reversal still closes a laddered position — this bot
+      // only exists while the 4H trend holds, ladder or not.
       if (trend && (isLong ? trend === 'DOWN' : trend === 'UP')) {
         reason = `היפוך מגמה — EMA20 (4H) התהפך ל${isLong ? 'ירידה' : 'עלייה'}`;
       }

@@ -7,9 +7,10 @@
  *     setups first and, near the 55 floor, could reject the clean ones.
  *  2. `rangeScore` is monotonic in bandPos — a tight reference range (tight
  *     `mid` stop → a TP1 reachable inside the one 4H window) scores highest.
- *  3. After TP1 the runner is protected at BREAK-EVEN and rides to TP2 / the 4H
- *     time stop / an EMA reversal — it is no longer closed on the first tick
- *     back below TP1.
+ *  3. (SUPERSEDED 2026-09-14) The break-even-after-TP1 runner stop and the
+ *     TP1-half/TP2 ladder no longer exist — the profit ratchet
+ *     (profitRatchet.ts) is the only profit exit. See the #3 block below,
+ *     rewritten to pin the ratchet's behaviour instead.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -91,29 +92,66 @@ const ctx = (positions: SimPosition[], price: number): Prev4hRangeOrderGenContex
   priceFor: () => price, candlesBySymbol: {}, maxPositions: 5, maxFuturesPositions: 2
 });
 
-describe('#3 — the runner survives a dip below TP1 and is capped at break-even', () => {
-  it('tp1Hit, price back below TP1 but above entry → NOT closed (was: hair-trigger exit)', () => {
-    const orders = generatePrev4hRangeOrders(ctx([pos({ tp1Hit: true })], 104));
+describe("#3 (2026-09-14) — the profit ratchet is Path's only profit exit", () => {
+  // entry 100, stop 98. Peak is set via `highestPrice`, the way
+  // server/simEngineFactory.ts actually tracks it tick-to-tick — a hand-set
+  // `tp1Hit` flag with no peak history (the old version of this test) cannot
+  // exercise the ratchet at all, since it has nothing to measure a give-back
+  // against.
+
+  it('a rising price that just touched a new high is marked, not sold', () => {
+    // Peak == live == +8%: this is the FIRST tick at this high, not a retrace.
+    const orders = generatePrev4hRangeOrders(ctx([pos({ highestPrice: 108 })], 108));
     expect(orders.filter((o) => o.positionId === 'p1')).toHaveLength(0);
   });
 
-  it('tp1Hit, price back to entry → closed as a BREAK-EVEN stop, not a loss', () => {
-    const orders = generatePrev4hRangeOrders(ctx([pos({ tp1Hit: true })], 99.9));
-    const close = orders.find((o) => o.positionId === 'p1');
+  it('peak below the first rung: the ORIGINAL stop still governs, not a break-even one', () => {
+    // Peak 101.5 (+1.5%, under the 1.8% rung) pulls back to entry — the
+    // ratchet never armed, so this is judged purely against the 98 stop.
+    const orders = generatePrev4hRangeOrders(ctx([pos({ highestPrice: 101.5 })], 99.9));
+    expect(orders.filter((o) => o.positionId === 'p1')).toHaveLength(0);
+    const atStop = generatePrev4hRangeOrders(ctx([pos({ highestPrice: 101.5 })], 97.9));
+    const close = atStop.find((o) => o.positionId === 'p1');
     expect(close?.side).toBe('close_long');
-    expect(close?.reason).toContain('Break-even');
+    expect(close?.reason).toContain('Stop Loss');
   });
 
-  it('pre-TP1 stop-out is unchanged — mid-range stop still fires as Stop Loss', () => {
+  it('peak +4.2%, pullback to +4%: sells 30%, not the whole position', () => {
+    const orders = generatePrev4hRangeOrders(ctx([pos({ highestPrice: 104.2 })], 104));
+    const partial = orders.find((o) => o.positionId === 'p1');
+    expect(partial?.side).toBe('partial_tp1');
+    expect(partial?.exitFraction).toBeCloseTo(0.3, 6);
+    expect(partial?.reason).toContain('סולם רווח');
+  });
+
+  it('peak +2.5%, pullback to the 1.8% floor: closes the whole position', () => {
+    const orders = generatePrev4hRangeOrders(ctx([pos({ highestPrice: 102.5 })], 101.8));
+    const close = orders.find((o) => o.positionId === 'p1');
+    expect(close?.side).toBe('close_long');
+    expect(close?.reason).toContain('סולם רווח');
+    expect(close?.reason).toContain('1.8%');
+  });
+
+  it('pre-ratchet stop-out is unchanged — mid-range stop still fires as Stop Loss', () => {
     const orders = generatePrev4hRangeOrders(ctx([pos({ tp1Hit: false })], 97.9));
     const close = orders.find((o) => o.positionId === 'p1');
     expect(close?.side).toBe('close_long');
     expect(close?.reason).toContain('Stop Loss');
   });
 
-  it('tp1Hit runner still takes TP2 when it prints', () => {
-    const orders = generatePrev4hRangeOrders(ctx([pos({ tp1Hit: true })], 108));
+  it('the 4H time stop is suspended once a rung has armed', () => {
+    // Peak +2.5% (rung 1.8 armed), well past the 4H window, but still ABOVE
+    // every rung — the ratchet has not said FULL/PARTIAL yet, so the time stop
+    // must not cut it off early.
+    const stale = pos({ highestPrice: 102.5, openTimestamp: Date.now() - 5 * BAR_MS });
+    const orders = generatePrev4hRangeOrders(ctx([stale], 102.4));
+    expect(orders.filter((o) => o.positionId === 'p1')).toHaveLength(0);
+  });
+
+  it('the 4H time stop still fires when no rung has ever armed', () => {
+    const stale = pos({ openTimestamp: Date.now() - 5 * BAR_MS });
+    const orders = generatePrev4hRangeOrders(ctx([stale], 100.5));
     const close = orders.find((o) => o.positionId === 'p1');
-    expect(close?.reason).toContain('TP2');
+    expect(close?.reason).toContain('time stop');
   });
 });

@@ -129,6 +129,9 @@ const proStrategy: SimEngineStrategy = {
       signalsBySymbol,
       minConfidence,
       executionDelaySec: input.config.executionDelaySec,
+      // Pro was the one sim bot never handed this map, so it had no re-entry
+      // cooldown at all (2026-09-14).
+      exitCooldown: input.exitCooldown,
       priceFor: input.priceFor,
       limitEntries: input.config.proLimitEntries === true
     });

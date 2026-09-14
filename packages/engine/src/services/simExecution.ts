@@ -479,12 +479,21 @@ export function riskLevelSizingMultiplier(riskLevel?: 'low' | 'medium' | 'high')
   return 1;
 }
 
-/** Safety net against rapid re-entry churn: after a LOSING full exit, skip new
+/** Safety net against rapid re-entry churn: after ANY full exit, skip new
  *  entries on that symbol for this cooldown window even if the signal still
- *  fires. Raised from 2 to 30 minutes so reversal-churn in choppy markets
- *  (exit on reversal → immediate re-entry → another reversal) stops bleeding
- *  double fees/slippage every cycle. */
-export const ENTRY_COOLDOWN_MS = 30 * 60 * 1000;
+ *  fires. Raised 2 → 30 → 60 minutes, and widened from losses-only to every
+ *  exit (operator decision 2026-09-14).
+ *
+ *  The losses-only version was an asymmetry nobody chose: a WINNING exit wrote
+ *  no cooldown at all, so the single best reason to leave a symbol alone —
+ *  its move is already banked — was the one case that allowed instant
+ *  re-entry. Observed on the Pro bot: B3 closed +$12.23 at 13:45, was
+ *  re-bought at 13:56, and stopped out −$20.59 at 14:05. Four trades on one
+ *  symbol inside 65 minutes.
+ *
+ *  Partial exits deliberately do NOT write a cooldown — the position is still
+ *  open, and the ratchet's 30% legs are not re-entries. */
+export const ENTRY_COOLDOWN_MS = 60 * 60 * 1000;
 
 export function isInEntryCooldown(cooldownAt: number | undefined, now: number = Date.now()): boolean {
   return typeof cooldownAt === 'number' && now - cooldownAt < ENTRY_COOLDOWN_MS;
@@ -1406,7 +1415,8 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
         feesAdded += fee;
         slipAdded += Math.abs(market - exitPrice) * pos.quantity;
         workingPositions = workingPositions.filter((p) => p.id !== pos.id);
-        if (pnl < 0) newCooldowns[order.symbol] = Date.now();
+        // EVERY full exit, not just losers — see ENTRY_COOLDOWN_MS.
+        newCooldowns[order.symbol] = Date.now();
 
         const pnlPercent = pos.type === 'SPOT'
           ? (pnl / (pos.quantity * pos.avgPrice)) * 100

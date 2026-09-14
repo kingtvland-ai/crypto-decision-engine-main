@@ -59,6 +59,17 @@ export interface LivePositionChartProps {
   takeProfit?: number;
   takeProfit1?: number;
   breakEvenPrice?: number;
+  /** Profit-ratchet levels (profitRatchet.ts) — the ACTUAL exit mechanism for
+   *  every sim bot since 2026-09-14, in price terms. Supersede takeProfit /
+   *  takeProfit1 for the chart's profit marker: those are the entry-time plan,
+   *  but the ratchet — not touching TP1 — is what closes the position now.
+   *  `undefined` (prop omitted) keeps the legacy takeProfit/takeProfit1 line
+   *  for a caller that has not computed ratchet levels; `null` is the ratchet's
+   *  own "nothing armed yet" answer and must NOT fall back to takeProfit1 (that
+   *  would silently resurrect the misleading old line). */
+  ratchetArmedPrice?: number | null;
+  ratchetArmedIsFullClose?: boolean;
+  ratchetNextRungPrice?: number;
   leverage?: number;
   unrealizedPnl?: number;
   /** Confidence (0-100) the engine entered this position with — shown as a
@@ -123,6 +134,9 @@ export const LivePositionChart: React.FC<LivePositionChartProps> = ({
   takeProfit,
   takeProfit1,
   breakEvenPrice,
+  ratchetArmedPrice,
+  ratchetArmedIsFullClose,
+  ratchetNextRungPrice,
   leverage = 1,
   unrealizedPnl,
   confidence,
@@ -136,7 +150,18 @@ export const LivePositionChart: React.FC<LivePositionChartProps> = ({
   const hasDataRef = useRef(false);
 
   const isLong = side === 'BUY' || side === 'LONG';
-  const effectiveTP = takeProfit || takeProfit1;
+  // Ratchet-aware, in priority order: an ARMED trigger (a sell fires if price
+  // reaches it) beats the NEXT rung (informational — price has to climb
+  // further before it even arms) beats the legacy static TP1/TP fallback for
+  // a caller that never computed ratchet levels at all.
+  const usingRatchet = ratchetArmedPrice !== undefined || ratchetNextRungPrice !== undefined;
+  const effectiveTP = usingRatchet
+    ? (ratchetArmedPrice ?? ratchetNextRungPrice)
+    : (takeProfit || takeProfit1);
+  const tpIsArmedSell = usingRatchet && ratchetArmedPrice != null;
+  const tpLabel = tpIsArmedSell
+    ? (ratchetArmedIsFullClose ? 'סגירה' : 'מימוש 30%')
+    : usingRatchet ? 'מדרגה הבאה' : 'TP';
   const effectiveLeverage = leverage > 0 ? leverage : 1;
 
   // PnL calculations
@@ -479,8 +504,18 @@ export const LivePositionChart: React.FC<LivePositionChartProps> = ({
                     label={{ value: `SL: $${formatFullPrice(stopLoss)}`, fill: '#f87171', fontSize: 10, position: 'insideBottomLeft' }} />
                 )}
                 {effectiveTP && (
-                  <ReferenceLine y={effectiveTP} stroke="#10b981" strokeWidth={1.5}
-                    label={{ value: `TP: $${formatFullPrice(effectiveTP)}`, fill: '#34d399', fontSize: 10, position: 'insideTopRight' }} />
+                  <ReferenceLine
+                    y={effectiveTP}
+                    stroke={tpIsArmedSell ? '#f59e0b' : '#10b981'}
+                    strokeWidth={1.5}
+                    strokeDasharray={tpIsArmedSell ? undefined : '4 3'}
+                    label={{
+                      value: `${tpLabel}: $${formatFullPrice(effectiveTP)}`,
+                      fill: tpIsArmedSell ? '#fbbf24' : '#34d399',
+                      fontSize: 10,
+                      position: 'insideTopRight'
+                    }}
+                  />
                 )}
                 {breakEvenPrice && (
                   <ReferenceLine y={breakEvenPrice} stroke="#a855f7" strokeDasharray="2 2"
@@ -515,7 +550,7 @@ export const LivePositionChart: React.FC<LivePositionChartProps> = ({
               <div className="flex justify-between text-[11px] font-mono text-muted-foreground">
                 <span className="text-rose-400">SL: ${formatFullPrice(stopLoss || entryPrice * (isLong ? 0.95 : 1.05))}</span>
                 <span className="text-emerald-400 font-bold">כניסה: ${formatFullPrice(entryPrice)}</span>
-                <span className="text-emerald-400">TP: ${formatFullPrice(effectiveTP || entryPrice * (isLong ? 1.05 : 0.95))}</span>
+                <span className={tpIsArmedSell ? 'text-amber-400' : 'text-emerald-400'}>{tpLabel}: ${formatFullPrice(effectiveTP || entryPrice * (isLong ? 1.05 : 0.95))}</span>
               </div>
               <div className="relative h-2 w-full bg-muted/40 rounded-full overflow-hidden">
                 <div
@@ -546,9 +581,9 @@ export const LivePositionChart: React.FC<LivePositionChartProps> = ({
           )}
           {effectiveTP && (
             <div className="flex items-center gap-1 text-muted-foreground">
-              <Target className="w-3.5 h-3.5 text-emerald-400" />
-              <span>TP: </span>
-              <span className="text-emerald-400 font-semibold">${formatFullPrice(effectiveTP)}</span>
+              <Target className={`w-3.5 h-3.5 ${tpIsArmedSell ? 'text-amber-400' : 'text-emerald-400'}`} />
+              <span>{tpLabel}: </span>
+              <span className={`font-semibold ${tpIsArmedSell ? 'text-amber-400' : 'text-emerald-400'}`}>${formatFullPrice(effectiveTP)}</span>
             </div>
           )}
           {breakEvenPrice && (

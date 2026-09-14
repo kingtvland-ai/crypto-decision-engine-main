@@ -36,7 +36,7 @@ import { isBuyingSurge } from './calmRegime';
 import type { Candle } from './tradeEngine';
 import type { SignalEvaluation, DecisionFactor } from './intradayBridge';
 import type { SimPosition, PendingOrder } from './simExecution';
-import { MIN_SIM_ENTRY_USD, MIN_ORDER_EXCEEDS_POSITION_TARGET, blockEntry, pickPreemptibleEntryOrder } from './simExecution';
+import { MIN_SIM_ENTRY_USD, MIN_ORDER_EXCEEDS_POSITION_TARGET, blockEntry, pickPreemptibleEntryOrder, isInEntryCooldown } from './simExecution';
 import { isLongSide, TP1_EXIT_FRACTION, TP1_PERCENT, TP2_PERCENT, MAX_LOSS_PERCENT } from './exitPolicy';
 
 export const uid = (p: string) => `pro-${p}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -314,6 +314,12 @@ export interface ProOrderGenContext {
   signalsBySymbol: Record<string, ProSignalResult>;
   minConfidence: number;
   executionDelaySec: number;
+  /** Per-symbol timestamp of the last full exit. Pro had NO re-entry cooldown
+   *  at all until 2026-09-14 — it was the one sim bot whose order generator
+   *  never received this map, so it re-bought a symbol minutes after closing
+   *  it (B3: closed +$12.23 at 13:45, re-bought 13:56, stopped out at 14:05).
+   *  See ENTRY_COOLDOWN_MS. */
+  exitCooldown?: Record<string, number>;
   priceFor: (symbol: string) => number | undefined;
   /** §6 execution mode. When true, entries rest as LIMIT orders at the signal
    *  price — the bot waits until the market reaches it (or a better price) and
@@ -383,6 +389,12 @@ export function generateProOrders(ctx: ProOrderGenContext): PendingOrder[] {
   // heartbeat) — not a second gate.
   for (const ev of evaluations) {
     if (!ev.willExecute || ev.action !== 'buy' || !ev.price) continue;
+    // Re-entry cooldown (2026-09-14). Reported, not a bare `continue` — an
+    // operator looking at "why didn't it buy" needs to see this.
+    if (isInEntryCooldown(ctx.exitCooldown?.[ev.symbol])) {
+      blockEntry(ev, 'ENTRY_COOLDOWN', 'צינון אחרי יציאה קודמת במטבע הזה', '[pro-sim]');
+      continue;
+    }
     const budget = ev.budgetUsd ?? 0; // §4 gate 7, allocated in the gate pass
     // Was a bare `continue` — the same blindness that hid Bybit's zero-entry
     // run. The §4 gate pass already approved this evaluation, so a refusal here

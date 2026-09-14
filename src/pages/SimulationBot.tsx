@@ -400,6 +400,7 @@ const SimulationBotPage = () => {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <SimulationEngineColumn
             title="מנוע חדש · Multi-Timeframe"
+            testId="intraday"
             subtitle="Setup + Entry מבניים על 1H/15M/5M"
             accentClass="text-primary"
             cryptoData={cryptoData}
@@ -431,6 +432,7 @@ const SimulationBotPage = () => {
 
           <SimulationEngineColumn
             title="בוט פרו · alg.md"
+            testId="pro"
             subtitle={`מימוש alg.md · אשכול RSI/MA/BB/Stoch נספר עם עונש קורלציה (1/√n) · קנייה כשהביטחון עובר ${PRO_DEFAULT_ENTRY_CONFIDENCE}% · הקצאה ${PRO_ENTRY_ALLOCATION_PERCENT * 100}% מהמזומן · SL ${PRO_STOP_LOSS_PERCENT}% (תקרה, ATR-scaled) / TP ${PRO_TAKE_PROFIT_PERCENT}%`}
             accentClass="text-amber-400"
             cryptoData={cryptoData}
@@ -462,6 +464,7 @@ const SimulationBotPage = () => {
 
           <SimulationEngineColumn
             title="נתיב 4H · טווח נר קודם"
+            testId="path"
             subtitle="פריצת הגבוה/נמוך של נר ה-4H הקודם, בכיוון מגמת EMA20 (4H) · SL = אמצע הטווח, TP = טווח×1 · יציאה בסוף הנר"
             accentClass="text-violet-400"
             cryptoData={cryptoData}
@@ -493,6 +496,7 @@ const SimulationBotPage = () => {
 
           <SimulationEngineColumn
             title="Bybit · TrendBreakout"
+            testId="bybit"
             subtitle="פריצת Donchian(20) ב-M15 על מגמת H1 (Supertrend + EMA50/200), תזמון M5 · SL 1.5×ATR, TP 2R, scale-in 50/30/20 · סימולציה בלבד"
             accentClass="text-cyan-400"
             cryptoData={cryptoData}
