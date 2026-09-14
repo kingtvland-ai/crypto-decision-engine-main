@@ -88,6 +88,8 @@ export {
   riskLevelSizingMultiplier,
   ENTRY_COOLDOWN_MS,
   isInEntryCooldown,
+  shouldAllowReentryAfterLoss,
+  detectMarketStress,
   MIN_SIM_ENTRY_USD,
   blockEntry,
   generateNewOrders,

@@ -89,6 +89,20 @@ describe('evaluateTrendBreakout — signal', () => {
     expect(plan.takeProfit2 - plan.entryRef).toBeCloseTo(1.5 * (plan.takeProfit1 - plan.entryRef), 4);
   });
 
+  // Regression (2026-09-14): every evaluation left `regime` unset — the SIGNAL
+  // path even set it to `undefined` explicitly — so the UI's regime
+  // distribution panel (SimulationEngineColumn) counted every TrendBreakout
+  // evaluation as "no data" and always showed 0 across the board, even with
+  // 40/40 symbols scanned. Cosmetic only (willExecute never reads `regime`),
+  // but it's the diagnostic panel an operator uses to tell "no trend anywhere
+  // right now" apart from "this bot doesn't report trend at all".
+  it('reports a real regime on a firing SIGNAL, matching the trade direction', () => {
+    const ev = evaluateTrendBreakout(longSignalInput());
+    expect(ev.regime).toBeDefined();
+    expect(ev.regime!.regime).toBe('TRENDING');
+    expect(ev.regime!.direction).toBe('BULL');
+  });
+
   it('abstains with H1_TREND_NEUTRAL when H1 has no sustained trend', () => {
     const ev = evaluateTrendBreakout({
       symbol: 'FLAT',
@@ -99,6 +113,10 @@ describe('evaluateTrendBreakout — signal', () => {
     });
     expect(ev.willExecute).toBe(false);
     expect(ev.status).toContain('H1_TREND_NEUTRAL');
+    // Even the earliest abstain now carries a regime — TRANSITIONAL, since
+    // this strategy has no separate RANGING detector to draw that line.
+    expect(ev.regime).toBeDefined();
+    expect(ev.regime!.regime).toBe('TRANSITIONAL');
   });
 
   it('abstains with VOLUME_TOO_LOW when the breakout has no volume behind it', () => {

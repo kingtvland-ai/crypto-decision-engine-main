@@ -1,7 +1,7 @@
 /**
- * Re-entry cooldown (2026-09-14)
+ * Re-entry cooldown (2026-09-14, revised same day)
  * ============================================================================
- * Two defects, reported from a live Pro run:
+ * Originally two defects, reported from a live Pro run:
  *   1. `generateProOrders` never received `exitCooldown` at all — Pro was the
  *      only sim bot with NO re-entry cooldown. B3 closed +$12.23 at 13:45, was
  *      re-bought at 13:56, and stopped out −$20.59 at 14:05.
@@ -9,7 +9,11 @@
  *      winning exit — the best reason to leave a symbol alone — left it
  *      instantly re-enterable in every bot.
  *
- * Both are now: 60 minutes, on every full exit, in all four bots.
+ * #1 is fixed permanently — Pro always gets a cooldown now. #2 was widened to
+ * fire on every exit, then reverted back to losses-only on operator request:
+ * a winning exit means the setup worked, so re-entering a fresh signal on the
+ * same symbol is not "chasing" — that risk lived specifically in the
+ * post-loss case. So: 60 minutes, on a LOSING full exit only, in all four bots.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -59,18 +63,18 @@ const fill = (order: PendingOrder, pos: SimPosition, price: number) =>
   fillDueOrders([order], 1000, [pos], () => price, String,
     { feePercent: 0.1, slippagePercent: 0 });
 
-describe('the fill core writes a cooldown on EVERY full exit', () => {
-  it('writes one after a WINNING exit — the reported regression', () => {
+describe('the fill core writes a cooldown only on a LOSING full exit', () => {
+  it('writes NO cooldown after a WINNING exit — banking a move is not chasing', () => {
     const res = fill(closeOrder(), position(), 1.05);
     expect(res.newTrades[0].pnl!).toBeGreaterThan(0);
-    expect(res.newCooldowns.B3).toBeGreaterThan(0);
-    expect(isInEntryCooldown(res.newCooldowns.B3)).toBe(true);
+    expect(res.newCooldowns.B3).toBeUndefined();
   });
 
-  it('still writes one after a losing exit', () => {
+  it('writes one after a losing exit', () => {
     const res = fill(closeOrder(), position(), 0.95);
     expect(res.newTrades[0].pnl!).toBeLessThan(0);
     expect(res.newCooldowns.B3).toBeGreaterThan(0);
+    expect(isInEntryCooldown(res.newCooldowns.B3)).toBe(true);
   });
 
   it('does NOT write one for a partial exit — the position is still open', () => {

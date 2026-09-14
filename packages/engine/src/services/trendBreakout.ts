@@ -24,6 +24,7 @@ import type { SignalEvaluation, DecisionFactor } from './intradayBridge';
 import { POSITION_TARGET_PCT } from './intradayParams';
 import { capStopLoss, stopWasCapped, takeProfitLevels, tp1FloorDistance, MAX_LOSS_PERCENT, TP1_PERCENT, TP2_PERCENT } from './exitPolicy';
 import { resolveLadderPercents, isBuyingSurge } from './calmRegime';
+import type { MarketRegimeResult } from '../types/crypto';
 
 // ── Parameters (spec §23 — every knob configurable, no auto-optimisation) ────
 
@@ -249,6 +250,32 @@ function clamp01(x: number): number {
   return x < 0 ? 0 : x > 1 ? 1 : x;
 }
 
+/**
+ * Every evaluation left `regime` unset (the SIGNAL path even set it to
+ * `undefined` explicitly), so the UI's regime-distribution panel counted
+ * every TrendBreakout evaluation as "no data" and always showed 0/0/0/0 —
+ * cosmetic only, `willExecute`/trading decisions never read this field.
+ * This strategy has no separate RANGING detector (unlike tradeEngine's
+ * detectMarketRegime), so NEUTRAL — H1 Supertrend/EMA50/EMA200 disagree —
+ * maps to TRANSITIONAL rather than a fabricated RANGING classification.
+ */
+function toMarketRegimeResult(
+  direction: TrendDirection,
+  st: { value: number; direction: 'BULL' | 'BEAR' },
+  atrH1: number,
+  currentPrice: number
+): MarketRegimeResult {
+  return {
+    regime: direction === 'NEUTRAL' ? 'TRANSITIONAL' : 'TRENDING',
+    direction: direction === 'LONG' ? 'BULL' : direction === 'SHORT' ? 'BEAR' : 'NEUTRAL',
+    volatility: 'NORMAL',
+    adx: 0,
+    atr: atrH1,
+    atrPercent: currentPrice > 0 ? (atrH1 / currentPrice) * 100 : 0,
+    supertrend: st
+  };
+}
+
 // ── Evaluation ─────────────────────────────────────────────────────────────
 
 export interface TrendBreakoutInput {
@@ -334,8 +361,10 @@ export function evaluateTrendBreakout(input: TrendBreakoutInput): SignalEvaluati
   if (st.direction === 'BULL' && ema50 > ema200 && h1Close > ema50) direction = 'LONG';
   else if (st.direction === 'BEAR' && ema50 < ema200 && h1Close < ema50) direction = 'SHORT';
 
+  const regimeResult = toMarketRegimeResult(direction, st, atrH1, currentPrice);
+
   if (direction === 'NEUTRAL') {
-    return base('NO_SIGNAL', 'H1_TREND_NEUTRAL', {}, debugFactors);
+    return base('NO_SIGNAL', 'H1_TREND_NEUTRAL', { regime: regimeResult }, debugFactors);
   }
 
   const isLong = direction === 'LONG';
@@ -346,10 +375,10 @@ export function evaluateTrendBreakout(input: TrendBreakoutInput): SignalEvaluati
   const volumeOk = volRatio >= p.volumeMultiplier;
 
   if (!priceBroke) {
-    return base('TREND_DETECTED', 'BREAKOUT_NOT_CONFIRMED', {}, debugFactors);
+    return base('TREND_DETECTED', 'BREAKOUT_NOT_CONFIRMED', { regime: regimeResult }, debugFactors);
   }
   if (!volumeOk) {
-    return base('TREND_DETECTED', 'VOLUME_TOO_LOW', {}, debugFactors);
+    return base('TREND_DETECTED', 'VOLUME_TOO_LOW', { regime: regimeResult }, debugFactors);
   }
 
   const breakoutPrice = m15Last.close;
@@ -359,12 +388,12 @@ export function evaluateTrendBreakout(input: TrendBreakoutInput): SignalEvaluati
     ? ema9 > ema21 && m5Close > ema9
     : ema9 < ema21 && m5Close < ema9;
   if (!m5Aligned) {
-    return base('SETUP', 'M5_CONFIRMATION_FAILED', {}, debugFactors);
+    return base('SETUP', 'M5_CONFIRMATION_FAILED', { regime: regimeResult }, debugFactors);
   }
   const distanceFromBreakout = Math.abs(currentPrice - breakoutPrice);
   if (distanceFromBreakout > p.m5MaxAtrDistance * atrM5) {
     // Price already ran away — do not chase.
-    return base('SETUP', 'ENTRY_TOO_EXTENDED', {}, debugFactors);
+    return base('SETUP', 'ENTRY_TOO_EXTENDED', { regime: regimeResult }, debugFactors);
   }
 
   // ── §9/§10 levels ──────────────────────────────────────────────────────
@@ -431,7 +460,7 @@ export function evaluateTrendBreakout(input: TrendBreakoutInput): SignalEvaluati
     ? Math.abs((calmActive ? takeProfit2 : takeProfit1) - entryRef) / riskDistance
     : 0;
   if (grossRewardRisk < p.minRewardRisk) {
-    return base('SETUP', 'RR_TOO_LOW', {}, [
+    return base('SETUP', 'RR_TOO_LOW', { regime: regimeResult }, [
       ...debugFactors,
       {
         label: 'R:R',
@@ -489,7 +518,7 @@ export function evaluateTrendBreakout(input: TrendBreakoutInput): SignalEvaluati
   ];
 
   if (confidence < p.minConfidence) {
-    const ev = base('ENTRY_CONFIRMATION', 'CONFIDENCE_BELOW_MIN', { confidence }, evalFactors);
+    const ev = base('ENTRY_CONFIRMATION', 'CONFIDENCE_BELOW_MIN', { confidence, regime: regimeResult }, evalFactors);
     (ev as { trendBreakout?: TrendBreakoutPlan }).trendBreakout = plan;
     ev.decision = plan as unknown as SignalEvaluation['decision'];
     return ev;
@@ -514,7 +543,7 @@ export function evaluateTrendBreakout(input: TrendBreakoutInput): SignalEvaluati
     takeProfit,
     takeProfit1,
     takeProfit2,
-    regime: undefined
+    regime: regimeResult
   };
   (ev as { trendBreakout?: TrendBreakoutPlan }).trendBreakout = plan;
   ev.decision = plan as unknown as SignalEvaluation['decision'];

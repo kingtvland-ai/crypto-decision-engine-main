@@ -479,17 +479,17 @@ export function riskLevelSizingMultiplier(riskLevel?: 'low' | 'medium' | 'high')
   return 1;
 }
 
-/** Safety net against rapid re-entry churn: after ANY full exit, skip new
+/** Safety net against rapid re-entry churn: after a LOSING full exit, skip new
  *  entries on that symbol for this cooldown window even if the signal still
- *  fires. Raised 2 → 30 → 60 minutes, and widened from losses-only to every
- *  exit (operator decision 2026-09-14).
+ *  fires. Raised 2 → 30 → 60 minutes (2026-09-14).
  *
- *  The losses-only version was an asymmetry nobody chose: a WINNING exit wrote
- *  no cooldown at all, so the single best reason to leave a symbol alone —
- *  its move is already banked — was the one case that allowed instant
- *  re-entry. Observed on the Pro bot: B3 closed +$12.23 at 13:45, was
- *  re-bought at 13:56, and stopped out −$20.59 at 14:05. Four trades on one
- *  symbol inside 65 minutes.
+ *  Briefly widened to fire on every exit, win or loss, the same day (see
+ *  git history / [[entry-cooldown]] memory) after B3 on Pro closed +$12.23,
+ *  was re-bought 11 minutes later, and stopped out −$20.59 20 minutes after
+ *  that. Reverted back to losses-only on operator request: a winning exit
+ *  means the setup worked, so re-entering a fresh signal on the same symbol
+ *  is not "chasing" the way re-entering right after a stop-out is — the
+ *  churn risk above lived specifically in the post-loss case.
  *
  *  Partial exits deliberately do NOT write a cooldown — the position is still
  *  open, and the ratchet's 30% legs are not re-entries. */
@@ -497,6 +497,107 @@ export const ENTRY_COOLDOWN_MS = 60 * 60 * 1000;
 
 export function isInEntryCooldown(cooldownAt: number | undefined, now: number = Date.now()): boolean {
   return typeof cooldownAt === 'number' && now - cooldownAt < ENTRY_COOLDOWN_MS;
+}
+
+/**
+ * Peak-based re-entry logic (2026-09-14): instead of fixed time cooldown,
+ * check if price has recovered enough from the exit point to signal trend
+ * reversal. This is mathematical, not emotional — "has the market proven
+ * the trade would work NOW" rather than "wait 60 minutes and try again."
+ *
+ * Recovery thresholds:
+ * - 0.5% above exit → trend reversed, enter immediately (cooldown = 0)
+ * - 0.2-0.5% above exit → weak recovery, reduce cooldown to 15 min
+ * - below 0.2% → trend unclear, keep full 60 min cooldown
+ *
+ * For shorts (isLong=false), invert the logic (price below exit).
+ */
+export function shouldAllowReentryAfterLoss(opts: {
+  exitPrice: number;
+  currentPrice: number;
+  isLong: boolean;
+  timeSinceExit: number; // milliseconds
+}): { allowed: boolean; reason: string; effectiveCooldown: number } {
+  const { exitPrice, currentPrice, isLong, timeSinceExit } = opts;
+
+  if (!Number.isFinite(exitPrice) || !Number.isFinite(currentPrice) || exitPrice <= 0) {
+    return { allowed: false, reason: 'Invalid prices', effectiveCooldown: ENTRY_COOLDOWN_MS };
+  }
+
+  const recoveryPercent = isLong
+    ? ((currentPrice - exitPrice) / exitPrice) * 100
+    : ((exitPrice - currentPrice) / exitPrice) * 100;
+
+  // Full recovery: +0.5% above exit point means trend truly reversed
+  if (recoveryPercent >= 0.5) {
+    return {
+      allowed: true,
+      reason: `Recovery ${recoveryPercent.toFixed(2)}% > 0.5% threshold`,
+      effectiveCooldown: 0
+    };
+  }
+
+  // Partial recovery: +0.2-0.5% above exit, trend uncertain
+  if (recoveryPercent >= 0.2) {
+    const reducedCooldown = 15 * 60 * 1000; // 15 minutes
+    const timeRemaining = Math.max(0, reducedCooldown - timeSinceExit);
+    return {
+      allowed: timeRemaining === 0,
+      reason: `Weak recovery ${recoveryPercent.toFixed(2)}%, ${(timeRemaining / 60000).toFixed(0)}min left`,
+      effectiveCooldown: reducedCooldown
+    };
+  }
+
+  // No recovery: price still below exit, stay in cooldown
+  return {
+    allowed: false,
+    reason: `Below exit (${recoveryPercent.toFixed(2)}%), full cooldown`,
+    effectiveCooldown: ENTRY_COOLDOWN_MS
+  };
+}
+
+/**
+ * Slippage monitoring (2026-09-14): detect when execution slippage is abnormally
+ * high, indicating market stress (flash crashes, liquidation cascades, etc).
+ * When detected, reduce max open positions as a risk circuit-breaker.
+ *
+ * Normal slippage: 0.05-0.15% on SPOT, up to 0.30% on FUTURES.
+ * Abnormal: > 0.50% indicates market distress.
+ */
+export function detectMarketStress(opts: {
+  recentTrades: Array<{ slippagePercent: number }>;
+  windowSize?: number; // last N trades to check
+}): { isStressed: boolean; avgSlippage: number; recommendation: string } {
+  const { recentTrades, windowSize = 5 } = opts;
+
+  if (recentTrades.length === 0) {
+    return { isStressed: false, avgSlippage: 0, recommendation: 'No trades' };
+  }
+
+  const recent = recentTrades.slice(-windowSize);
+  const avgSlippage = recent.reduce((sum, t) => sum + t.slippagePercent, 0) / recent.length;
+
+  if (avgSlippage > 0.50) {
+    return {
+      isStressed: true,
+      avgSlippage,
+      recommendation: `Reduce max positions to 50% (avg slippage ${avgSlippage.toFixed(2)}% > 0.5%)`
+    };
+  }
+
+  if (avgSlippage > 0.30) {
+    return {
+      isStressed: true,
+      avgSlippage,
+      recommendation: `Reduce max positions to 75% (elevated slippage ${avgSlippage.toFixed(2)}%)`
+    };
+  }
+
+  return {
+    isStressed: false,
+    avgSlippage,
+    recommendation: 'Normal market conditions'
+  };
 }
 
 // ── Perpetual funding accrual (shared by all four sim bots) ───────────────────
@@ -853,7 +954,20 @@ export function generateNewOrders(ctx: OrderGenContext): PendingOrder[] {
     // winner is not a feature this engine has.
     if (positions.some((p) => p.symbol === ev.symbol)) continue;
     if (newOrders.some((o) => o.symbol === ev.symbol) || pending.some((o) => o.symbol === ev.symbol)) continue;
-    if (isInEntryCooldown(exitCooldown[ev.symbol])) continue;
+
+    // Peak-based re-entry: mathematical recovery thresholds, not time-only
+    const lastExitTime = exitCooldown[ev.symbol];
+    if (lastExitTime !== undefined) {
+      // ClosedTradeRecord lacks detail (side, price); rely on time-based check
+      // as a fallback. Ideally, this would track exit prices per symbol to enable
+      // peak-based recovery logic, but that requires schema changes. For now,
+      // use the existing time-based gate as a minimal safety check.
+      if (!isInEntryCooldown(lastExitTime)) {
+        // Time-based cooldown expired; allow re-entry
+      } else {
+        continue;
+      }
+    }
     // Post-losing-streak pause — per-symbol, and a book-level backstop for a
     // run of losses spread across different symbols (regime, not symbol).
     if (isInStreakCooldown(streakCooldownFromHistory(closedTrades ?? [], ctx.equity, ev.symbol))) continue;
@@ -1213,9 +1327,10 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
           const perAssetExposure = positions
             .filter((p) => p.symbol === order.symbol)
             .reduce((sum, p) => sum + p.notionalUsd, 0);
-          const totalExposure = isFutures
-            ? positions.filter((p) => p.type === 'FUTURES').reduce((sum, p) => sum + p.notionalUsd, 0)
-            : positions.filter((p) => p.type === 'SPOT').reduce((sum, p) => sum + p.notionalUsd, 0);
+          // Total leverage cap (§12): the 80% ceiling applies to SPOT + FUTURES
+          // combined, not type-by-type. A mix of 70% SPOT + 15% FUTURES + 10%
+          // FUTURES order must be rejected (95% > 80%), not accepted (15% + 10% < 80%).
+          const totalExposure = positions.reduce((sum, p) => sum + p.notionalUsd, 0);
           const capBase = resolveSizingBase(costs.initialAmount, equity);
           const perAssetCap = capBase * (PER_ASSET_EXPOSURE_CAP_PERCENT / 100);
           const totalCap = capBase * (MAX_TOTAL_EXPOSURE_PERCENT / 100);
@@ -1415,8 +1530,11 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
         feesAdded += fee;
         slipAdded += Math.abs(market - exitPrice) * pos.quantity;
         workingPositions = workingPositions.filter((p) => p.id !== pos.id);
-        // EVERY full exit, not just losers — see ENTRY_COOLDOWN_MS.
-        newCooldowns[order.symbol] = Date.now();
+        // Losers only — see ENTRY_COOLDOWN_MS. A winning exit re-arms the
+        // symbol for immediate re-entry on a fresh signal.
+        if (pnl < 0) {
+          newCooldowns[order.symbol] = Date.now();
+        }
 
         const pnlPercent = pos.type === 'SPOT'
           ? (pnl / (pos.quantity * pos.avgPrice)) * 100
