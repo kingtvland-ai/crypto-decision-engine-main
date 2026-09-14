@@ -270,7 +270,8 @@ export interface RiskPlanInput {
   /** Structural stop level (swing low/high). Used to compute the dynamic SL
    *  distance together with ATR and the stop buffer. The executed SL is the
    *  TIGHTER of the structural stop (minus buffer) and the ATR-based stop,
-   *  clamped to [minStopPercent, maxStopPercent=4.2%]. */
+   *  clamped to [minStopPercent, maxStopPercent] — 0.12% and 1.5%, NOT the
+   *  shared 4.2% cap, which only bounds the pre-ceiling `dynamicSlPct`. */
   stopReference?: number;
   /** Structural target level. Used to compute the dynamic TP1 distance.
    *  The executed TP1 is the FARTHER of the structural target and the ATR-based
@@ -420,11 +421,9 @@ export function buildRiskPlan(input: RiskPlanInput): RiskPlan {
   const atr5 = input.atr5 > 0 ? input.atr5 : entry * 0.001;
   const atr15 = input.atr15 > 0 ? input.atr15 : atr5;
 
-  // ATR-based stop distance (percent of entry)
-  const atrStopPct = Math.min(
-    (atr5 * params.maxStopAtrMult) / entry * 100,
-    params.maxStopPercent
-  );
+  // ATR-based stop distance (percent of entry), BEFORE maxStopPercent. That
+  // ceiling is applied once at the end instead of here — see `dynamicSlPct`.
+  const atrStopPct = (atr5 * params.maxStopAtrMult) / entry * 100;
 
   // Structure-based stop distance (from stopReference with buffer)
   let structureStopPct: number | undefined;
@@ -437,29 +436,36 @@ export function buildRiskPlan(input: RiskPlanInput): RiskPlan {
   }
 
   // Choose the TIGHTER stop (smaller distance = less risk)
-  let slDistancePct = atrStopPct;
+  let dynamicSlPct = atrStopPct;
   if (structureStopPct !== undefined && structureStopPct > 0) {
-    slDistancePct = Math.min(slDistancePct, structureStopPct);
+    dynamicSlPct = Math.min(dynamicSlPct, structureStopPct);
   }
 
   // MEAN_REVERSION stop floor. Its stopReference is the swing over just the last
   // 6 5M candles in a RANGING regime, so the structural branch above nearly
   // always wins and floors at minStopPercent (0.12%) — tighter than the
   // round-trip cost, which makes every exit a loss. These two knobs widen the
-  // MR stop specifically; both default to unset (no effect). Applied BEFORE the
-  // maxStopPercent clamp so a large ATR still cannot push the stop past 1.5%.
+  // MR stop specifically; both default to unset (no effect).
   if (input.setupType === 'MEAN_REVERSION') {
     const mrAtrFloorPct = typeof params.meanReversionMinStopAtrMult === 'number'
       ? (atr5 * params.meanReversionMinStopAtrMult) / entry * 100
       : 0;
     const mrPctFloor = params.meanReversionMinStopPercent ?? 0;
-    slDistancePct = Math.max(slDistancePct, mrAtrFloorPct, mrPctFloor);
+    dynamicSlPct = Math.max(dynamicSlPct, mrAtrFloorPct, mrPctFloor);
   }
 
-  // Clamp to [minStopPercent, maxStopPercent]
-  slDistancePct = Math.max(params.minStopPercent, Math.min(params.maxStopPercent, slDistancePct));
-  // Hard 4.2% cap — never exceed
-  slDistancePct = Math.min(slDistancePct, MAX_LOSS_PERCENT);
+  // What ATR and structure actually measured, bounded only by the SHARED
+  // limits. `maxStopPercent` (1.5%) is deliberately NOT applied here: it is a
+  // live-bot ceiling, not a statement about the symbol's volatility, and the
+  // fixed ladder's surge branch reads this number to decide whether 2.3% sits
+  // inside the move. Capping it first made `max(2.3%, dynamic)` a no-op for
+  // every symbol, so the surge exception — the ladder's ONLY widening rule
+  // between 2026-09-11 and the noise floor — never fired once in this bot.
+  dynamicSlPct = Math.max(params.minStopPercent, Math.min(MAX_LOSS_PERCENT, dynamicSlPct));
+
+  // The EXECUTED stop adds the live-bot ceiling on top. Unchanged behaviour:
+  // when the ladder is off this is the same number as before.
+  let slDistancePct = Math.min(dynamicSlPct, params.maxStopPercent);
 
   let slDistance = entry * slDistancePct / 100;
 
@@ -507,7 +513,8 @@ export function buildRiskPlan(input: RiskPlanInput): RiskPlan {
     // which leaves the flat ladder exactly as it was.
     const noise = params.noiseFloorStop === true ? input.stopNoise : undefined;
     const ladder = resolveLadderPercents({
-      dynamicSlPct: slDistancePct,
+      // The PRE-ceiling dynamic stop — see where it is computed above.
+      dynamicSlPct,
       buyingSurge: input.buyingSurge === true,
       noiseFloorPct: noise?.floorPct
     });

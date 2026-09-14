@@ -27,7 +27,7 @@ import {
   evaluateTrendBreakout, readTrendBreakoutPlan,
   type RiskPlanInput
 } from '@cde/engine/analysis';
-import { withParams } from '@cde/engine';
+import { withParams, DEFAULT_INTRADAY_PARAMS } from '@cde/engine';
 import type { Candle } from '@cde/engine';
 
 // ── the pure helpers ─────────────────────────────────────────────────────────
@@ -145,6 +145,39 @@ describe('Intraday — buildRiskPlan fixed ladder', () => {
     expect(plan.riskPercent).toBeGreaterThan(FIXED_SL_PCT);
     expect(plan.riskPercent).toBeLessThanOrEqual(SURGE_MAX_SL_PCT + 1e-6);
     expect(plan.rewardPercent).toBeCloseTo(FIXED_TP1_PCT, 1);
+  });
+
+  // REGRESSION. The test above raises maxStopPercent to 5 — a value production
+  // never uses — which is why it kept passing while the surge branch was dead
+  // at the real 1.5%. buildRiskPlan used to clamp the dynamic stop to
+  // maxStopPercent BEFORE handing it to the ladder, so `max(2.3%, <=1.5%)` was
+  // always 2.3% and no surge ever widened anything in this bot. Run the same
+  // case at production params.
+  it('buying surge widens the stop at the PRODUCTION maxStopPercent (1.5%)', () => {
+    const quiet = intradayPlan(0.005, {}, true).plan;   // ATR 0.5% → dynamic < 2.3%
+    const loud = intradayPlan(0.02, {}, true).plan;     // ATR 2.0% → dynamic  > 2.3%
+
+    // A quiet tape has nothing to widen to: the 2.3% floor stands.
+    expect(quiet.riskPercent).toBeCloseTo(FIXED_SL_PCT, 1);
+    // A volatile one must actually move off the flat stop.
+    expect(loud.riskPercent).toBeGreaterThan(FIXED_SL_PCT);
+    expect(loud.riskPercent).toBeLessThanOrEqual(SURGE_MAX_SL_PCT + 1e-6);
+    expect(loud.rewardPercent).toBeCloseTo(FIXED_TP1_PCT, 1);
+  });
+
+  it('the executed stop still respects maxStopPercent when the ladder is OFF', () => {
+    // The fix moved the ceiling later in the pipeline; it must still bind here.
+    for (const atrMult of [0.002, 0.005, 0.01, 0.02, 0.04]) {
+      const plan = buildRiskPlan({
+        ...baseIntradayInput,
+        entryPrice: 100,
+        atr5: 100 * atrMult,
+        atr15: 100 * atrMult * 1.1,
+        equity: 10_000,
+        params: withParams({})
+      });
+      expect(plan.riskPercent).toBeLessThanOrEqual(DEFAULT_INTRADAY_PARAMS.maxStopPercent + 1e-9);
+    }
   });
 
   it('surge in a QUIET market cannot tighten the stop below the 2.3% floor', () => {

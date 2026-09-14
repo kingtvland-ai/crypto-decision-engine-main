@@ -96,9 +96,10 @@ export function evaluateIntradayExit(pos: IntradayPositionView, ctx: IntradayExi
 
   // Hard 4.2% loss cap, enforced on every evaluation. A position opened before
   // the cap existed (or with a wider structural stop) has its effective stop
-  // pulled in here on the next tick — never loosened. buildRiskPlan already
-  // clamps the entry stop to maxStopPercent (1.5%), so this is normally a
-  // no-op — it is the backstop for a persisted position with a wider stop.
+  // pulled in here on the next tick — never loosened. Normally a no-op: the
+  // live bot's entry stop is capped at maxStopPercent (1.5%) and the sim
+  // ladder's widest is MAX_LOSS_PERCENT itself. It is the backstop for a
+  // persisted position carrying a wider stop than either path can produce.
   const effectiveStopLoss = capStopLoss(pos.entryPrice, pos.stopLoss, isLong);
 
   const stopDistance = pos.plannedStopDistance && pos.plannedStopDistance > 0

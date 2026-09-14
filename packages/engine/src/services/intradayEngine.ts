@@ -26,7 +26,7 @@ import { Candle, PortfolioRiskStats, formatDynamicPrice } from './tradeEngine';
 import { detectRegime1H, Regime1H } from './intradayRegime';
 import { detectSetup15M, Setup15M } from './intradaySetup';
 import { confirmEntry5M, Entry5M } from './intradayEntry';
-import { evaluateCostEdge, CostAnalysis, buildRiskPlan, RiskPlan, FIXED_TP_PERCENT } from './intradayRisk';
+import { evaluateCostEdge, CostAnalysis, buildRiskPlan, RiskPlan } from './intradayRisk';
 import { isBuyingSurge, SURGE_VOLUME_LOOKBACK, measureStopNoise } from './calmRegime';
 import { DEFAULT_INTRADAY_PARAMS, DecisionGate, Direction, IntradayParams, SetupType,
   withParams
