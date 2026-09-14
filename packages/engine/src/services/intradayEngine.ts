@@ -27,7 +27,7 @@ import { detectRegime1H, Regime1H } from './intradayRegime';
 import { detectSetup15M, Setup15M } from './intradaySetup';
 import { confirmEntry5M, Entry5M } from './intradayEntry';
 import { evaluateCostEdge, CostAnalysis, buildRiskPlan, RiskPlan, FIXED_TP_PERCENT } from './intradayRisk';
-import { isBuyingSurge, SURGE_VOLUME_LOOKBACK } from './calmRegime';
+import { isBuyingSurge, SURGE_VOLUME_LOOKBACK, measureStopNoise } from './calmRegime';
 import { DEFAULT_INTRADAY_PARAMS, DecisionGate, Direction, IntradayParams, SetupType,
   withParams
 } from './intradayParams';
@@ -368,10 +368,11 @@ export function evaluateIntradayDecision(input: IntradayDecisionInput): Intraday
     targetReference: entry.targetReference,
     atr5: entry.atr5,
     atr15: setup.levels.atr,
-    // The only condition that widens the fixed 2.3% stop — measured on the 5M
-    // series the entry itself was confirmed on, so "a lot of buyers" means at
-    // the moment of entry, not on some slower frame.
+    // The two conditions that widen the fixed 2.3% stop — both measured on the
+    // 5M series the entry itself was confirmed on, so "a lot of buyers" and "the
+    // tape just got wider" both mean at the moment of entry, not on a slower frame.
     buyingSurge: isBuyingSurge(input.m5, SURGE_VOLUME_LOOKBACK, now),
+    stopNoise: measureStopNoise(input.m5),
     equity: p.portfolioValue,
     // SIM-ONLY (params.useFixedSizingBase, set in SIM_INTRADAY_PARAMS_OVERRIDE).
     // The live bot leaves it unset and keeps sizing against live equity.

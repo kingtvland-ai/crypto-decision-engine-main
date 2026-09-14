@@ -32,7 +32,7 @@ import {
   type ProRiskLevel
 } from './proAlgEngine';
 import { PER_ASSET_EXPOSURE_CAP_PERCENT, POSITION_TARGET_PCT, CAPITAL_FLOOR_PCT, resolveSizingBase, isBelowCapitalFloor } from './intradayParams';
-import { isBuyingSurge } from './calmRegime';
+import { isBuyingSurge, measureStopNoise } from './calmRegime';
 import type { Candle } from './tradeEngine';
 import type { SignalEvaluation, DecisionFactor } from './intradayBridge';
 import type { SimPosition, PendingOrder } from './simExecution';
@@ -68,7 +68,28 @@ export function buildProEvaluation(
 
   const signal = computeProSignal(candles, priceChange24h);
   const minConfidence = proMinConfidence(riskLevel, minConfidenceOverride);
-  const willExecute = signal.action === 'BUY' && signal.confidence >= minConfidence;
+  /** §16 raw signal threshold check, before any state or risk gate. */
+  const signalPasses = signal.action === 'BUY' && signal.confidence >= minConfidence;
+
+  // ATR-scaled stop + stop-relative TP ladder, as absolute prices off the
+  // signal price. fillDueOrders reanchors them to the actual fill, preserving
+  // the % distances. Spot is LONG only.
+  // Calm-regime scalp (2026-09-11, operator request, sim only): see
+  // calmRegime.ts / proStopTpLevels for the full rationale.
+  const levels = proStopTpLevels(currentPrice, signal.atrPercent, true, {
+    calmRegimeScalp: true,
+    noiseFloorStop: true,
+    // The two things that widen the fixed 2.3% stop — both measured on the same
+    // candle series §2's own indicators are computed from.
+    buyingSurge: isBuyingSurge(candles),
+    stopNoise: measureStopNoise(candles)
+  });
+
+  // A stop that sits inside one bar's ordinary range is a coin flip on noise,
+  // not a risk limit — and `levels.tooVolatile` says even the widest stop this
+  // ladder allows would still be inside it. The signal itself is untouched
+  // (strategyDecision stays true); this only refuses to open the position.
+  const willExecute = signalPasses && !levels.tooVolatile;
 
   const factors: DecisionFactor[] = signal.signals
     .slice()
@@ -87,21 +108,11 @@ export function buildProEvaluation(
       ? `אות SELL — Spot אינו פותח שורט, נדרשת פוזיציה פתוחה כדי לסגור`
       : willExecute
         ? `אות BUY בביטחון ${signal.confidence.toFixed(1)} >= סף ${minConfidence} — מבצע קנייה`
-        : `אות BUY בביטחון ${signal.confidence.toFixed(1)} מתחת לסף ${minConfidence}`;
+        : signalPasses && levels.tooVolatile
+          ? `אות BUY בביטחון ${signal.confidence.toFixed(1)} — נחסם: תנודתיות ${signal.atrPercent.toFixed(2)}% לנר דורשת סטופ ${levels.noiseFloorPct.toFixed(2)}% מעל התקרה, נר רגיל היה מוציא את הפוזיציה`
+          : `אות BUY בביטחון ${signal.confidence.toFixed(1)} מתחת לסף ${minConfidence}`;
 
   const tradeSide: SignalEvaluation['tradeSide'] = signal.action === 'BUY' ? 'BUY' : signal.action === 'SELL' ? 'SELL' : 'NONE';
-
-  // ATR-scaled stop + stop-relative TP ladder, as absolute prices off the
-  // signal price. fillDueOrders reanchors them to the actual fill, preserving
-  // the % distances. Spot is LONG only.
-  // Calm-regime scalp (2026-09-11, operator request, sim only): see
-  // calmRegime.ts / proStopTpLevels for the full rationale.
-  const levels = proStopTpLevels(currentPrice, signal.atrPercent, true, {
-    calmRegimeScalp: true,
-    // The only thing that widens the fixed 2.3% stop — measured on the same
-    // candle series §2's own indicators are computed from.
-    buyingSurge: isBuyingSurge(candles)
-  });
 
   // §6: compute optimal entry price from indicator support levels.
   // When limitEntries is on, the bot places a LIMIT at this price and waits —
@@ -124,9 +135,11 @@ export function buildProEvaluation(
     price: currentPrice,
     priceChange24h,
     reasoning,
-    status: willExecute ? 'SIGNAL SPOT BUY' : `NO_SIGNAL [${signal.action === 'HOLD' ? 'NO_DIRECTION' : signal.action === 'SELL' ? 'SPOT_SELL_UNSUPPORTED' : 'BELOW_THRESHOLD'}]`,
+    status: willExecute
+      ? 'SIGNAL SPOT BUY'
+      : `NO_SIGNAL [${signal.action === 'HOLD' ? 'NO_DIRECTION' : signal.action === 'SELL' ? 'SPOT_SELL_UNSUPPORTED' : signalPasses ? 'VOLATILITY_TOO_HIGH' : 'BELOW_THRESHOLD'}]`,
     willExecute,
-    strategyDecision: willExecute, // §16: raw signal threshold check, before state gates
+    strategyDecision: signalPasses, // §16: raw signal threshold check, before state gates
     factors,
     confidenceGap: Math.max(0, minConfidence - signal.confidence),
     riskLevel,

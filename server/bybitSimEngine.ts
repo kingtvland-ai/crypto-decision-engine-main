@@ -38,8 +38,10 @@ function overrideParams(input: StrategyTickInput) {
     ? input.config.minConfidenceOverride
     : undefined;
   // Calm-regime scalp (2026-09-11, operator request, sim only): see
-  // calmRegime.ts / trendBreakout.ts for the full rationale.
-  return { calmRegimeScalp: true, ...(override ? { minConfidence: override } : {}) };
+  // calmRegime.ts / trendBreakout.ts for the full rationale. noiseFloorStop
+  // (2026-09-14) adds the second widening condition — the stop must clear one
+  // M15 bar's ATR, so ordinary candles stop taking out intact theses.
+  return { calmRegimeScalp: true, noiseFloorStop: true, ...(override ? { minConfidence: override } : {}) };
 }
 
 const bybitStrategy: SimEngineStrategy = {

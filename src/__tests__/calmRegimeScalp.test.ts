@@ -36,7 +36,10 @@ describe('resolveLadderPercents', () => {
   it('default (no surge): the fixed ladder, whatever the dynamic stop says', () => {
     for (const dynamicSlPct of [0.4, 1.5, 2.3, 3.9, 12]) {
       expect(resolveLadderPercents({ dynamicSlPct })).toEqual({
-        slPct: FIXED_SL_PCT, tp1Pct: FIXED_TP1_PCT, tp2Pct: FIXED_TP2_PCT, surged: false
+        slPct: FIXED_SL_PCT, tp1Pct: FIXED_TP1_PCT, tp2Pct: FIXED_TP2_PCT, surged: false,
+        // Without an atrPercent there is no noise floor to measure against, so
+        // the flat ladder stands exactly as before.
+        noiseWidened: false, tooVolatile: false, noiseFloorPct: 0
       });
     }
   });

@@ -23,7 +23,7 @@ import {
 import type { SignalEvaluation, DecisionFactor } from './intradayBridge';
 import { POSITION_TARGET_PCT } from './intradayParams';
 import { capStopLoss, stopWasCapped, takeProfitLevels, tp1FloorDistance, MAX_LOSS_PERCENT, TP1_PERCENT, TP2_PERCENT } from './exitPolicy';
-import { resolveLadderPercents, isBuyingSurge } from './calmRegime';
+import { resolveLadderPercents, isBuyingSurge, measureStopNoise } from './calmRegime';
 import type { MarketRegimeResult } from '../types/crypto';
 
 // ── Parameters (spec §23 — every knob configurable, no auto-optimisation) ────
@@ -56,6 +56,12 @@ export interface TrendBreakoutParams {
    *  widen back to the ATR-derived value, clamped to [2.3%, 4.2%].
    *  See calmRegime.ts. */
   calmRegimeScalp?: boolean;
+  /** Opt-in (default off — sim only). Only meaningful with `calmRegimeScalp`.
+   *  A SECOND condition that widens the flat 2.3%: the stop must clear 1.6 ×
+   *  one M15 bar's ATR, so an ordinary candle cannot take out a thesis that
+   *  never failed. Refuses the trade outright when even the ceiling sits inside
+   *  that noise (VOLATILITY_TOO_HIGH). See calmRegime.ts. */
+  noiseFloorStop?: boolean;
   /** Risk budget for the FULL position, as a fraction of equity.
    *  Deprecated: position sizing now uses positionTargetPct (10% of equity).
    *  Kept for API stability — do not use for sizing. */
@@ -175,6 +181,9 @@ export type TrendBreakoutReason =
   | 'M5_CONFIRMATION_FAILED'
   | 'ENTRY_TOO_EXTENDED'
   | 'RR_TOO_LOW'
+  /** One M15 bar is wider than the widest stop this ladder allows — any stop
+   *  would be a coin flip on noise alone. See calmRegime's noise floor. */
+  | 'VOLATILITY_TOO_HIGH'
   | 'CONFIDENCE_BELOW_MIN';
 
 export type TrendDirection = 'LONG' | 'SHORT' | 'NEUTRAL';
@@ -436,10 +445,27 @@ export function evaluateTrendBreakout(input: TrendBreakoutInput): SignalEvaluati
   const dynSlPct = (cappedR / entryRef) * 100;
   const calmActive = p.calmRegimeScalp === true;
   if (calmActive) {
+    // Second widening condition alongside the surge: the stop must clear one
+    // M15 bar's own range — the frame the breakout is confirmed on — or an
+    // ordinary candle stops out a thesis that never failed. An expanding tape
+    // overrides the lagging ATR, since the fresh bars are the ones ahead.
+    const noise = p.noiseFloorStop === true ? measureStopNoise(m15, p.atrPeriod) : undefined;
     const ladder = resolveLadderPercents({
       dynamicSlPct: dynSlPct,
-      buyingSurge: isBuyingSurge(m15)
+      buyingSurge: isBuyingSurge(m15),
+      noiseFloorPct: noise?.floorPct
     });
+    if (ladder.tooVolatile) {
+      return base('SETUP', 'VOLATILITY_TOO_HIGH', { regime: regimeResult }, [
+        ...debugFactors,
+        {
+          label: 'תנודתיות',
+          value: `נר גרוע M15 ${(noise?.badBarPercent ?? 0).toFixed(2)}% (ATR ${(noise?.atrPercent ?? 0).toFixed(2)}%)`,
+          impact: 'negative',
+          note: `סטופ מינימלי ${ladder.noiseFloorPct.toFixed(2)}% חורג מהתקרה — נר רגיל היה מוציא את הפוזיציה`
+        }
+      ]);
+    }
     const slDistance = entryRef * ladder.slPct / 100;
     stopLoss = isLong ? entryRef - slDistance : entryRef + slDistance;
     tp1Distance = entryRef * ladder.tp1Pct / 100;

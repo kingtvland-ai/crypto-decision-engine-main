@@ -89,6 +89,15 @@ export const SIM_INTRADAY_PARAMS_OVERRIDE: Partial<IntradayParams> = {
   // value clamped to [2.3%, 4.2%]. See calmRegime.ts.
   // Sim only — DEFAULT_INTRADAY_PARAMS leaves this unset.
   calmRegimeScalp: true,
+  // Noise-floor stop (2026-09-14): the SECOND condition that widens the flat
+  // 2.3%. A stop must clear 1.6 × one 5M bar's ATR — the same multiple Pro
+  // already derives its own stop from — or an ordinary candle takes out a
+  // thesis that never failed. Observed: a 94%-confidence micro-cap entry
+  // stopped out 9 minutes later, two bars, having never moved against the
+  // thesis by more than one bar's normal range. When even the 4.2% ceiling
+  // sits inside that noise the symbol is refused instead of traded. See
+  // calmRegime.ts.
+  noiseFloorStop: true,
   // Profit ratchet (2026-09-14, operator decision): every profit exit is the
   // rung ladder — 1.8/3/4/5%… marked on the way up, 30% sold on the way back
   // down to a rung, full close at the 1.8% floor. TP1/TP2 and the trailing stop

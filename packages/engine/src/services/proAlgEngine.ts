@@ -79,7 +79,7 @@ import {
 import { calculateMACD, calculateStochastic } from '../utils/advancedTechnicalAnalysis';
 import type { HistoricalPrice, TechnicalIndicators } from '../types/crypto';
 import { positionPnlPercent, reachedStop, reachedTarget, TP2_PERCENT, TP1_EXIT_FRACTION } from './exitPolicy';
-import { resolveLadderPercents } from './calmRegime';
+import { resolveLadderPercents, type StopNoise } from './calmRegime';
 
 // ── §2 — indicator votes ─────────────────────────────────────────────────────
 
@@ -648,28 +648,49 @@ export function proStopTpLevels(
    *  always; `buyingSurge` (relVolume >= 2 + green bar) is the ONE exception,
    *  widening the stop back to the ATR value clamped to [2.3%, 4.2%].
    *  See calmRegime.ts. */
-  opts: { calmRegimeScalp?: boolean; buyingSurge?: boolean } = {}
-): { stopLoss: number; takeProfit1: number; takeProfit2: number } {
+  opts: {
+    calmRegimeScalp?: boolean;
+    buyingSurge?: boolean;
+    /** Opt-in (default off). Requires `calmRegimeScalp`. Adds the noise floor:
+     *  the stop must clear one ordinary bar's range, measured by
+     *  `measureStopNoise` on the caller's own candle series. */
+    noiseFloorStop?: boolean;
+    stopNoise?: StopNoise;
+  } = {}
+): { stopLoss: number; takeProfit1: number; takeProfit2: number; tooVolatile: boolean; noiseFloorPct: number } {
   const stopPct = Math.min(PRO_STOP_LOSS_PERCENT, Math.max(PRO_STOP_MIN_PERCENT, atrPercent * PRO_STOP_ATR_MULT));
   let tp1Pct = Math.max(1.5, stopPct * 1.5);
   let tp2Pct = tp1Pct * 1.5;
   let finalStopPct = stopPct;
-  // The fixed scalp ladder replaces the ATR ladder outright; only a BUYING
-  // SURGE widens the stop, to this bot's own ATR stop. TP1's own R:R is
+  let tooVolatile = false;
+  let noiseFloorPct = 0;
+  // The fixed scalp ladder replaces the ATR ladder outright. Two things widen
+  // the stop back off the flat 2.3%: a BUYING SURGE, and the noise floor —
+  // `atrPercent × PRO_STOP_ATR_MULT` is the stop this function computes one
+  // line above and the ladder used to discard wholesale, which is exactly the
+  // number a stop has to clear to survive an ordinary bar. TP1's own R:R is
   // deliberately poor — it is a fast 50% partial, not the whole thesis. Pro
   // carries no R:R reject gate, so there is nothing to reconcile here (unlike
   // Intraday/Path/Bybit, whose gates are re-pointed at TP2).
   if (opts.calmRegimeScalp === true) {
-    const ladder = resolveLadderPercents({ dynamicSlPct: stopPct, buyingSurge: opts.buyingSurge });
+    const ladder = resolveLadderPercents({
+      dynamicSlPct: stopPct,
+      buyingSurge: opts.buyingSurge,
+      noiseFloorPct: opts.noiseFloorStop === true ? opts.stopNoise?.floorPct : undefined
+    });
     finalStopPct = ladder.slPct;
     tp1Pct = ladder.tp1Pct;
     tp2Pct = ladder.tp2Pct;
+    tooVolatile = ladder.tooVolatile;
+    noiseFloorPct = ladder.noiseFloorPct;
   }
   const s = isLong ? 1 : -1;
   return {
     stopLoss: Math.max(entryPrice * (1 - s * finalStopPct / 100), 1e-8),
     takeProfit1: Math.max(entryPrice * (1 + s * tp1Pct / 100), 1e-8),
-    takeProfit2: Math.max(entryPrice * (1 + s * tp2Pct / 100), 1e-8)
+    takeProfit2: Math.max(entryPrice * (1 + s * tp2Pct / 100), 1e-8),
+    tooVolatile,
+    noiseFloorPct
   };
 }
 

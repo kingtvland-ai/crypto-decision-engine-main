@@ -40,8 +40,10 @@ function overrideParams(input: StrategyTickInput) {
     ? input.config.minConfidenceOverride
     : undefined;
   // Calm-regime scalp (2026-09-11, operator request, sim only): see
-  // calmRegime.ts / prev4hRange.ts for the full rationale.
-  return { calmRegimeScalp: true, ...(override ? { minConfidence: override } : {}) };
+  // calmRegime.ts / prev4hRange.ts for the full rationale. noiseFloorStop
+  // (2026-09-14) adds the second widening condition — the stop must clear one
+  // H1 bar's ATR, the frame this bot actually holds across.
+  return { calmRegimeScalp: true, noiseFloorStop: true, ...(override ? { minConfidence: override } : {}) };
 }
 
 const pathStrategy: SimEngineStrategy = {

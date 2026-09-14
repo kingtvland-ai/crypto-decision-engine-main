@@ -75,9 +75,13 @@ export {
   FIXED_SL_PCT, FIXED_TP1_PCT, FIXED_TP2_PCT,
   SURGE_REL_VOLUME, SURGE_VOLUME_LOOKBACK, SURGE_MIN_SL_PCT, SURGE_MAX_SL_PCT,
   TP2_MIN_REWARD_RISK,
-  isBuyingSurge, resolveLadderPercents
+  MIN_STOP_ATR_MULT, VOLATILITY_EXPANSION_RATIO, NOISE_PERCENTILE,
+  EXPANSION_FAST_BARS, EXPANSION_SLOW_BARS,
+  isBuyingSurge, resolveLadderPercents,
+  noiseFloorStopPct, atrPercentOf, badBarPercent, measureStopNoise,
+  detectVolatilityExpansion, effectiveAtrPercent
 } from './services/calmRegime';
-export type { LadderPercents } from './services/calmRegime';
+export type { LadderPercents, VolatilityExpansion, StopNoise } from './services/calmRegime';
 
 export {
   RATCHET_FIRST_RUNG_PCT, RATCHET_SECOND_RUNG_PCT, RATCHET_STEP_PCT,

@@ -9,7 +9,7 @@ import { BYBIT_FEES } from './tradeEngine';
 import { clamp } from './intradayIndicators';
 import { DEFAULT_INTRADAY_PARAMS, Direction, IntradayParams, SetupType, PER_ASSET_EXPOSURE_CAP_PERCENT, resolveSizingBase } from './intradayParams';
 import { MAX_LOSS_PERCENT, TP1_EXIT_FRACTION, tp1FloorDistance } from './exitPolicy';
-import { resolveLadderPercents } from './calmRegime';
+import { resolveLadderPercents, type StopNoise } from './calmRegime';
 
 export interface CostAnalysis {
   // ── The exact levels this analysis was computed on ────────────────────────
@@ -280,9 +280,14 @@ export interface RiskPlanInput {
   atr5: number;
   atr15: number;
   /** "A lot of buyers" on the entry timeframe — see `isBuyingSurge`. Read only
-   *  when the fixed scalp ladder is on (`params.calmRegimeScalp`), and the ONLY
-   *  thing that lets the stop widen past the fixed 2.3%. */
+   *  when the fixed scalp ladder is on (`params.calmRegimeScalp`); one of the
+   *  two things that let the stop widen past the fixed 2.3%. */
   buyingSurge?: boolean;
+  /** 5M bar-noise measurement — see `measureStopNoise`. The other thing that
+   *  widens the stop: a stop inside one ordinary bar's range is a coin flip on
+   *  noise, not a risk limit. Read only when `params.noiseFloorStop` is on.
+   *  Omitted = no floor, and the flat ladder stands unchanged. */
+  stopNoise?: StopNoise;
   equity: number;
   /** Capital to size against. Defaults to `equity` (the LIVE bot's behaviour).
    *  The simulations pass their STARTING capital here so a drawdown reduces how
@@ -497,10 +502,20 @@ export function buildRiskPlan(input: RiskPlanInput): RiskPlan {
   const ladderActive = params.calmRegimeScalp === true;
   let ladderTp2Distance: number | undefined;
   if (ladderActive) {
+    // The stop must clear one 5M bar's own range, or an ordinary candle takes
+    // it out on a thesis that never failed. Off unless `noiseFloorStop` is on,
+    // which leaves the flat ladder exactly as it was.
+    const noise = params.noiseFloorStop === true ? input.stopNoise : undefined;
     const ladder = resolveLadderPercents({
       dynamicSlPct: slDistancePct,
-      buyingSurge: input.buyingSurge === true
+      buyingSurge: input.buyingSurge === true,
+      noiseFloorPct: noise?.floorPct
     });
+    if (ladder.tooVolatile) {
+      return rejected(
+        `תנודתיות 5M גבוהה מדי — נר גרוע ${(noise?.badBarPercent ?? 0).toFixed(2)}% דורש סטופ ${ladder.noiseFloorPct.toFixed(2)}%, מעל התקרה ${MAX_LOSS_PERCENT}% — NO TRADE`
+      );
+    }
     slDistancePct = ladder.slPct;
     slDistance = entry * slDistancePct / 100;
     tp1Distance = entry * ladder.tp1Pct / 100;

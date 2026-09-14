@@ -104,6 +104,13 @@ export interface IntradayParams {
    *  [2.3%, 4.2%]. See `calmRegime.ts` for the full rationale. */
   calmRegimeScalp?: boolean;
   /** Opt-in (default off — see `SIM_INTRADAY_PARAMS_OVERRIDE`, sim only).
+   *  Only meaningful together with `calmRegimeScalp`. Adds a SECOND condition
+   *  that widens the flat 2.3% stop: the stop must clear 1.6 × one 5M bar's
+   *  ATR, so an ordinary candle on a volatile symbol cannot take out a thesis
+   *  that never failed. When even the 4.2% ceiling sits inside that noise the
+   *  trade is refused outright. See `calmRegime.ts`. */
+  noiseFloorStop?: boolean;
+  /** Opt-in (default off — see `SIM_INTRADAY_PARAMS_OVERRIDE`, sim only).
    *  Hands every profit exit to the profit ratchet: rungs at 1.8/3/4/5%… are
    *  marked on the way up and sell nothing, coming back down to one sells 30%,
    *  and the 1.8% floor closes the position. TP1/TP2 and the trailing stop are

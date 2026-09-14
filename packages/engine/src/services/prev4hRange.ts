@@ -23,7 +23,7 @@ import type { SignalEvaluation, DecisionFactor } from './intradayBridge';
 import { POSITION_TARGET_PCT } from './intradayParams';
 import { capStopLoss, stopWasCapped, takeProfitLevels, tp1FloorDistance, MAX_LOSS_PERCENT, TP1_PERCENT, TP2_PERCENT } from './exitPolicy';
 import { estimatedRoundTripCostPct } from './intradayRisk';
-import { resolveLadderPercents, isBuyingSurge } from './calmRegime';
+import { resolveLadderPercents, isBuyingSurge, measureStopNoise } from './calmRegime';
 
 // ── Parameters (all configurable — no auto-optimisation) ────────────────────
 
@@ -68,6 +68,12 @@ export interface Prev4hRangeParams {
    *  the stop widen back to the `mid`-derived value, clamped to [2.3%, 4.2%].
    *  See calmRegime.ts. */
   calmRegimeScalp?: boolean;
+  /** Opt-in (default off — sim only). Only meaningful with `calmRegimeScalp`.
+   *  A SECOND condition that widens the flat 2.3%: the stop must clear 1.6 ×
+   *  one H1 bar's ATR — this bot holds across hours, so an hourly bar is the
+   *  noise it has to sit outside of. Refuses the trade outright when even the
+   *  ceiling sits inside that noise (VOLATILITY_TOO_HIGH). See calmRegime.ts. */
+  noiseFloorStop?: boolean;
   /** Resting-limit discount from market, in units of the reference bar's RANGE.
    *  This bot computes no ATR — `range` IS its volatility scale (every level it
    *  uses is a multiple of it), and a 5-minute ATR would be the wrong scale for
@@ -134,6 +140,7 @@ export type Prev4hRangeReason =
   | 'ENTRY_TOO_EXTENDED' // broke out but price already ran too far past H/L
   | 'RISK_VS_COST'       // stop distance too small relative to round-trip cost
   | 'CONFIDENCE_BELOW_MIN'
+  | 'VOLATILITY_TOO_HIGH' // one H1 bar is wider than the widest stop allowed
   | 'RR_BELOW_MIN';      // actual R:R below threshold
 
 export interface Prev4hRangePlan {
@@ -323,10 +330,26 @@ export function evaluatePrev4hRange(input: Prev4hRangeInput): SignalEvaluation {
   const dynSlPct = (rUnit / entryRef) * 100;
   const calmActive = p.calmRegimeScalp === true;
   if (calmActive) {
+    // Second widening condition alongside the surge: the stop must clear one H1
+    // bar's own range — this bot holds across hours, so an hourly bar is the
+    // noise it has to sit outside of. An expanding tape overrides the average.
+    const noise = p.noiseFloorStop === true ? measureStopNoise(h1) : undefined;
     const ladder = resolveLadderPercents({
       dynamicSlPct: dynSlPct,
-      buyingSurge: isBuyingSurge(h1)
+      buyingSurge: isBuyingSurge(h1),
+      noiseFloorPct: noise?.floorPct
     });
+    if (ladder.tooVolatile) {
+      return base('ARMED', 'VOLATILITY_TOO_HIGH', [
+        ...debug,
+        {
+          label: 'תנודתיות',
+          value: `נר גרוע H1 ${(noise?.badBarPercent ?? 0).toFixed(2)}% (ATR ${(noise?.atrPercent ?? 0).toFixed(2)}%)`,
+          impact: 'negative',
+          note: `סטופ מינימלי ${ladder.noiseFloorPct.toFixed(2)}% חורג מהתקרה — נר רגיל היה מוציא את הפוזיציה`
+        }
+      ], { confidence: 0 });
+    }
     const slDistance = entryRef * ladder.slPct / 100;
     stopLoss = isLong ? entryRef - slDistance : entryRef + slDistance;
     tp1Distance = entryRef * ladder.tp1Pct / 100;
