@@ -79,6 +79,14 @@ export {
 } from './services/calmRegime';
 export type { LadderPercents } from './services/calmRegime';
 
+export {
+  RATCHET_FIRST_RUNG_PCT, RATCHET_SECOND_RUNG_PCT, RATCHET_STEP_PCT,
+  RATCHET_PARTIAL_FRACTION,
+  rungsCrossed, evaluateRatchet, ratchetReason
+} from './services/profitRatchet';
+export type { RatchetInput, RatchetDecision, RatchetAction } from './services/profitRatchet';
+
+
 export type { ScoreContext } from './services/intradaySetupScores';
 export { scoreTrend, scoreMomentum, scoreLocation, scoreParticipation, scoreStructure, retracementAtr } from './services/intradaySetupScores';
 

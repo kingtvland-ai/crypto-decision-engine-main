@@ -23,9 +23,169 @@ import { createTradingApiClient } from '@/services/tradingApiClient';
 import type { WorkerAccountSummary, WorkerBotState } from '@/services/tradingApiClient';
 import { useSimulationBotContextSafe } from '@/contexts/SimulationBotContext';
 import { useProSimulationBotContextSafe } from '@/contexts/ProSimulationBotContext';
+import { usePathSimulationBotContextSafe, PATH_SIM_BOT_LAST_KNOWN_RUNNING_KEY } from '@/contexts/PathSimulationBotContext';
+import { useBybitSimulationBotContextSafe, BYBIT_SIM_BOT_LAST_KNOWN_RUNNING_KEY } from '@/contexts/BybitSimulationBotContext';
 import type { SimPosition, SimTrade } from '@/hooks/useSimulationBot';
 import { useWorkerAuth } from '@/contexts/WorkerAuthContext';
+import { summarizeSimBot } from '@/lib/simBotSummary';
 import { useApiPolling } from '@/hooks/useApiPolling';
+
+
+/** The four simulation bots, in the order the simulation page shows them.
+ *  `accent` keeps each bot the same colour across the whole app. */
+interface SimBotCardMeta {
+  id: 'intraday' | 'pro' | 'path' | 'bybit';
+  title: string;
+  subtitle: string;
+  footer: string;
+  accent: { icon: string; badge: string; stat: string };
+}
+
+const SIM_BOT_CARDS: SimBotCardMeta[] = [
+  {
+    id: 'intraday',
+    title: 'מנוע חדש · Multi-Timeframe',
+    subtitle: 'Setup + Entry מבניים על 1H/15M/5M',
+    footer: 'מנוע 4-Layer Decision Engine',
+    accent: {
+      icon: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
+      badge: 'text-blue-400 border-blue-500/30',
+      stat: 'text-blue-400'
+    }
+  },
+  {
+    id: 'pro',
+    title: 'בוט פרו · alg.md',
+    subtitle: 'ציון משוקלל של 8 אינדיקטורים',
+    footer: 'בוט פרו · alg.md',
+    accent: {
+      icon: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
+      badge: 'text-amber-400 border-amber-500/30',
+      stat: 'text-amber-400'
+    }
+  },
+  {
+    id: 'path',
+    title: 'נתיב 4H · טווח נר קודם',
+    subtitle: 'פריצת טווח ארבע השעות הקודמות',
+    footer: 'Prev-4H Range',
+    accent: {
+      icon: 'bg-violet-500/10 text-violet-400 border-violet-500/20',
+      badge: 'text-violet-400 border-violet-500/30',
+      stat: 'text-violet-400'
+    }
+  },
+  {
+    id: 'bybit',
+    title: 'Bybit · TrendBreakout',
+    subtitle: 'פריצת Donchian ב-M15 עם אישור ווליום',
+    footer: 'TrendBreakout · סימולציה בלבד',
+    accent: {
+      icon: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+      badge: 'text-emerald-400 border-emerald-500/30',
+      stat: 'text-emerald-400'
+    }
+  }
+];
+
+interface SimBotCardState {
+  equity: number;
+  cash: number;
+  initialAmount: number;
+  positionsCount: number;
+  totalTrades: number;
+  winRate: number;
+  totalProfit: number;
+  isRunning: boolean;
+}
+
+const usd0 = (n: number) => `$${Math.round(n).toLocaleString('en-US')}`;
+
+function SimBotCard({ meta, state }: { meta: SimBotCardMeta; state: SimBotCardState | null }) {
+  const profit = state?.totalProfit ?? 0;
+  const up = profit >= 0;
+  // Percent against the bot's OWN starting capital — the operator sets that per
+  // bot, so a shared denominator would misreport three of the four.
+  const profitPct = state && state.initialAmount > 0 ? (profit / state.initialAmount) * 100 : 0;
+
+  const badge = !state
+    ? 'ממתין לנתונים'
+    : state.isRunning
+      ? (state.positionsCount > 0 ? `🟢 ${state.positionsCount} פוזיציות פעילות` : '🟢 פועל — ממתין לאותות')
+      : state.positionsCount > 0
+        ? `🟡 מושהה • ${state.positionsCount} פוזיציות`
+        : 'מושהה';
+
+  return (
+    <Card className="border-border/60 bg-card hover:border-primary/40 transition-all shadow-md">
+      <CardHeader className="pb-3 flex flex-row items-start justify-between gap-2">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className={`p-2 rounded-lg border shrink-0 ${meta.accent.icon}`}>
+            <Bot className="w-5 h-5" />
+          </div>
+          <div className="min-w-0">
+            <CardTitle className="text-base font-bold font-mono truncate">{meta.title}</CardTitle>
+            <p className="text-xs text-muted-foreground font-mono">{meta.subtitle}</p>
+          </div>
+        </div>
+        <Badge variant="outline" className={`font-mono text-[10px] shrink-0 ${meta.accent.badge}`}>
+          {badge}
+        </Badge>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid grid-cols-3 gap-2 text-center">
+          <div className="p-2.5 rounded-lg bg-background/80 border border-border/40">
+            {/* Equity, not cash: cash alone drops by the full size of every open
+                position and reads as a catastrophic loss on a flat bot. */}
+            <div className="text-[11px] text-muted-foreground font-mono">שווי תיק</div>
+            <div className="text-lg font-bold font-mono text-foreground mt-0.5">
+              {state ? usd0(state.equity) : '—'}
+            </div>
+            {state && state.positionsCount > 0 && (
+              <div className="text-[10px] text-muted-foreground font-mono mt-0.5">
+                {usd0(state.cash)} מזומן
+              </div>
+            )}
+          </div>
+          <div className="p-2.5 rounded-lg bg-background/80 border border-border/40">
+            <div className="text-[11px] text-muted-foreground font-mono">סך רווח / הפסד</div>
+            <div className={`text-lg font-bold font-mono mt-0.5 ${up ? 'text-emerald-400' : 'text-red-400'}`}>
+              {state ? `${up ? '+' : '-'}${usd0(Math.abs(profit))}` : '—'}
+            </div>
+            {state && (
+              <div className={`text-[10px] font-mono mt-0.5 ${up ? 'text-emerald-400/70' : 'text-red-400/70'}`}>
+                {up ? '+' : ''}{profitPct.toFixed(2)}%
+              </div>
+            )}
+          </div>
+          <div className="p-2.5 rounded-lg bg-background/80 border border-border/40">
+            <div className="text-[11px] text-muted-foreground font-mono">אחוז הצלחה</div>
+            <div className={`text-lg font-bold font-mono mt-0.5 ${meta.accent.stat}`}>
+              {state ? `${state.winRate.toFixed(1)}%` : '—'}
+            </div>
+            {state && (
+              <div className="text-[10px] text-muted-foreground font-mono mt-0.5">
+                {state.totalTrades} עסקאות
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center justify-between pt-2 border-t border-border/40">
+          <div className="text-xs text-muted-foreground font-mono flex items-center gap-1.5 min-w-0">
+            <Activity className={`w-3.5 h-3.5 shrink-0 ${meta.accent.stat}`} />
+            <span className="truncate">{meta.footer}</span>
+          </div>
+          <Link to="/simulation-bot">
+            <Button variant="ghost" size="sm" className="font-mono text-xs gap-1 h-7 px-2 text-primary hover:text-primary">
+              כניסה
+              <ChevronRight className="w-3.5 h-3.5" />
+            </Button>
+          </Link>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
 export const ExecutiveDashboard: React.FC = () => {
   const [loading, setLoading] = useState(false);
@@ -41,9 +201,19 @@ export const ExecutiveDashboard: React.FC = () => {
   // snapshot in localStorage when the provider is unavailable.
   const sim = useSimulationBotContextSafe();
   const pro = useProSimulationBotContextSafe();
+  const path = usePathSimulationBotContextSafe();
+  const bybit = useBybitSimulationBotContextSafe();
 
+  /** The shared shape of all four sim-bot contexts, narrowed to what this
+   *  dashboard reads. All four expose equity/positionsValue/initialAmount. */
   interface SimSource {
     cash?: number;
+    /** Cash + mark-to-market value of open positions. The number the cards
+     *  show — `cash` alone is only the uninvested remainder. */
+    equity?: number;
+    positionsValue?: number;
+    /** Authoritative capital the run opened with, from the server snapshot. */
+    initialAmount?: number;
     positions?: SimPosition[];
     trades?: SimTrade[];
     config?: { initialAmount?: number };
@@ -51,7 +221,7 @@ export const ExecutiveDashboard: React.FC = () => {
     winRate?: number;
   }
 
-  const deriveSimState = (source: SimSource | null, fallbackKey: string, fallbackStatusKey: string) => {
+  const deriveSimState = (source: SimSource | null, fallbackKey: string | null, fallbackStatusKey: string) => {
     const mapPosition = (p: SimPosition) => {
       const notional = p.notionalUsd || p.quantity * p.currentPrice || 0;
       const pnl = p.side === 'LONG' || p.side === 'BUY'
@@ -71,20 +241,30 @@ export const ExecutiveDashboard: React.FC = () => {
 
     if (source) {
       // Use native context values so the home page matches the simulation bot page exactly.
-      const initial = source.config?.initialAmount || 10000;
-      const totalProfit = (source.cash ?? 0) - initial;
+      //
+      // EQUITY, not cash (fixed 2026-09-14). Both numbers below used to read
+      // `source.cash`, which is only the UNINVESTED remainder: a bot holding
+      // $5,024 of open positions showed a $4,976 "balance" and a −$5,024
+      // "profit/loss" while it was actually flat. Equity = cash + the
+      // mark-to-market value of open positions, which is what the simulation
+      // page itself displays.
       return {
-        cash: source.cash,
-        initialAmount: initial,
-        positionsCount: (source.positions?.length || 0),
-        totalTrades: (source.trades?.length || 0),
-        winRate: source.winRate ?? 0,
-        totalProfit,
-        isRunning: source.isRunning,
+        ...summarizeSimBot({
+          cash: source.cash,
+          equity: source.equity,
+          positionsValue: source.positionsValue,
+          initialAmount: source.initialAmount,
+          config: source.config,
+          positionsCount: source.positions?.length,
+          totalTrades: source.trades?.length,
+          winRate: source.winRate,
+          isRunning: source.isRunning
+        }),
         activePositions: (source.positions || []).map(mapPosition)
       };
     }
     // Fallback: read last snapshot persisted by the simulation bot hook.
+    if (!fallbackKey) return null;
     try {
       const raw = localStorage.getItem(fallbackKey);
       if (!raw) return null;
@@ -105,7 +285,20 @@ export const ExecutiveDashboard: React.FC = () => {
       const winRate = trades.length > 0 ? (winningTrades / trades.length) * 100 : 0;
       const totalProfit = currentVal - initial;
       const status = localStorage.getItem(fallbackStatusKey);
-      return { cash: parsed.cash ?? initial, initialAmount: initial, positionsCount: positions.length, totalTrades: trades.length, winRate, totalProfit, isRunning: status === 'running', activePositions: activeMapped };
+      // `currentVal` already carries cash + marked-to-market positions, which is
+      // exactly equity — the live branch above is the one that used to disagree.
+      return {
+        ...summarizeSimBot({
+          cash: parsed.cash ?? initial,
+          equity: currentVal,
+          initialAmount: initial,
+          positionsCount: positions.length,
+          totalTrades: trades.length,
+          winRate,
+          isRunning: status === 'running'
+        }),
+        activePositions: activeMapped
+      };
     } catch {
       return null;
     }
@@ -113,6 +306,18 @@ export const ExecutiveDashboard: React.FC = () => {
 
   const simState = deriveSimState(sim, 'simulation-bot-state-v2', 'sim-bot-last-known-running');
   const proState = deriveSimState(pro, 'pro-simulation-bot-state-v1', 'pro-sim-bot-last-known-running');
+  // Path and Bybit are server-read only — unlike Intraday/Pro they never
+  // persist a state snapshot to localStorage (just the running flag), so there
+  // is no fallback key to give them. With no provider they simply render "—".
+  const pathState = deriveSimState(path, null, PATH_SIM_BOT_LAST_KNOWN_RUNNING_KEY);
+  const bybitState = deriveSimState(bybit, null, BYBIT_SIM_BOT_LAST_KNOWN_RUNNING_KEY);
+
+  const botStates: Record<SimBotCardMeta['id'], SimBotCardState | null> = {
+    intraday: simState,
+    pro: proState,
+    path: pathState,
+    bybit: bybitState
+  };
 
   // Shared with RealTradingBot.tsx via context (lives above the router, so it
   // survives in-app navigation) — BOT_ADMIN_TOKEN is memory-only, never in
@@ -308,121 +513,15 @@ export const ExecutiveDashboard: React.FC = () => {
         </CardContent>
       </Card>
 
-      {/* 2. Simulation Bots Grid — all 3 engines */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-        {/* Intraday Simulation Bot */}
-        <Card className="border-border/60 bg-card hover:border-primary/40 transition-all shadow-md">
-          <CardHeader className="pb-3 flex flex-row items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <div className="p-2 rounded-lg bg-blue-500/10 text-blue-400 border border-blue-500/20">
-                <Bot className="w-5 h-5" />
-              </div>
-              <div>
-                <CardTitle className="text-base font-bold font-mono">מנוע חדש · Multi-Timeframe</CardTitle>
-                <p className="text-xs text-muted-foreground font-mono">Setup + Entry מבניים על 1H/15M/5M</p>
-              </div>
-            </div>
-            <Badge variant="outline" className="font-mono text-xs text-blue-400 border-blue-500/30">
-              {simState?.isRunning
-                ? (simState.positionsCount > 0 ? `🟢 ${simState.positionsCount} פוזיציות פעילות` : "🟢 פועל — ממתין לאותות")
-                : simState && simState.positionsCount > 0
-                  ? `🟡 מושהה • ${simState.positionsCount} פוזיציות`
-                  : "ממתין לאותות"}
-            </Badge>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid grid-cols-3 gap-2 text-center">
-              <div className="p-2.5 rounded-lg bg-background/80 border border-border/40">
-                <div className="text-[11px] text-muted-foreground font-mono">יתרת סימולציה</div>
-                <div className="text-lg font-bold font-mono text-foreground mt-0.5">
-                  ${simState?.cash.toLocaleString('en-US', { maximumFractionDigits: 0 }) ?? '$10,000'}
-                </div>
-              </div>
-              <div className="p-2.5 rounded-lg bg-background/80 border border-border/40">
-                <div className="text-[11px] text-muted-foreground font-mono">סך רווח / הפסד</div>
-                <div className={`text-lg font-bold font-mono mt-0.5 ${(simState?.totalProfit || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                  {(simState?.totalProfit || 0) >= 0 ? '+' : ''}${simState?.totalProfit.toFixed(0) ?? '0'}
-                </div>
-              </div>
-              <div className="p-2.5 rounded-lg bg-background/80 border border-border/40">
-                <div className="text-[11px] text-muted-foreground font-mono">אחוז הצלחה</div>
-                <div className="text-lg font-bold font-mono text-primary mt-0.5">
-                  {simState?.winRate.toFixed(1) ?? '0'}%
-                </div>
-              </div>
-            </div>
-            <div className="flex items-center justify-between pt-2 border-t border-border/40">
-              <div className="text-xs text-muted-foreground font-mono flex items-center gap-1.5">
-                <Activity className="w-3.5 h-3.5 text-blue-400" />
-                <span>מנוע 4-Layer Decision Engine</span>
-              </div>
-              <Link to="/simulation-bot">
-                <Button variant="ghost" size="sm" className="font-mono text-xs gap-1 h-7 px-2 text-primary hover:text-primary">
-                  כניסה לסימולציה
-                  <ChevronRight className="w-3.5 h-3.5" />
-                </Button>
-              </Link>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Pro Simulation Bot */}
-        <Card className="border-border/60 bg-card hover:border-amber-400/40 transition-all shadow-md">
-          <CardHeader className="pb-3 flex flex-row items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <div className="p-2 rounded-lg bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                <Bot className="w-5 h-5" />
-              </div>
-              <div>
-                <CardTitle className="text-base font-bold font-mono">בוט פרו · alg.md</CardTitle>
-                <p className="text-xs text-muted-foreground font-mono">מימוש מדויק של alg.md — ציון משוקלל 8 אינדיקטורים</p>
-              </div>
-            </div>
-            <Badge variant="outline" className="font-mono text-xs text-amber-400 border-amber-500/30">
-              {proState?.isRunning
-                ? (proState.positionsCount > 0 ? `🟢 ${proState.positionsCount} פוזיציות פעילות` : "🟢 פועל — ממתין לאותות")
-                : proState && proState.positionsCount > 0
-                  ? `🟡 מושהה • ${proState.positionsCount} פוזיציות`
-                  : "ממתין לאותות"}
-            </Badge>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid grid-cols-3 gap-2 text-center">
-              <div className="p-2.5 rounded-lg bg-background/80 border border-border/40">
-                <div className="text-[11px] text-muted-foreground font-mono">יתרת סימולציה</div>
-                <div className="text-lg font-bold font-mono text-foreground mt-0.5">
-                  ${proState?.cash.toLocaleString('en-US', { maximumFractionDigits: 0 }) ?? '$10,000'}
-                </div>
-              </div>
-              <div className="p-2.5 rounded-lg bg-background/80 border border-border/40">
-                <div className="text-[11px] text-muted-foreground font-mono">סך רווח / הפסד</div>
-                <div className={`text-lg font-bold font-mono mt-0.5 ${(proState?.totalProfit || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                  {(proState?.totalProfit || 0) >= 0 ? '+' : ''}${proState?.totalProfit.toFixed(0) ?? '0'}
-                </div>
-              </div>
-              <div className="p-2.5 rounded-lg bg-background/80 border border-border/40">
-                <div className="text-[11px] text-muted-foreground font-mono">אחוז הצלחה</div>
-                <div className="text-lg font-bold font-mono text-amber-400 mt-0.5">
-                  {proState?.winRate.toFixed(1) ?? '0'}%
-                </div>
-              </div>
-            </div>
-            <div className="flex items-center justify-between pt-2 border-t border-border/40">
-              <div className="text-xs text-muted-foreground font-mono flex items-center gap-1.5">
-                <Activity className="w-3.5 h-3.5 text-amber-400" />
-                <span>בוט פרו · alg.md</span>
-              </div>
-              <Link to="/simulation-bot">
-                <Button variant="ghost" size="sm" className="font-mono text-xs gap-1 h-7 px-2 text-primary hover:text-primary">
-                  כניסה לסימולציה
-                  <ChevronRight className="w-3.5 h-3.5" />
-                </Button>
-              </Link>
-            </div>
-          </CardContent>
-        </Card>
+      {/* 2. Simulation Bots Grid — all FOUR engines.
+          Was two hand-written cards (Intraday + Pro) that drifted from each
+          other and left Path and Bybit off the home page entirely; now one
+          card component rendered from SIM_BOT_CARDS. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
+        {SIM_BOT_CARDS.map((meta) => (
+          <SimBotCard key={meta.id} meta={meta} state={botStates[meta.id]} />
+        ))}
       </div>
-
       {/* 3. Live Active Positions Radar (if any positions open) */}
       {simState && simState.activePositions.length > 0 && (
         <Card className="border-border/60 bg-card">

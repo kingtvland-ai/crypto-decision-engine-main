@@ -66,6 +66,7 @@
  */
 
 import type { Candle } from './tradeEngine';
+import { evaluateRatchet, ratchetReason } from './profitRatchet';
 import { formatDynamicPrice, roundToPriceScale, calculateEMA } from './tradeEngine';
 import {
   analyzeVolumeTrend,
@@ -695,14 +696,22 @@ export interface ProPositionView {
   stopLoss?: number;
   takeProfit1?: number;
   takeProfit2?: number;
+  /** Best price seen since entry (highest for a long, lowest for a short).
+   *  Required by the profit ratchet; absent it falls back to the live price. */
+  peakPrice?: number;
+  /** Profit-ratchet rungs already paid out — see profitRatchet.ts. */
+  ratchetConsumed?: number[];
 }
 
 export interface ProExitDecision {
   shouldExit: boolean;
   /** PARTIAL_50 closes TP1_EXIT_FRACTION of the position and leaves the rest
-   *  running; FULL closes what is left. */
-  exitType?: 'FULL' | 'PARTIAL_50';
+   *  running; PARTIAL_RATCHET closes `ratchetFraction` of it; FULL closes
+   *  what is left. */
+  exitType?: 'FULL' | 'PARTIAL_50' | 'PARTIAL_RATCHET';
   reason: string;
+  ratchetFraction?: number;
+  ratchetConsumed?: number[];
 }
 
 /**
@@ -714,7 +723,11 @@ export function evaluateProExit(
   pos: ProPositionView,
   currentPrice: number,
   currentSignal: ProSignalResult,
-  minConfidence: number
+  minConfidence: number,
+  /** Opt-in (default off — sim only, see proSimExecution.ts). Hands every
+   *  profit exit to the rung ladder and bypasses TP1/TP2 and the break-even
+   *  runner stop. See profitRatchet.ts. */
+  opts: { profitRatchet?: boolean } = {}
 ): ProExitDecision {
   const isLong = pos.isLong ?? true;
   const changePercent = positionPnlPercent(pos.entryPrice, currentPrice, isLong);
@@ -736,7 +749,32 @@ export function evaluateProExit(
     ? (isLong ? Math.max(stopLoss, pos.entryPrice) : Math.min(stopLoss, pos.entryPrice))
     : stopLoss;
 
-  if (reachedStop(currentPrice, runnerStop, isLong)) {
+  // Profit ratchet (2026-09-14, operator decision, sim only). When on it owns
+  // every profit exit: rungs at 1.8/3/4/5%… are marked on the way up and sell
+  // nothing, coming back down to one sells 30%, and the 1.8% floor closes the
+  // position. TP1/TP2 and the break-even runner stop below are bypassed — the
+  // stop loss and the SELL-signal flip still apply.
+  const ratchet = opts.profitRatchet === true
+    ? evaluateRatchet({
+        entryPrice: pos.entryPrice,
+        peakPrice: pos.peakPrice ?? currentPrice,
+        livePrice: currentPrice,
+        isLong,
+        consumed: pos.ratchetConsumed
+      })
+    : undefined;
+
+  if (ratchet && ratchet.action !== 'HOLD') {
+    return {
+      shouldExit: true,
+      exitType: ratchet.action === 'FULL' ? 'FULL' : 'PARTIAL_RATCHET',
+      reason: ratchetReason(ratchet),
+      ratchetFraction: ratchet.fraction,
+      ratchetConsumed: ratchet.consumed
+    };
+  }
+
+  if (reachedStop(currentPrice, ratchet ? stopLoss : runnerStop, isLong)) {
     const atBreakEven = pos.tp1Hit && Math.abs(runnerStop - pos.entryPrice) <= Math.abs(pos.entryPrice) * 1e-9;
     return {
       shouldExit: true,
@@ -747,10 +785,10 @@ export function evaluateProExit(
     };
   }
   // TP2 first: past it, there is nothing left to leave running.
-  if (reachedTarget(currentPrice, takeProfit2, isLong)) {
+  if (!ratchet && reachedTarget(currentPrice, takeProfit2, isLong)) {
     return { shouldExit: true, exitType: 'FULL', reason: `TP2 ב-${takeProfit2.toFixed(6)} (שינוי ${changePercent.toFixed(2)}%)` };
   }
-  if (!pos.tp1Hit && reachedTarget(currentPrice, takeProfit1, isLong)) {
+  if (!ratchet && !pos.tp1Hit && reachedTarget(currentPrice, takeProfit1, isLong)) {
     return {
       shouldExit: true,
       exitType: 'PARTIAL_50',

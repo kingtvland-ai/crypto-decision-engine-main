@@ -108,7 +108,10 @@ function equity(state: SimState, prices: Record<string, number>): number {
 }
 
 // Exit type union for all possible exit reasons
-type ExitType = 'FULL' | 'PARTIAL_50' | 'NONE' | 'TRAILING_STOP' | 'REVERSAL' | 'TIME_BASED';
+type ExitType = 'FULL' | 'PARTIAL_50' | 'PARTIAL_RATCHET' | 'NONE' | 'TRAILING_STOP' | 'REVERSAL' | 'TIME_BASED';
+// PARTIAL_RATCHET reaches this union only if a backtest is run with
+// `profitRatchet` on; the harness leaves it off, so the branches below that
+// test for PARTIAL_50 stay correct for every run it actually performs.
 
 // ── Intrabar exit + position PnL ─────────────────────────────────────────────
 // Fidelity helpers: a stop-loss / take-profit that the candle's RANGE crosses

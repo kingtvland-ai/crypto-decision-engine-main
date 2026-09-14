@@ -61,6 +61,8 @@ export interface CsvBot {
 /** The exit-reason buckets, in the order they appear as CSV columns. */
 export const EXIT_REASON_KEYS = [
   'Stop Loss',
+  'סולם — מימוש 30%',
+  'סולם — סגירה מלאה',
   'Break-even',
   'TP1',
   'TP2',
@@ -78,6 +80,14 @@ export type ExitReasonKey = (typeof EXIT_REASON_KEYS)[number];
  */
 export function classifyExitReason(reason: string | undefined): ExitReasonKey {
   const r = reason ?? '';
+  // The profit ratchet (2026-09-14) is the sim bots' only profit exit, and its
+  // two verdicts are the numbers the operator actually watches — so they get
+  // their own buckets ahead of everything else. Its reason string contains
+  // "מימוש 30%", which the generic TP1/"יציאה חלקית" test below would otherwise
+  // swallow.
+  if (/^סולם רווח/.test(r)) {
+    return /סגירה מלאה/.test(r) ? 'סולם — סגירה מלאה' : 'סולם — מימוש 30%';
+  }
   if (/break-?even/i.test(r)) return 'Break-even';
   if (/trailing/i.test(r)) return 'Trailing';
   if (/stop loss|תקרת הפסד|יציאת חירום|סטופ/i.test(r)) return 'Stop Loss';

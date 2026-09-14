@@ -72,6 +72,7 @@ import {
   TrendBreakoutParams,
   readTrendBreakoutPlan
 } from './trendBreakout';
+import { evaluateRatchet, ratchetReason } from './profitRatchet';
 
 export const uid = (p: string) => `tb-${p}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
@@ -307,24 +308,35 @@ export function generateTrendBreakoutOrders(ctx: TrendBreakoutOrderGenContext): 
     const tp2 = first.takeProfit2;
     const tp2Reached = tp2 !== undefined && reachedTarget(live, tp2, isLong);
 
-    // TP1 closes half of EVERY lot in the logical trade and lets the rest run
-    // to TP2 (operator decision 2026-09-08). Checked before the full-exit
-    // branches, and skipped once price is already past TP2 — that is a full
-    // exit, not a partial. `tp1Hit` is tracked per lot by the fill core.
-    const tp1 = first.takeProfit1;
-    const unhitLots = lt.lots.filter((l) => !l.tp1Hit && !claimedPositionIds.has(l.id));
-    if (tp1 && !tp2Reached && reachedTarget(live, tp1, isLong) && unhitLots.length > 0) {
+    // Profit ratchet (2026-09-14) — replaced the TP1-half / TP2 pair outright.
+    // Crossing 1.8/3/4/5%… marks a rung and sells nothing; coming back down to
+    // one sells 30% of every lot, or closes the trade at the 1.8% floor. The
+    // peak is the best price any lot has seen, measured against lot 0's entry —
+    // the same anchor pnlPct above already uses. See profitRatchet.ts.
+    const peaks = lt.lots.map((l) => (isLong ? l.highestPrice : l.lowestPrice) ?? l.entryPrice);
+    const ratchet = evaluateRatchet({
+      entryPrice: first.entryPrice,
+      peakPrice: isLong ? Math.max(...peaks) : Math.min(...peaks),
+      livePrice: live,
+      isLong,
+      consumed: first.ratchetConsumed
+    });
+
+    const openLots = lt.lots.filter((l) => !claimedPositionIds.has(l.id));
+    if (ratchet.action === 'PARTIAL' && openLots.length > 0) {
       closingBaseSides.add(`${lt.base}|${lt.side}`);
-      for (const lot of unhitLots) {
+      for (const lot of openLots) {
         newOrders.push({
-          id: uid(`${lt.base}-tp1`),
+          id: uid(`${lt.base}-ratchet`),
           symbol: lt.base,
           positionId: lot.id,
           type: lot.type,
           side: 'partial_tp1',
+          exitFraction: ratchet.fraction,
+          ratchetConsumed: ratchet.consumed,
           signalPrice: live,
-          quantity: lot.quantity * TP1_EXIT_FRACTION,
-          reason: `TP1 הושג ב-${tp1.toFixed(6)} (+${pnlPct.toFixed(2)}%) — סגירת ${(TP1_EXIT_FRACTION * 100).toFixed(0)}%`,
+          quantity: lot.quantity * (ratchet.fraction ?? 0),
+          reason: ratchetReason(ratchet),
           confidence: lot.confidence,
           executeAt: now + delayMs,
           createdAt: now
@@ -336,7 +348,13 @@ export function generateTrendBreakoutOrders(ctx: TrendBreakoutOrderGenContext): 
     let reason = '';
     if (reachedStop(live, capLevel, isLong) || worstLotLossPct >= MAX_LOSS_PERCENT) {
       reason = `חריגת תקרת הפסד ${MAX_LOSS_PERCENT}% בתוך נר — יציאת חירום (${pnlPct.toFixed(2)}%)`;
-    } else if (reachedStop(live, stop, isLong)) {
+    } else if (ratchet.action === 'FULL') {
+      reason = ratchetReason(ratchet);
+    } else if (ratchet.peakRung === undefined && reachedStop(live, stop, isLong)) {
+      // The ATR trail governs only BELOW the first rung. Once +1.8% has been
+      // crossed the ladder owns the exit (operator decision 2026-09-14) — the
+      // trail used to close these positions long before a rung was given back,
+      // which is exactly the give-back-the-profit behaviour being removed.
       // "תקרה" only when the cap is what actually binds the stop (capStopLoss
       // pulled the ATR stop in) — a normal ATR stop is labelled as such.
       const atCap = Math.abs(stop - capLevel) <= Math.abs(capLevel) * 1e-9 + 1e-12;
@@ -344,15 +362,13 @@ export function generateTrendBreakoutOrders(ctx: TrendBreakoutOrderGenContext): 
       reason = progressR >= p.breakEvenR
         ? `Trailing/BE stop ב-${stop.toFixed(6)} (${progressR.toFixed(2)}R)`
         : `Stop Loss ב-${stop.toFixed(6)} (${pnlPct.toFixed(2)}%, ${stopTag})`;
-    } else if (tp2Reached) {
-      reason = `TP2 הושג ב-${(tp2 as number).toFixed(6)} (+${pnlPct.toFixed(2)}%)`;
-    } else if (tp && !first.tp1Hit && reachedTarget(live, tp, isLong)) {
-      reason = `Take Profit ב-${tp.toFixed(6)} (+${pnlPct.toFixed(2)}%)`;
     } else {
       const stNow = currentH1Supertrend(set, p);
       if (stNow && (isLong ? stNow === 'BEAR' : stNow === 'BULL')) {
+        // A confirmed trend reversal still closes a laddered position: this bot
+        // only exists while the trend holds.
         reason = `היפוך מגמה — H1 Supertrend התהפך ל-${stNow}`;
-      } else if (now - first.openTimestamp >= p.maxHoldHours * 60 * 60 * 1000) {
+      } else if (ratchet.peakRung === undefined && now - first.openTimestamp >= p.maxHoldHours * 60 * 60 * 1000) {
         reason = `Time Stop — ${p.maxHoldHours} נרות H1 (${progressR.toFixed(2)}R)`;
       }
     }

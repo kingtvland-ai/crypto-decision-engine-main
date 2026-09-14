@@ -89,6 +89,12 @@ export const SIM_INTRADAY_PARAMS_OVERRIDE: Partial<IntradayParams> = {
   // value clamped to [2.3%, 4.2%]. See calmRegime.ts.
   // Sim only — DEFAULT_INTRADAY_PARAMS leaves this unset.
   calmRegimeScalp: true,
+  // Profit ratchet (2026-09-14, operator decision): every profit exit is the
+  // rung ladder — 1.8/3/4/5%… marked on the way up, 30% sold on the way back
+  // down to a rung, full close at the 1.8% floor. TP1/TP2 and the trailing stop
+  // are bypassed. Sim only — DEFAULT_INTRADAY_PARAMS leaves this unset, so the
+  // LIVE bot keeps its existing ladder untouched. See profitRatchet.ts.
+  profitRatchet: true,
   // Operator floor: no sim position opens below $100. Per the 10% target model,
   // a budget below MIN_SIM_ENTRY_USD is SKIPPED — never bumped up.
   // This override makes buildRiskPlan enforce the same floor.
@@ -201,6 +207,11 @@ export interface SimPosition {
   trailingStopActive?: boolean;
   trailingStopPrice?: number;
   tp1Hit: boolean;
+  /** Profit-ratchet rungs already paid out for this position (profitRatchet.ts).
+   *  Persisted so a rung fires once and only once across ticks — without it a
+   *  price oscillating around a rung would sell 30% on every tick. Positions
+   *  restored from state written before the ratchet existed have none. */
+  ratchetConsumed?: number[];
   highestPriceSinceTP1?: number;
   lowestPriceSinceTP1?: number;
   highestPrice?: number;
@@ -274,6 +285,12 @@ export interface PendingOrder {
   symbol: string;
   type: 'SPOT' | 'FUTURES';
   side: 'buy' | 'sell' | 'long' | 'short' | 'close_long' | 'close_short' | 'partial_tp1';
+  /** Fraction of the position this partial closes. Defaults to
+   *  TP1_EXIT_FRACTION when absent, so orders written before the profit
+   *  ratchet still mean "half". Ignored on full closes and entries. */
+  exitFraction?: number;
+  /** Ratchet state to write onto the REMAINDER when this partial fills. */
+  ratchetConsumed?: number[];
   signalPrice: number;
   quantity: number;
   budgetUsd?: number;
@@ -708,7 +725,8 @@ export function generateNewOrders(ctx: OrderGenContext): PendingOrder[] {
         lowestPriceSinceTP1: pos.lowestPriceSinceTP1,
         maxHoldMs: pos.maxHoldMs,
         timeStopMs: pos.timeStopMs,
-        setupType: pos.setupType
+        setupType: pos.setupType,
+        ratchetConsumed: pos.ratchetConsumed
       },
       livePrice,
       atr5,
@@ -719,7 +737,23 @@ export function generateNewOrders(ctx: OrderGenContext): PendingOrder[] {
 
     if (!exitCheck.shouldExit) continue;
 
-    if (exitCheck.exitType === 'PARTIAL_50') {
+    if (exitCheck.exitType === 'PARTIAL_RATCHET') {
+      newOrders.push({
+        id: uid(`${pos.symbol}-ratchet`),
+        symbol: pos.symbol,
+        positionId: pos.id,
+        type: pos.type,
+        side: 'partial_tp1',
+        exitFraction: exitCheck.ratchetFraction,
+        ratchetConsumed: exitCheck.ratchetConsumed,
+        signalPrice: livePrice,
+        quantity: pos.quantity * (exitCheck.ratchetFraction ?? 0),
+        reason: exitCheck.reason,
+        confidence: pos.confidence,
+        executeAt: Date.now() + delayMs,
+        createdAt: Date.now()
+      });
+    } else if (exitCheck.exitType === 'PARTIAL_50') {
       newOrders.push({
         id: uid(`${pos.symbol}-tp1-50`),
         symbol: pos.symbol,
@@ -1268,8 +1302,11 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
       if (posIdx >= 0) {
         const pos = workingPositions[posIdx];
         const isSpot = pos.type === 'SPOT';
-        const closeQty = pos.quantity * TP1_EXIT_FRACTION;
-        const remainingFraction = 1 - TP1_EXIT_FRACTION;
+        // The profit ratchet closes 30%, the legacy TP1 closed half. Clamped so
+        // a malformed order can never close more than the position or nothing.
+        const exitFraction = Math.min(1, Math.max(0, order.exitFraction ?? TP1_EXIT_FRACTION));
+        const closeQty = pos.quantity * exitFraction;
+        const remainingFraction = 1 - exitFraction;
         const notional = closeQty * fillPrice;
         const fee = calculateTradingFee(notional, pos.type, true, costs.feePercent);
 
@@ -1279,13 +1316,13 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
         if (isSpot) {
           const netProceeds = notional - fee;
           const costBasis = closeQty * pos.avgPrice;
-          pnl = netProceeds - costBasis - pos.entryFee * TP1_EXIT_FRACTION;
+          pnl = netProceeds - costBasis - pos.entryFee * exitFraction;
           workingCash += netProceeds;
         } else {
           pnl = pos.side === 'LONG'
             ? (fillPrice - pos.entryPrice) * closeQty
             : (pos.entryPrice - fillPrice) * closeQty;
-          workingCash += pos.marginUsd * TP1_EXIT_FRACTION + pnl - fee;
+          workingCash += pos.marginUsd * exitFraction + pnl - fee;
         }
 
         feesAdded += fee;
@@ -1301,6 +1338,7 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
           // the remainder closes.
           entryFee: pos.entryFee * remainingFraction,
           tp1Hit: true,
+          ratchetConsumed: order.ratchetConsumed ?? pos.ratchetConsumed,
           highestPriceSinceTP1: fillPrice,
           lowestPriceSinceTP1: fillPrice,
           // The remainder was opened against a proportional share of the
@@ -1310,14 +1348,14 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
           initialRiskUsd: pos.initialRiskUsd !== undefined ? pos.initialRiskUsd * remainingFraction : undefined
         };
 
-        const partialBasis = isSpot ? closeQty * pos.avgPrice : pos.marginUsd * TP1_EXIT_FRACTION;
+        const partialBasis = isSpot ? closeQty * pos.avgPrice : pos.marginUsd * exitFraction;
         const partialPnlPercent = partialBasis > 0 ? (pnl / partialBasis) * 100 : 0;
         newTrades.push({
           id: order.id, symbol: order.symbol, type: pos.type, side: 'partial_tp1',
           price: fillPrice, requestedPrice: order.signalPrice, slippagePercent, fee, delayMs,
           quantity: closeQty, usdValue: notional, leverage: pos.leverage, timestamp: now, at: Date.now(),
           reason: order.reason, confidence: order.confidence, pnl, pnlPercent: partialPnlPercent,
-          riskUsd: pos.initialRiskUsd !== undefined ? pos.initialRiskUsd * TP1_EXIT_FRACTION : undefined
+          riskUsd: pos.initialRiskUsd !== undefined ? pos.initialRiskUsd * exitFraction : undefined
         });
 
         events.push({

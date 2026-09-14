@@ -203,15 +203,29 @@ describe('stop exits trigger immediately on touch — no M15 close confirmation'
     expect(orders[0].reason).toContain('4.2%');
   });
 
-  it('break-even/trailing stops also trigger immediately on touch', () => {
-    // highestPrice 104 = +1.43R → stop moved to entry (BE); trailing needs 1.5R.
+  it('a given-back winner exits immediately on touch — now via the ratchet floor', () => {
+    // highestPrice 104 = +4%, so rungs 1.8 and 3 are crossed. Since 2026-09-14
+    // the profit ratchet owns every exit above +1.8%, which makes the old
+    // break-even/ATR-trail branch unreachable here: any peak high enough to
+    // move the stop to break-even is also high enough to arm the ladder. What
+    // this test still pins is the ORIGINAL point — the exit fires the moment
+    // price touches the level, with no M15 close confirmation.
     const up = [lot({ highestPrice: 104 })];
-    // Price below entry → exit as Trailing/BE immediately.
     const orders = generateTrendBreakoutOrders(ctx({ positions: up, price: 99.5 }));
     expect(orders).toHaveLength(1);
-    expect(orders[0].reason).toContain('Trailing/BE');
-    // No M15 close confirmation anymore.
+    expect(orders[0].side).toBe('close_long');
+    expect(orders[0].reason).toContain('סולם רווח');
+    expect(orders[0].reason).toContain('1.8%');
     expect(orders[0].reason).not.toContain('סגירת נר M15');
+  });
+
+  it('the ATR trail still owns the exit BELOW the first rung', () => {
+    // Peak 101.5 = +1.5%: under the 1.8% rung, so the ladder never arms and the
+    // bot's own stop is what closes the position.
+    const up = [lot({ highestPrice: 101.5 })];
+    const orders = generateTrendBreakoutOrders(ctx({ positions: up, price: 96.5 }));
+    expect(orders).toHaveLength(1);
+    expect(orders[0].reason).not.toContain('סולם רווח');
   });
 });
 

@@ -34,6 +34,7 @@ import { DAILY_DRAWDOWN_BLOCK_PERCENT, WEEKLY_DRAWDOWN_LOCK_PERCENT, PER_ASSET_E
 import { PATH_MAX_HOLD_MS, PATH_TIME_STOP_MS } from './pathEngine';
 import { pathKellyFraction } from './pathEngine';
 import type { PathBucket } from './pathStudy';
+import { evaluateRatchet, ratchetReason } from './profitRatchet';
 
 
 export const uid = (p: string) => `path-${p}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -123,16 +124,49 @@ export function generatePathOrders(ctx: PathOrderGenContext): PendingOrder[] {
     const riskUnit = Math.abs(pos.entryPrice - pos.stopLoss);
     const progressR = riskUnit > 0 ? ((livePrice - pos.entryPrice) * (isLong ? 1 : -1)) / riskUnit : 0;
 
+    // Profit ratchet (2026-09-14) — the ONLY profit exit. It replaced the single
+    // fixed takeProfit level: crossing 1.8/3/4/5%… marks a rung and sells
+    // nothing, coming back down to one sells 30% (or closes out at the 1.8%
+    // floor). See profitRatchet.ts.
+    const ratchet = evaluateRatchet({
+      entryPrice: pos.entryPrice,
+      peakPrice: (isLong ? pos.highestPrice : pos.lowestPrice) ?? pos.entryPrice,
+      livePrice,
+      isLong,
+      consumed: pos.ratchetConsumed
+    });
+
+    if (ratchet.action === 'PARTIAL') {
+      newOrders.push({
+        id: uid(`${pos.symbol}-ratchet`),
+        symbol: pos.symbol,
+        positionId: pos.id,
+        type: pos.type,
+        side: 'partial_tp1',
+        exitFraction: ratchet.fraction,
+        ratchetConsumed: ratchet.consumed,
+        signalPrice: livePrice,
+        quantity: pos.quantity * (ratchet.fraction ?? 0),
+        reason: ratchetReason(ratchet),
+        confidence: pos.confidence,
+        executeAt: now + delayMs,
+        createdAt: now
+      });
+      continue;
+    }
+
     let reason = '';
     if (isLong ? livePrice <= pos.stopLoss : livePrice >= pos.stopLoss) {
       reason = `Stop Loss ב-${pos.stopLoss}`;
-    } else if (pos.takeProfit && (isLong ? livePrice >= pos.takeProfit : livePrice <= pos.takeProfit)) {
-      reason = `Take Profit ב-${pos.takeProfit} (${progressR.toFixed(2)}R)`;
-    } else if (heldMs >= (pos.maxHoldMs ?? PATH_MAX_HOLD_MS)) {
+    } else if (ratchet.action === 'FULL') {
+      reason = ratchetReason(ratchet);
+    } else if (ratchet.peakRung === undefined && heldMs >= (pos.maxHoldMs ?? PATH_MAX_HOLD_MS)) {
       // One bar, then out. The bucket's expectancy was measured over a single
       // bar's forward window; past it the position is a trade nothing measured.
+      // Suspended once a rung is crossed (operator decision 2026-09-14): a
+      // position already climbing the ladder is let run to the ladder's verdict.
       reason = `תקרת החזקה (נר 4H אחד) — יציאה ב-${progressR.toFixed(2)}R`;
-    } else if (heldMs >= (pos.timeStopMs ?? PATH_TIME_STOP_MS) && progressR < 0.3) {
+    } else if (ratchet.peakRung === undefined && heldMs >= (pos.timeStopMs ?? PATH_TIME_STOP_MS) && progressR < 0.3) {
       reason = `Time Stop: חצי נר ללא התקדמות (${progressR.toFixed(2)}R < 0.3R)`;
     }
 

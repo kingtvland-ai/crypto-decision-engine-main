@@ -167,3 +167,18 @@ describe('csvFilename', () => {
     expect(name).not.toContain(':');
   });
 });
+
+describe('profit-ratchet exit reasons (2026-09-14)', () => {
+  const partial = 'סולם רווח: חזרה למדרגה 4% (שיא +4.20%, כעת +4.00%) — מימוש 30%';
+  const full = 'סולם רווח: חזרה למדרגה 1.8% (שיא +2.50%, כעת +1.80%) — סגירה מלאה';
+
+  it('gets its own buckets rather than falling into TP1 or אחר', () => {
+    expect(classifyExitReason(partial)).toBe('סולם — מימוש 30%');
+    expect(classifyExitReason(full)).toBe('סולם — סגירה מלאה');
+  });
+
+  it('does not steal the legacy buckets', () => {
+    expect(classifyExitReason('TP1 הושג ב-3 — סגירת 50%')).toBe('TP1');
+    expect(classifyExitReason('Stop Loss ב-97.7')).toBe('Stop Loss');
+  });
+});

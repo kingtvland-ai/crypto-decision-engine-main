@@ -103,6 +103,12 @@ export interface IntradayParams {
    *  does the stop widen back to this bot's own dynamic value, clamped to
    *  [2.3%, 4.2%]. See `calmRegime.ts` for the full rationale. */
   calmRegimeScalp?: boolean;
+  /** Opt-in (default off — see `SIM_INTRADAY_PARAMS_OVERRIDE`, sim only).
+   *  Hands every profit exit to the profit ratchet: rungs at 1.8/3/4/5%… are
+   *  marked on the way up and sell nothing, coming back down to one sells 30%,
+   *  and the 1.8% floor closes the position. TP1/TP2 and the trailing stop are
+   *  bypassed while it is on. See `profitRatchet.ts`. */
+  profitRatchet?: boolean;
   /** The stop distance must be at least this multiple of the modelled
    *  round-trip cost, or the trade is rejected (DecisionGate 'RISK_VS_COST').
    *  minRewardRisk guards the REWARD side; this guards the RISK side, which

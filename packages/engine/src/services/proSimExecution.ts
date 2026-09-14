@@ -343,23 +343,33 @@ export function generateProOrders(ctx: ProOrderGenContext): PendingOrder[] {
       indicators: { rsi: 50, ma20: livePrice, volumeTrend: 'stable', bollingerBands: { upper: livePrice, middle: livePrice, lower: livePrice, position: 'between' }, volumeProfile: { poc: livePrice, valueAreaHigh: livePrice, valueAreaLow: livePrice, position: 'in_value_area' } }
     };
 
+    const isLong = isLongSide(pos.side);
     const exitCheck = evaluateProExit(
       {
-        entryPrice: pos.entryPrice, isLong: isLongSide(pos.side), tp1Hit: pos.tp1Hit,
-        stopLoss: pos.stopLoss, takeProfit1: pos.takeProfit1, takeProfit2: pos.takeProfit2
+        entryPrice: pos.entryPrice, isLong, tp1Hit: pos.tp1Hit,
+        stopLoss: pos.stopLoss, takeProfit1: pos.takeProfit1, takeProfit2: pos.takeProfit2,
+        peakPrice: (isLong ? pos.highestPrice : pos.lowestPrice) ?? pos.entryPrice,
+        ratchetConsumed: pos.ratchetConsumed
       },
       livePrice,
       effectiveSignal,
-      minConfidence
+      minConfidence,
+      // Sim only — the LIVE Pro path never sets this. See profitRatchet.ts.
+      { profitRatchet: true }
     );
     if (!exitCheck.shouldExit) continue;
 
-    const partial = exitCheck.exitType === 'PARTIAL_50';
+    const ratchetPartial = exitCheck.exitType === 'PARTIAL_RATCHET';
+    const partial = ratchetPartial || exitCheck.exitType === 'PARTIAL_50';
+    const fraction = ratchetPartial ? (exitCheck.ratchetFraction ?? 0) : TP1_EXIT_FRACTION;
     newOrders.push({
-      id: uid(`${pos.symbol}-${partial ? 'tp1' : 'exit'}`), symbol: pos.symbol, positionId: pos.id, type: 'SPOT',
+      id: uid(`${pos.symbol}-${partial ? (ratchetPartial ? 'ratchet' : 'tp1') : 'exit'}`),
+      symbol: pos.symbol, positionId: pos.id, type: 'SPOT',
       side: partial ? 'partial_tp1' : 'close_long',
+      exitFraction: partial ? fraction : undefined,
+      ratchetConsumed: exitCheck.ratchetConsumed,
       signalPrice: livePrice,
-      quantity: partial ? pos.quantity * TP1_EXIT_FRACTION : pos.quantity,
+      quantity: partial ? pos.quantity * fraction : pos.quantity,
       reason: exitCheck.reason,
       confidence: pos.confidence ?? 0, executeAt: Date.now() + delayMs, createdAt: Date.now()
     } as PendingOrder);

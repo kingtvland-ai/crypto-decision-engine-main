@@ -13,6 +13,7 @@
  */
 
 import { formatDynamicPrice } from './tradeEngine';
+import { evaluateRatchet, ratchetReason } from './profitRatchet';
 import { DEFAULT_INTRADAY_PARAMS, Direction, IntradayParams, SetupType } from './intradayParams';
 import { capStopLoss } from './exitPolicy';
 
@@ -25,6 +26,7 @@ export type ExitReasonCode =
   | 'TRAILING_STOP'
   | 'REVERSAL'
   | 'TIME_STOP'
+  | 'PROFIT_RATCHET'
   | 'MAX_DURATION'
   | 'NONE';
 
@@ -38,6 +40,8 @@ export interface IntradayPositionView {
   takeProfit1?: number;
   takeProfit2?: number;
   tp1Hit?: boolean;
+  /** Profit-ratchet rungs already paid out — see profitRatchet.ts. */
+  ratchetConsumed?: number[];
   openTimestamp: number;
   maxHoldMs?: number;
   timeStopMs?: number;
@@ -68,7 +72,11 @@ export interface IntradayExitContext {
 
 export interface IntradayExitDecision {
   shouldExit: boolean;
-  exitType: 'FULL' | 'PARTIAL_50' | 'NONE';
+  exitType: 'FULL' | 'PARTIAL_50' | 'PARTIAL_RATCHET' | 'NONE';
+  /** PARTIAL_RATCHET only: fraction of the REMAINING position to close. */
+  ratchetFraction?: number;
+  /** PARTIAL_RATCHET / ratchet FULL: the consumed-rung set to persist. */
+  ratchetConsumed?: number[];
   reasonCode: ExitReasonCode;
   reason: string;
   trailingStopPrice?: number;
@@ -137,12 +145,42 @@ export function evaluateIntradayExit(pos: IntradayPositionView, ctx: IntradayExi
     };
   }
 
-  // 3 ── Take profit ─────────────────────────────────────────────────────────
+  // 3 ── Profit ratchet (sim only, opt-in) ───────────────────────────────────
+  // Operator decision 2026-09-14. When on, it OWNS every profit exit: rungs at
+  // 1.8/3/4/5%… are marked on the way up and sell nothing; coming back down to
+  // one sells 30%, or closes the position at the 1.8% floor. TP1/TP2 and the
+  // trailing stop below are skipped entirely — the trail is what kept handing
+  // back open profit, which is the behaviour being replaced. See
+  // profitRatchet.ts. The LIVE bot leaves `profitRatchet` unset and is
+  // completely unaffected.
+  const ratchet = params.profitRatchet === true
+    ? evaluateRatchet({
+        entryPrice: pos.entryPrice,
+        peakPrice: peak,
+        livePrice: price,
+        isLong,
+        consumed: pos.ratchetConsumed
+      })
+    : undefined;
+
+  if (ratchet && ratchet.action !== 'HOLD') {
+    return {
+      shouldExit: true,
+      exitType: ratchet.action === 'FULL' ? 'FULL' : 'PARTIAL_RATCHET',
+      reasonCode: 'PROFIT_RATCHET',
+      reason: ratchetReason(ratchet),
+      ratchetFraction: ratchet.fraction,
+      ratchetConsumed: ratchet.consumed,
+      ...base
+    };
+  }
+
+  // 4 ── Take profit ─────────────────────────────────────────────────────────
   // Same ladder for SPOT and FUTURES (operator rule 2026-09-08): TP1 at 3%
   // closes 50% and arms the trailing stop, the runner goes to TP2 at 4.5%.
   // SPOT used to take a single FULL exit at TP1 — the 50%/TP2 half of the
   // policy was FUTURES-only, and intraday is mostly SPOT.
-  if (pos.takeProfit2 && ((isLong && price >= pos.takeProfit2) || (!isLong && price <= pos.takeProfit2))) {
+  if (!ratchet && pos.takeProfit2 && ((isLong && price >= pos.takeProfit2) || (!isLong && price <= pos.takeProfit2))) {
     return {
       shouldExit: true,
       exitType: 'FULL',
@@ -151,7 +189,7 @@ export function evaluateIntradayExit(pos: IntradayPositionView, ctx: IntradayExi
       ...base
     };
   }
-  if (!pos.tp1Hit && pos.takeProfit1 && ((isLong && price >= pos.takeProfit1) || (!isLong && price <= pos.takeProfit1))) {
+  if (!ratchet && !pos.tp1Hit && pos.takeProfit1 && ((isLong && price >= pos.takeProfit1) || (!isLong && price <= pos.takeProfit1))) {
     return {
       shouldExit: true,
       exitType: 'PARTIAL_50',
@@ -173,7 +211,7 @@ export function evaluateIntradayExit(pos: IntradayPositionView, ctx: IntradayExi
   // the TP1 level. This only ever ADDS protection (exits a fading runner
   // sooner), so it is safe for the live bot.
   const provedTp1 = !!pos.tp1Hit || mfeR >= (params.tp1RewardRisk ?? 1.5);
-  const trailingActive = pos.type === 'FUTURES'
+  const trailingActive = ratchet ? false : pos.type === 'FUTURES'
     ? provedTp1
     : provedTp1 && mfeR >= (params.trailingActivationRBySetup[setupForParams] ?? params.trailingActivationR);
   if (trailingActive) {
@@ -254,6 +292,12 @@ export function evaluateIntradayExit(pos: IntradayPositionView, ctx: IntradayExi
   // condition was only ever true for prices that had already exited. A max hold
   // is a budget — when it runs out the position closes wherever it stands,
   // which is the whole point of having one.
+  // Suspended once the ratchet has a rung (operator decision 2026-09-14): a
+  // position already climbing the ladder runs to the ladder's own verdict.
+  if (ratchet?.peakRung !== undefined) {
+    return { shouldExit: false, exitType: 'NONE', reasonCode: 'NONE', reason: '', ...base };
+  }
+
   if (heldMs >= effectiveMaxHoldMs) {
     return {
       shouldExit: true,

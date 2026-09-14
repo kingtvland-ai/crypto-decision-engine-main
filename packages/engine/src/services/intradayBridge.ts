@@ -405,6 +405,7 @@ export interface ExitPositionInput {
   takeProfit1?: number;
   takeProfit2?: number;
   tp1Hit?: boolean;
+  ratchetConsumed?: number[];
   openTimestamp: number;
   setupType?: SetupType;
   plannedStopDistance?: number;
@@ -430,6 +431,7 @@ export function buildExitView(pos: ExitPositionInput): IntradayPositionView {
     takeProfit1: pos.takeProfit1,
     takeProfit2: pos.takeProfit2,
     tp1Hit: pos.tp1Hit,
+    ratchetConsumed: pos.ratchetConsumed,
     openTimestamp: pos.openTimestamp,
     setupType: pos.setupType,
     plannedStopDistance: pos.plannedStopDistance,
