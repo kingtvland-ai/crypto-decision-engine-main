@@ -19,6 +19,12 @@ export default {
 			}
 		},
 		extend: {
+			fontFamily: {
+				// Hebrew-capable throughout — see the note at the top of index.css.
+				sans: ['Heebo', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+				display: ['Rubik', 'Heebo', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+				mono: ['JetBrains Mono', 'ui-monospace', 'monospace'],
+			},
 			colors: {
 				border: 'hsl(var(--border))',
 				input: 'hsl(var(--input))',
@@ -53,6 +59,18 @@ export default {
 					DEFAULT: 'hsl(var(--card))',
 					foreground: 'hsl(var(--card-foreground))'
 				},
+				// Semantic trading colours. These describe DATA, never brand:
+				// use them for P&L, never for emphasis. See index.css.
+				profit: {
+					DEFAULT: 'hsl(var(--profit))',
+					foreground: 'hsl(var(--profit-foreground))'
+				},
+				loss: {
+					DEFAULT: 'hsl(var(--loss))',
+					foreground: 'hsl(var(--loss-foreground))'
+				},
+				neutral: 'hsl(var(--neutral))',
+				warning: 'hsl(var(--warning))',
 				sidebar: {
 					DEFAULT: 'hsl(var(--sidebar-background))',
 					foreground: 'hsl(var(--sidebar-foreground))',

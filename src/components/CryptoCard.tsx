@@ -1,7 +1,5 @@
-
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
-import { TrendingUp, TrendingDown, Eye, Clock, Shield, Target } from 'lucide-react';
+import { TrendingUp, TrendingDown, Eye, Clock, Shield, Target, Minus } from 'lucide-react';
 import { CryptoRecommendation } from '@cde/engine';
 
 const safeNumber = (value: unknown, fallback = 0): number => {
@@ -12,6 +10,33 @@ interface CryptoCardProps {
   recommendation: CryptoRecommendation;
   isClickable?: boolean;
 }
+
+type Tone = 'profit' | 'loss' | 'neutral' | 'warning';
+
+const PILL_CLASS: Record<Tone, string> = {
+  profit: 'pill-profit',
+  loss: 'pill-loss',
+  neutral: 'pill-neutral',
+  warning: 'pill-warning',
+};
+
+const TEXT_CLASS: Record<Tone, string> = {
+  profit: 'text-profit',
+  loss: 'text-loss',
+  neutral: 'text-neutral',
+  warning: 'text-warning',
+};
+
+/** A labelled metric whose colour carries meaning. The label is always present,
+ *  so colour is reinforcement rather than the only channel. */
+const Metric = ({ label, value, tone = 'neutral' }: { label: string; value: string; tone?: Tone }) => (
+  <div className="flex items-baseline justify-between gap-2">
+    <span className="text-muted-foreground">{label}</span>
+    <span className={`tabular font-medium ${tone === 'neutral' ? 'text-foreground' : TEXT_CLASS[tone]}`}>
+      {value}
+    </span>
+  </div>
+);
 
 const CryptoCard = ({ recommendation, isClickable = false }: CryptoCardProps) => {
   const {
@@ -26,6 +51,7 @@ const CryptoCard = ({ recommendation, isClickable = false }: CryptoCardProps) =>
     timeframe,
     suggestedAmounts
   } = recommendation;
+
   const safeCurrentPrice = safeNumber(currentPrice);
   const safePriceChange24h = safeNumber(priceChange24h);
   const safeRsi = safeNumber(indicators?.rsi, 50);
@@ -34,186 +60,112 @@ const CryptoCard = ({ recommendation, isClickable = false }: CryptoCardProps) =>
   const safeStochasticK = safeNumber(indicators?.stochastic?.k, 50);
   const safeSuggestedCrypto = safeNumber(suggestedAmounts?.crypto);
 
-  const getRecommendationColor = (rec: string) => {
-    switch (rec) {
-      case 'buy': return 'bg-green-500 text-white';
-      case 'sell': return 'bg-red-500 text-white';
-      default: return 'bg-yellow-500 text-white';
-    }
-  };
+  const recTone: Tone = rec === 'buy' ? 'profit' : rec === 'sell' ? 'loss' : 'warning';
+  const recText = rec === 'buy' ? 'קנייה' : rec === 'sell' ? 'מכירה' : 'החזקה';
+  const RecIcon = rec === 'buy' ? TrendingUp : rec === 'sell' ? TrendingDown : Minus;
 
-  const getRecommendationText = (rec: string) => {
-    switch (rec) {
-      case 'buy': return 'קנייה';
-      case 'sell': return 'מכירה';
-      default: return 'החזקה';
-    }
-  };
+  // RSI: oversold reads as a buy signal (profit-coloured), overbought as a
+  // warning. Never the other way round.
+  const rsiTone: Tone = safeRsi < 30 ? 'profit' : safeRsi > 70 ? 'loss' : 'neutral';
+  const riskTone: Tone = riskLevel === 'low' ? 'profit' : riskLevel === 'high' ? 'loss' : 'warning';
+  const riskText = riskLevel === 'low' ? 'נמוך' : riskLevel === 'high' ? 'גבוה' : 'בינוני';
+  const timeframeText = timeframe === 'short' ? 'קצר' : timeframe === 'long' ? 'ארוך' : 'בינוני';
 
-  const getRSIColor = (rsi: number) => {
-    if (rsi < 30) return 'text-green-600';
-    if (rsi > 70) return 'text-red-600';
-    return 'text-yellow-600';
-  };
+  const macdTone: Tone = indicators.macd?.trend === 'bullish' ? 'profit'
+    : indicators.macd?.trend === 'bearish' ? 'loss' : 'neutral';
+  const stochTone: Tone = indicators.stochastic?.signal === 'oversold' ? 'profit'
+    : indicators.stochastic?.signal === 'overbought' ? 'loss' : 'neutral';
 
-  const getRiskColor = (risk: string) => {
-    switch (risk) {
-      case 'low': return 'text-green-600';
-      case 'medium': return 'text-yellow-600';
-      case 'high': return 'text-red-600';
-      default: return 'text-gray-600';
-    }
-  };
-
-  const getRiskText = (risk: string) => {
-    switch (risk) {
-      case 'low': return 'נמוך';
-      case 'medium': return 'בינוני';
-      case 'high': return 'גבוה';
-      default: return 'לא ידוע';
-    }
-  };
-
-  const getTimeframeText = (timeframe: string) => {
-    switch (timeframe) {
-      case 'short': return 'קצר';
-      case 'medium': return 'בינוני';
-      case 'long': return 'ארוך';
-      default: return 'בינוני';
-    }
-  };
+  const up = safePriceChange24h >= 0;
+  const ChangeIcon = up ? TrendingUp : TrendingDown;
 
   return (
-    <Card className={`hover:shadow-lg transition-all ${isClickable ? 'cursor-pointer hover:scale-105' : ''}`}>
+    <Card
+      className={[
+        'glass-card border-0 overflow-hidden',
+        // Hover changes colour and shadow only. The previous hover:scale-105
+        // nudged every neighbouring card on a grid as the pointer moved.
+        isClickable ? 'glass-card-interactive glass-sheen' : '',
+      ].join(' ')}
+    >
       <CardHeader className="pb-3">
-        <div className="flex justify-between items-start">
-          <CardTitle className="text-lg font-bold flex items-center gap-2">
-            {symbol}
-            {indicators.macd && (
-              <div className="flex gap-1">
-                {indicators.macd.trend === 'bullish' && <TrendingUp className="w-4 h-4 text-green-500" />}
-                {indicators.macd.trend === 'bearish' && <TrendingDown className="w-4 h-4 text-red-500" />}
-              </div>
-            )}
+        <div className="flex items-start justify-between gap-3">
+          <CardTitle className="flex items-center gap-2 font-display text-lg font-bold">
+            <span>{symbol}</span>
+            {isClickable && <Eye className="h-4 w-4 text-muted-foreground" aria-hidden="true" />}
           </CardTitle>
-          <div className="flex items-center gap-2">
-            <Badge className={getRecommendationColor(rec)}>
-              {getRecommendationText(rec)} ({confidence}%)
-            </Badge>
-            {isClickable && <Eye className="w-4 h-4 text-muted-foreground" />}
-          </div>
+          <span className={`pill ${PILL_CLASS[recTone]} shrink-0`}>
+            <RecIcon className="h-3.5 w-3.5" aria-hidden="true" />
+            {recText}
+            <span className="tabular opacity-80">{confidence}%</span>
+          </span>
         </div>
       </CardHeader>
-      
+
       <CardContent className="space-y-4">
-        <div className="flex justify-between items-center">
-          <span className="text-2xl font-bold">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <span className="tabular font-display text-2xl font-bold">
             ${safeCurrentPrice.toLocaleString()}
           </span>
-          <div className={`flex items-center ${safePriceChange24h >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-            {safePriceChange24h >= 0 ? <TrendingUp className="w-4 h-4 mr-1" /> : <TrendingDown className="w-4 h-4 mr-1" />}
-            <span className="font-medium">
-              {safePriceChange24h >= 0 ? '+' : ''}{safePriceChange24h.toFixed(2)}%
-            </span>
-          </div>
+          <span className={`pill ${up ? 'pill-profit' : 'pill-loss'}`}>
+            <ChangeIcon className="h-3.5 w-3.5" aria-hidden="true" />
+            <span className="tabular">{up ? '+' : ''}{safePriceChange24h.toFixed(2)}%</span>
+            <span className="sr-only">{up ? 'עלייה' : 'ירידה'} ב-24 שעות</span>
+          </span>
         </div>
 
-        {/* Advanced Indicators Grid */}
-        <div className="grid grid-cols-2 gap-3 text-sm">
-          <div className="space-y-1">
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">RSI:</span>
-              <span className={`font-medium ${getRSIColor(safeRsi)}`}>
-                {safeRsi.toFixed(1)}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">MA20:</span>
-              <span className="font-medium">
-                ${safeMa20.toLocaleString()}
-              </span>
-            </div>
-            {indicators.macd && (
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">MACD:</span>
-                <span className={`font-medium ${
-                  indicators.macd.trend === 'bullish' ? 'text-green-600' : 
-                  indicators.macd.trend === 'bearish' ? 'text-red-600' : 'text-gray-600'
-                }`}>
-                  {safeMacd.toFixed(4)}
-                </span>
-              </div>
-            )}
-          </div>
-          
-          <div className="space-y-1">
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">BB:</span>
-              <span className="font-medium text-xs">
-                {indicators.bollingerBands.position === 'above' ? 'מעל' :
-                 indicators.bollingerBands.position === 'below' ? 'מתחת' : 'ביניים'}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">נפח:</span>
-              <span className="font-medium text-xs">
-                {indicators.volumeTrend === 'increasing' ? 'עולה' : 
-                 indicators.volumeTrend === 'decreasing' ? 'יורד' : 'יציב'}
-              </span>
-            </div>
-            {indicators.stochastic && (
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Stoch:</span>
-                <span className={`font-medium text-xs ${
-                  indicators.stochastic.signal === 'oversold' ? 'text-green-600' :
-                  indicators.stochastic.signal === 'overbought' ? 'text-red-600' : 'text-gray-600'
-                }`}>
-                  {safeStochasticK.toFixed(0)}
-                </span>
-              </div>
-            )}
-          </div>
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
+          <Metric label="RSI" value={safeRsi.toFixed(1)} tone={rsiTone} />
+          <Metric
+            label="BB"
+            value={indicators.bollingerBands.position === 'above' ? 'מעל'
+              : indicators.bollingerBands.position === 'below' ? 'מתחת' : 'ביניים'}
+          />
+          <Metric label="MA20" value={`$${safeMa20.toLocaleString()}`} />
+          <Metric
+            label="נפח"
+            value={indicators.volumeTrend === 'increasing' ? 'עולה'
+              : indicators.volumeTrend === 'decreasing' ? 'יורד' : 'יציב'}
+          />
+          {indicators.macd && <Metric label="MACD" value={safeMacd.toFixed(4)} tone={macdTone} />}
+          {indicators.stochastic && (
+            <Metric label="Stoch" value={safeStochasticK.toFixed(0)} tone={stochTone} />
+          )}
         </div>
 
-        {/* Risk and Timeframe */}
-        <div className="flex justify-between items-center text-sm">
-          <div className="flex items-center gap-1">
-            <Shield className="w-3 h-3" />
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3 text-sm">
+          <span className="flex items-center gap-1.5">
+            <Shield className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
             <span className="text-muted-foreground">סיכון:</span>
-            <span className={`font-medium ${getRiskColor(riskLevel || 'medium')}`}>
-              {getRiskText(riskLevel || 'medium')}
-            </span>
-          </div>
-          <div className="flex items-center gap-1">
-            <Clock className="w-3 h-3" />
+            <span className={`font-medium ${TEXT_CLASS[riskTone]}`}>{riskText}</span>
+          </span>
+          <span className="flex items-center gap-1.5">
+            <Clock className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
             <span className="text-muted-foreground">זמן:</span>
-            <span className="font-medium">
-              {getTimeframeText(timeframe || 'medium')}
-            </span>
-          </div>
+            <span className="font-medium">{timeframeText}</span>
+          </span>
         </div>
 
-        {/* Suggested Amount */}
         {suggestedAmounts && rec !== 'hold' && (
-          <div className="bg-muted rounded-lg p-2">
-            <div className="flex items-center gap-1 mb-1">
-              <Target className="w-3 h-3" />
-              <span className="text-xs font-medium">סכום מומלץ:</span>
+          <div className="rounded-lg border border-primary/25 bg-primary/10 p-3">
+            <div className="mb-1 flex items-center gap-1.5">
+              <Target className="h-3.5 w-3.5 text-primary" aria-hidden="true" />
+              <span className="text-xs font-semibold text-primary">סכום מומלץ</span>
             </div>
-            <div className="text-sm">
-              <span className="font-bold">${suggestedAmounts.usd}</span>
-              <span className="text-muted-foreground ml-2">
-                ({safeSuggestedCrypto.toFixed(6)} {symbol})
+            <div className="flex flex-wrap items-baseline gap-2 text-sm">
+              <span className="tabular font-bold">${suggestedAmounts.usd}</span>
+              <span className="tabular text-muted-foreground">
+                {safeSuggestedCrypto.toFixed(6)} {symbol}
               </span>
             </div>
           </div>
         )}
 
-        <div className="pt-2 border-t">
-          <p className="text-sm text-muted-foreground line-clamp-2">{reasoning}</p>
+        <div className="border-t border-border pt-3">
+          <p className="line-clamp-2 text-sm leading-relaxed text-muted-foreground">{reasoning}</p>
           {isClickable && (
-            <p className="text-xs text-muted-foreground mt-1 flex items-center">
-              <Eye className="w-3 h-3 mr-1" />
+            <p className="mt-1.5 flex items-center gap-1 text-xs text-primary">
+              <Eye className="h-3 w-3" aria-hidden="true" />
               לחץ לפירוט מלא
             </p>
           )}

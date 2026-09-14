@@ -1,89 +1,132 @@
+/* Rubik (headings) + Heebo (body) both carry full Hebrew coverage — the UI is
+   Hebrew-first, which rules out the Latin-only display faces usually paired
+   with this look. JetBrains Mono is loaded for NUMBERS only: it has tabular
+   figures, so a price column does not jitter as digits change. */
+@import url('https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;600;700;800&family=Heebo:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* Classic Green Monochrome Design System */
+/* ============================================================================
+   Design system — dark-first glassmorphism for a trading desk.
+
+   COLOUR CONTRACT, and the one rule that must not be broken:
+   amber and violet are BRAND. green and red are DATA. A number is green
+   because it made money, never because it is emphasised, and nothing that is
+   not a number is ever green. The previous monochrome-green theme violated
+   this — everything was green, so green stopped meaning profit.
+   ========================================================================= */
 
 @layer base {
   :root {
-    --background: 8 12% 6%;
-    --foreground: 120 100% 85%;
+    /* slate-950 ground, slate-800 surfaces */
+    --background: 222 47% 11%;
+    --foreground: 210 40% 98%;
 
-    --card: 8 12% 10%;
-    --card-foreground: 120 100% 85%;
+    --card: 217 33% 17%;
+    --card-foreground: 210 40% 98%;
 
-    --popover: 8 12% 10%;
-    --popover-foreground: 120 100% 85%;
+    --popover: 222 45% 13%;
+    --popover-foreground: 210 40% 98%;
 
-    --primary: 120 100% 40%;
-    --primary-foreground: 8 12% 8%;
+    /* Amber — primary brand. Used for identity, active nav, key figures. */
+    --primary: 38 92% 50%;
+    --primary-foreground: 222 47% 11%;
 
-    --secondary: 120 50% 12%;
-    --secondary-foreground: 120 100% 85%;
+    --secondary: 217 33% 22%;
+    --secondary-foreground: 210 40% 98%;
 
-    --muted: 120 20% 15%;
-    --muted-foreground: 120 50% 60%;
+    --muted: 217 33% 20%;
+    --muted-foreground: 215 20% 70%;
 
-    --accent: 120 100% 20%;
-    --accent-foreground: 120 100% 90%;
+    /* Violet — the call-to-action accent, deliberately distinct from amber so
+       "this is the brand" and "press this" never read as the same thing. */
+    --accent: 258 90% 66%;
+    --accent-foreground: 210 40% 98%;
 
-    --destructive: 0 84.2% 60.2%;
+    --destructive: 0 84% 60%;
     --destructive-foreground: 210 40% 98%;
 
-    --border: 120 30% 20%;
-    --input: 120 30% 15%;
-    --ring: 120 100% 50%;
+    --border: 217 33% 26%;
+    --input: 217 33% 22%;
+    --ring: 38 92% 50%;
 
-    --radius: 0.5rem;
+    --radius: 0.75rem;
 
-    --sidebar-background: 8 12% 8%;
-    --sidebar-foreground: 120 100% 80%;
-    --sidebar-primary: 120 100% 40%;
-    --sidebar-primary-foreground: 8 12% 8%;
-    --sidebar-accent: 120 50% 12%;
-    --sidebar-accent-foreground: 120 100% 85%;
-    --sidebar-border: 120 30% 15%;
-    --sidebar-ring: 120 100% 50%;
+    /* ── Semantic trading colours — NEVER decorative ──────────────────── */
+    --profit: 160 84% 39%;
+    --profit-foreground: 210 40% 98%;
+    --loss: 0 84% 60%;
+    --loss-foreground: 210 40% 98%;
+    --neutral: 215 20% 65%;
+    --warning: 38 92% 50%;
+
+    /* ── Glass surfaces ───────────────────────────────────────────────── */
+    --glass-bg: 217 33% 17% / 0.72;
+    --glass-border: 210 40% 98% / 0.10;
+    --glass-blur: 16px;
+
+    --sidebar-background: 222 47% 9%;
+    --sidebar-foreground: 210 40% 96%;
+    --sidebar-primary: 38 92% 50%;
+    --sidebar-primary-foreground: 222 47% 11%;
+    --sidebar-accent: 217 33% 20%;
+    --sidebar-accent-foreground: 210 40% 98%;
+    --sidebar-border: 217 33% 24%;
+    --sidebar-ring: 38 92% 50%;
   }
 
+  /* Light mode is a real theme, not an inversion. Glass gets HIGH opacity
+     here (0.80, not 0.10) or the cards vanish, and muted text stays at
+     slate-600 — slate-400 on white fails 4.5:1. */
   .light {
-    --background: 120 20% 95%;
-    --foreground: 8 12% 15%;
+    --background: 210 40% 98%;
+    --foreground: 222 47% 11%;
 
-    --card: 120 20% 98%;
-    --card-foreground: 8 12% 15%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
 
-    --popover: 120 20% 98%;
-    --popover-foreground: 8 12% 15%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
 
-    --primary: 120 100% 25%;
-    --primary-foreground: 120 20% 95%;
+    --primary: 32 95% 44%;
+    --primary-foreground: 0 0% 100%;
 
-    --secondary: 120 30% 90%;
-    --secondary-foreground: 8 12% 15%;
+    --secondary: 210 40% 94%;
+    --secondary-foreground: 222 47% 11%;
 
-    --muted: 120 30% 85%;
-    --muted-foreground: 120 15% 40%;
+    --muted: 210 40% 94%;
+    --muted-foreground: 215 25% 35%;
 
-    --accent: 120 50% 80%;
-    --accent-foreground: 8 12% 15%;
+    --accent: 258 74% 52%;
+    --accent-foreground: 0 0% 100%;
 
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive: 0 72% 46%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 120 30% 80%;
-    --input: 120 30% 85%;
-    --ring: 120 100% 30%;
+    --border: 214 25% 85%;
+    --input: 214 25% 88%;
+    --ring: 32 95% 44%;
 
-    --sidebar-background: 120 20% 98%;
-    --sidebar-foreground: 8 12% 15%;
-    --sidebar-primary: 120 100% 25%;
-    --sidebar-primary-foreground: 120 20% 95%;
-    --sidebar-accent: 120 30% 90%;
-    --sidebar-accent-foreground: 8 12% 15%;
-    --sidebar-border: 120 30% 80%;
-    --sidebar-ring: 120 100% 30%;
+    --profit: 160 84% 30%;
+    --profit-foreground: 0 0% 100%;
+    --loss: 0 72% 46%;
+    --loss-foreground: 0 0% 100%;
+    --neutral: 215 25% 40%;
+    --warning: 32 95% 40%;
+
+    --glass-bg: 0 0% 100% / 0.80;
+    --glass-border: 222 47% 11% / 0.08;
+
+    --sidebar-background: 0 0% 100%;
+    --sidebar-foreground: 222 47% 11%;
+    --sidebar-primary: 32 95% 44%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 210 40% 94%;
+    --sidebar-accent-foreground: 222 47% 11%;
+    --sidebar-border: 214 25% 85%;
+    --sidebar-ring: 32 95% 44%;
   }
 }
 
@@ -93,73 +136,122 @@
   }
 
   body {
-    @apply bg-background text-foreground font-mono;
-    background-image: 
-      radial-gradient(circle at 25% 25%, rgba(34, 197, 94, 0.15) 0%, transparent 50%),
-      radial-gradient(circle at 75% 75%, rgba(34, 197, 94, 0.08) 0%, transparent 50%),
-      linear-gradient(135deg, rgba(8, 20, 14, 0.8) 0%, rgba(8, 20, 14, 0.9) 100%);
+    @apply bg-background text-foreground font-sans antialiased;
     min-height: 100vh;
+    /* Two wide, low-opacity light sources — the "light source" a glass
+       surface needs something to refract. Fixed so they do not scroll. */
+    background-image:
+      radial-gradient(900px circle at 12% -10%, hsl(38 92% 50% / 0.10), transparent 55%),
+      radial-gradient(800px circle at 92% 8%, hsl(258 90% 66% / 0.10), transparent 55%);
+    background-attachment: fixed;
   }
 
-  /* Matrix-style scrollbar */
-  ::-webkit-scrollbar {
-    width: 8px;
+  .light body {
+    background-image:
+      radial-gradient(900px circle at 12% -10%, hsl(32 95% 44% / 0.08), transparent 55%),
+      radial-gradient(800px circle at 92% 8%, hsl(258 74% 52% / 0.07), transparent 55%);
   }
 
-  ::-webkit-scrollbar-track {
-    @apply bg-background;
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-display tracking-tight;
   }
 
+  /* Prices, P&L, percentages. Tabular figures stop the column from twitching
+     as digits change — the single most noticeable typographic defect on a
+     live trading screen. */
+  .tabular, [data-numeric] {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+    /* Prices read left-to-right even inside an RTL layout. */
+    direction: ltr;
+    unicode-bidi: isolate;
+  }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb {
-    @apply bg-primary/40 rounded;
+    @apply rounded-full;
+    background: hsl(var(--border));
+  }
+  ::-webkit-scrollbar-thumb:hover { background: hsl(var(--primary) / 0.55); }
+
+  /* Keyboard focus only — never a ring on a mouse click. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2;
+    ring-offset-color: hsl(var(--background));
+  }
+}
+
+@layer components {
+  /* The one glass surface definition. Every card should use this rather than
+     re-deriving a blur, so light mode stays legible in one place. */
+  .glass {
+    background: hsl(var(--glass-bg));
+    border: 1px solid hsl(var(--glass-border));
+    backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(140%);
   }
 
-  ::-webkit-scrollbar-thumb:hover {
-    @apply bg-primary/60;
+  /* Interactive card. Hover changes colour and shadow only — never transform,
+     which would shift the layout under the cursor. */
+  .glass-card {
+    @apply glass rounded-xl transition-[background-color,border-color,box-shadow] duration-200;
+    box-shadow: 0 1px 2px hsl(222 47% 4% / 0.24);
+  }
+  .glass-card-interactive {
+    @apply glass-card cursor-pointer;
+  }
+  .glass-card-interactive:hover {
+    border-color: hsl(var(--primary) / 0.45);
+    box-shadow: 0 8px 28px hsl(222 47% 4% / 0.32);
+  }
+
+  /* Thin top highlight — reads as a light catching the panel edge. */
+  .glass-sheen {
+    position: relative;
+    overflow: hidden;
+  }
+  .glass-sheen::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, hsl(var(--primary) / 0.5), transparent);
+  }
+
+  .text-profit { color: hsl(var(--profit)); }
+  .text-loss { color: hsl(var(--loss)); }
+  .text-neutral { color: hsl(var(--neutral)); }
+
+  /* Status pill. Colour is never the only signal — callers pair it with an
+     arrow icon and a signed number. */
+  .pill {
+    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold;
+  }
+  .pill-profit { background: hsl(var(--profit) / 0.14); color: hsl(var(--profit)); }
+  .pill-loss { background: hsl(var(--loss) / 0.14); color: hsl(var(--loss)); }
+  .pill-neutral { background: hsl(var(--neutral) / 0.14); color: hsl(var(--neutral)); }
+  .pill-warning { background: hsl(var(--warning) / 0.14); color: hsl(var(--warning)); }
+
+  .page-container {
+    @apply min-h-screen bg-background;
   }
 }
 
-/* Terminal-style animations */
-@keyframes terminal-blink {
-  0%, 50% { opacity: 1; }
-  51%, 100% { opacity: 0; }
+/* A live dot for "bot is running". Reduced-motion users get a static dot. */
+@keyframes pulse-ring {
+  0% { box-shadow: 0 0 0 0 hsl(var(--profit) / 0.5); }
+  70% { box-shadow: 0 0 0 7px hsl(var(--profit) / 0); }
+  100% { box-shadow: 0 0 0 0 hsl(var(--profit) / 0); }
 }
+.live-dot { animation: pulse-ring 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
 
-@keyframes matrix-rain {
-  0% { transform: translateY(-100vh); opacity: 0; }
-  10% { opacity: 1; }
-  90% { opacity: 1; }
-  100% { transform: translateY(100vh); opacity: 0; }
-}
-
-.terminal-cursor {
-  animation: terminal-blink 1s infinite;
-}
-
-.matrix-bg {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-  z-index: -1;
-  overflow: hidden;
-}
-
-.matrix-char {
-  position: absolute;
-  color: rgba(34, 197, 94, 0.3);
-  font-family: 'Courier New', monospace;
-  font-size: 14px;
-  animation: matrix-rain 8s linear infinite;
-}
-
-/* Enhanced dark theme for all pages */
-.page-container {
-  @apply min-h-screen bg-background;
-  background-image: 
-    radial-gradient(circle at 20% 80%, rgba(34, 197, 94, 0.1) 0%, transparent 50%),
-    radial-gradient(circle at 80% 20%, rgba(34, 197, 94, 0.05) 0%, transparent 50%),
-    radial-gradient(circle at 40% 40%, rgba(34, 197, 94, 0.03) 0%, transparent 50%);
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

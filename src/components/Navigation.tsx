@@ -1,105 +1,141 @@
-
 import React, { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { Button } from './ui/button';
 import { ThemeToggle } from './ThemeToggle';
-import { 
-  BarChart3, 
-  Bell, 
-  Briefcase, 
-  Bot, 
-  TrendingUp, 
-  Menu, 
+import {
+  BarChart3,
+  Bell,
+  Briefcase,
+  Bot,
+  TrendingUp,
+  Menu,
   X,
   Shield,
-  Activity
+  Activity,
+  CandlestickChart
 } from 'lucide-react';
+
+interface NavItem {
+  to: string;
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+}
+
+// One icon set, one colour. The previous version gave each link its own hue
+// (green/purple/red/blue/cyan/orange/yellow), which read as decoration and
+// left no colour free to mark the ACTIVE page — the thing a nav actually has
+// to communicate. Red in particular collided with "loss".
+const NAV_ITEMS: NavItem[] = [
+  { to: '/', icon: BarChart3, label: 'בית' },
+  { to: '/simulation-bot', icon: Bot, label: 'בוט סימולציה' },
+  { to: '/real-trading', icon: Shield, label: 'בוט מסחר אמיתי' },
+  { to: '/portfolio', icon: Briefcase, label: 'תיק השקעות' },
+  { to: '/advanced-analysis', icon: TrendingUp, label: 'ניתוח מתקדם' },
+  { to: '/backtest-results', icon: Activity, label: 'Backtest' },
+  { to: '/alerts', icon: Bell, label: 'התראות והגדרות' },
+];
 
 const Navigation = () => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const { pathname } = useLocation();
 
-  const navItems = [
-    { to: '/', icon: BarChart3, label: 'בית', color: 'text-green-400' },
-    { to: '/simulation-bot', icon: Bot, label: 'בוט סימולציה', color: 'text-purple-400' },
-    { to: '/real-trading', icon: Shield, label: 'בוט מסחר אמיתי', color: 'text-red-400' },
-    { to: '/portfolio', icon: Briefcase, label: 'תיק השקעות', color: 'text-blue-400' },
-    { to: '/advanced-analysis', icon: TrendingUp, label: 'ניתוח מתקדם', color: 'text-cyan-400' },
-    { to: '/backtest-results', icon: Activity, label: 'Backtest', color: 'text-orange-400' },
-    { to: '/alerts', icon: Bell, label: 'התראות והגדרות', color: 'text-yellow-400' },
-  ];
-
-  const toggleMobileMenu = () => {
-    setIsMobileMenuOpen(!isMobileMenuOpen);
-  };
+  const isActive = (to: string) => (to === '/' ? pathname === '/' : pathname.startsWith(to));
 
   return (
-    <nav className="bg-card border-b border-border sticky top-0 z-50 backdrop-blur-md bg-opacity-90">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-right pt-1">
-        <span className="text-xs font-mono text-muted-foreground">בס״ד</span>
-      </div>
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex justify-between items-center h-16">
-          {/* Logo */}
-          <Link to="/" className="flex items-center space-x-2 space-x-reverse">
-            <div className="w-8 h-8 bg-gradient-to-br from-green-400 to-blue-500 rounded-lg flex items-center justify-center">
-              <BarChart3 className="w-5 h-5 text-white" />
-            </div>
-            <span className="text-xl font-bold font-mono text-foreground hidden sm:block">
-              🚀 בוט מסחר של מנחם
+    <nav className="glass sticky top-0 z-50 border-x-0 border-t-0">
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+        <div className="pt-1 text-right">
+          <span className="text-[11px] text-muted-foreground">בס״ד</span>
+        </div>
+
+        <div className="flex h-16 items-center justify-between gap-4">
+          <Link
+            to="/"
+            className="group flex shrink-0 items-center gap-2.5 rounded-lg"
+            aria-label="בוט מסחר של מנחם — דף הבית"
+          >
+            <span
+              className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-accent shadow-lg shadow-primary/20"
+              aria-hidden="true"
+            >
+              <CandlestickChart className="h-5 w-5 text-primary-foreground" />
+            </span>
+            <span className="hidden font-display text-lg font-bold text-foreground sm:block">
+              בוט מסחר של מנחם
             </span>
           </Link>
 
-          {/* Desktop Navigation */}
-          <div className="hidden md:flex items-center space-x-4 space-x-reverse">
-            {navItems.map((item) => (
-              <Link
-                key={item.to}
-                to={item.to}
-                className="flex items-center space-x-2 space-x-reverse px-3 py-2 rounded-md text-sm font-medium font-mono transition-colors hover:bg-accent hover:text-accent-foreground"
-              >
-                <item.icon className={`w-4 h-4 ${item.color}`} />
-                <span className="text-foreground">{item.label}</span>
-              </Link>
-            ))}
+          <div className="hidden items-center gap-1 md:flex">
+            {NAV_ITEMS.map((item) => {
+              const active = isActive(item.to);
+              return (
+                <Link
+                  key={item.to}
+                  to={item.to}
+                  aria-current={active ? 'page' : undefined}
+                  className={[
+                    'flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium',
+                    'transition-colors duration-200 cursor-pointer',
+                    active
+                      ? 'bg-primary/15 text-primary'
+                      : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                  ].join(' ')}
+                >
+                  <item.icon className="h-4 w-4 shrink-0" aria-hidden="true" />
+                  <span className="whitespace-nowrap">{item.label}</span>
+                </Link>
+              );
+            })}
+            <span className="mx-1 h-6 w-px bg-border" aria-hidden="true" />
             <ThemeToggle />
           </div>
 
-          {/* Mobile menu button */}
-          <div className="md:hidden flex items-center space-x-2 space-x-reverse">
+          <div className="flex items-center gap-1 md:hidden">
             <ThemeToggle />
             <Button
               variant="ghost"
-              size="sm"
-              onClick={toggleMobileMenu}
-              className="p-2"
+              size="icon"
+              onClick={() => setIsMobileMenuOpen((open) => !open)}
+              aria-label={isMobileMenuOpen ? 'סגור תפריט' : 'פתח תפריט'}
+              aria-expanded={isMobileMenuOpen}
+              aria-controls="mobile-nav"
+              className="h-11 w-11 cursor-pointer"
             >
-              {isMobileMenuOpen ? (
-                <X className="w-5 h-5" />
-              ) : (
-                <Menu className="w-5 h-5" />
-              )}
+              {isMobileMenuOpen
+                ? <X className="h-5 w-5" aria-hidden="true" />
+                : <Menu className="h-5 w-5" aria-hidden="true" />}
             </Button>
           </div>
         </div>
 
-        {/* Mobile Navigation */}
-        {isMobileMenuOpen && (
-          <div className="md:hidden border-t border-border bg-card/95 backdrop-blur-md">
-            <div className="px-2 pt-2 pb-3 space-y-1">
-              {navItems.map((item) => (
+        {/* `hidden` rather than unmounting: the toggle's aria-controls needs a
+            target that exists, and the panel keeps its scroll position. */}
+        <div id="mobile-nav" hidden={!isMobileMenuOpen} className="border-t border-border md:hidden">
+          <div className="space-y-1 py-2">
+            {NAV_ITEMS.map((item) => {
+              const active = isActive(item.to);
+              return (
                 <Link
                   key={item.to}
                   to={item.to}
                   onClick={() => setIsMobileMenuOpen(false)}
-                  className="flex items-center space-x-3 space-x-reverse px-3 py-3 rounded-md text-base font-medium font-mono transition-colors hover:bg-accent hover:text-accent-foreground block"
+                  aria-current={active ? 'page' : undefined}
+                  className={[
+                    // min-h-11 = 44px touch target
+                    'flex min-h-11 items-center gap-3 rounded-lg px-3 py-2.5 text-base font-medium',
+                    'transition-colors duration-200 cursor-pointer',
+                    active
+                      ? 'bg-primary/15 text-primary'
+                      : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                  ].join(' ')}
                 >
-                  <item.icon className={`w-5 h-5 ${item.color}`} />
-                  <span className="text-foreground">{item.label}</span>
+                  <item.icon className="h-5 w-5 shrink-0" aria-hidden="true" />
+                  <span>{item.label}</span>
                 </Link>
-              ))}
-            </div>
+              );
+            })}
           </div>
-        )}
+        </div>
       </div>
     </nav>
   );

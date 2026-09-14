@@ -59,16 +59,16 @@ const Index = () => {
       
       <div className="max-w-7xl mx-auto p-4">
         <div className="text-center mb-8">
-          <h1 className="text-4xl font-bold mb-4 text-primary font-mono">
-            🚀 מנוע החלטות קריפטו AI
+          <h1 className="mb-3 font-display text-3xl font-extrabold tracking-tight sm:text-4xl">
+            מנוע החלטות קריפטו <span className="text-primary">AI</span>
           </h1>
-          <p className="text-xl text-muted-foreground mb-6 font-mono">
+          <p className="mx-auto mb-6 max-w-2xl text-base leading-relaxed text-muted-foreground sm:text-lg">
             ניתוח טכני מתקדם • נתונים בזמן אמת • המלצות חכמות מבוססות AI
           </p>
-          <div className="flex justify-center gap-4 flex-wrap">
+          <div className="flex justify-center gap-3 flex-wrap">
             <Link to="/portfolio">
-              <Button size="lg" className="flex items-center gap-2 font-mono">
-                <BarChart3 className="w-5 h-5" />
+              <Button size="lg" className="flex cursor-pointer items-center gap-2">
+                <BarChart3 className="w-5 h-5" aria-hidden="true" />
                 עבור לתיק השקעות
               </Button>
             </Link>

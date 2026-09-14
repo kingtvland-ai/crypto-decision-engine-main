@@ -133,7 +133,12 @@ interface OpenPosition {
   takeProfit1: number;
   takeProfit2: number;
   tp1Hit: boolean;
-  atr5: number;
+  /** The EXECUTED stop distance in price units (`risk.stopDistance`), i.e. the
+   *  position's 1R. Named `atr5` until 2026-09-15, which was wrong in a way
+   *  that reads as a bug: the ATR-based branch of the stop is only one input
+   *  to this number, and once the fixed ladder is on it contributes nothing.
+   *  Every consumer below wants 1R, not ATR. */
+  stopDistance: number;
   openTimestamp: number;
   maxHoldMs: number;
   timeStopMs: number;
@@ -284,7 +289,7 @@ export function runBacktest(
           takeProfit1: risk.takeProfit1,
           takeProfit2: risk.takeProfit2,
           tp1Hit: false,
-          atr5: risk.stopDistance,
+          stopDistance: risk.stopDistance,
           openTimestamp: now,
           maxHoldMs: risk.maxHoldMs,
           timeStopMs: risk.timeStopMs,
@@ -322,7 +327,7 @@ export function runBacktest(
       // Reversal proxy: opposite break-of-structure with >1 ATR adverse move.
       const struct = marketStructure(sliceUpTo(m5, t), 2, 40);
       const oppositeBos = isLong ? struct.breakOfStructure === 'DOWN' : struct.breakOfStructure === 'UP';
-      const movedAgainst = ((bar.close - pos.entryPrice) * s) < -pos.atr5;
+      const movedAgainst = ((bar.close - pos.entryPrice) * s) < -pos.stopDistance;
       const reversalSignal = oppositeBos && movedAgainst ? { direction: (isLong ? 'SHORT' : 'LONG') as 'LONG' | 'SHORT', setupScore: 75, entryConfirmed: true } : undefined;
 
       const view: IntradayPositionView = {
@@ -339,7 +344,7 @@ export function runBacktest(
         maxHoldMs: pos.maxHoldMs,
         timeStopMs: pos.timeStopMs,
         setupType: pos.setupType,
-        plannedStopDistance: pos.atr5,
+        plannedStopDistance: pos.stopDistance,
         highestPrice: pos.highestPrice,
         lowestPrice: pos.lowestPrice,
         highestPriceSinceTP1: pos.highestPriceSinceTP1,
@@ -348,7 +353,18 @@ export function runBacktest(
       const exit = evaluateIntradayExit(view, {
         price: bar.close,
         now,
-        atr5: pos.atr5,
+        // KNOWN DIVERGENCE from the live/sim path, left as-is deliberately.
+        // This argument is the true 5M ATR everywhere else; here it is the stop
+        // distance, because the backtest does not carry an ATR series forward
+        // on the position. It only feeds the trailing width,
+        // `min(trailingAtrMult × atr5, trailingMaxRMult × stopDistance)`, so
+        // passing 1R pins the backtest trail at exactly 1R (1.8 × 1R loses the
+        // min to 1.0 × 1R) instead of letting ATR tighten it.
+        // Harmless for sim comparison: the sim bots run the profit ratchet,
+        // which disables the trailing stop outright. Changing it would move
+        // every historical backtest number, so it needs a deliberate rerun —
+        // not a drive-by fix.
+        atr5: pos.stopDistance,
         params,
         portfolio: { dailyDrawdownPercent: 0, weeklyDrawdownPercent: 0 },
         reversalSignal
@@ -380,7 +396,7 @@ export function runBacktest(
         equity += pnl;
 
         if (exit.exitType !== 'PARTIAL_50') {
-          const mfeR = ((pos.highestPrice - pos.entryPrice) * s) / pos.atr5;
+          const mfeR = ((pos.highestPrice - pos.entryPrice) * s) / pos.stopDistance;
           trades.push({
             symbol: sym,
             side: pos.side,

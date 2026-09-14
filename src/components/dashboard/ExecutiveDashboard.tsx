@@ -81,10 +81,12 @@ const SIM_BOT_CARDS: SimBotCardMeta[] = [
     title: 'Bybit · TrendBreakout',
     subtitle: 'פריצת Donchian ב-M15 עם אישור ווליום',
     footer: 'TrendBreakout · סימולציה בלבד',
+    // Cyan, not emerald: green is reserved for profit. A bot whose identity
+    // colour is green reads as "this bot is up" before you look at a number.
     accent: {
-      icon: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
-      badge: 'text-emerald-400 border-emerald-500/30',
-      stat: 'text-emerald-400'
+      icon: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20',
+      badge: 'text-cyan-400 border-cyan-500/30',
+      stat: 'text-cyan-400'
     }
   }
 ];
@@ -109,77 +111,103 @@ function SimBotCard({ meta, state }: { meta: SimBotCardMeta; state: SimBotCardSt
   // bot, so a shared denominator would misreport three of the four.
   const profitPct = state && state.initialAmount > 0 ? (profit / state.initialAmount) * 100 : 0;
 
-  const badge = !state
-    ? 'ממתין לנתונים'
+  // Status as {dot, text} rather than an emoji prefix: emoji render at a
+  // different size and baseline per platform, and carry no accessible name.
+  const status = !state
+    ? { tone: 'idle' as const, text: 'ממתין לנתונים' }
     : state.isRunning
-      ? (state.positionsCount > 0 ? `🟢 ${state.positionsCount} פוזיציות פעילות` : '🟢 פועל — ממתין לאותות')
-      : state.positionsCount > 0
-        ? `🟡 מושהה • ${state.positionsCount} פוזיציות`
-        : 'מושהה';
+      ? {
+          tone: 'live' as const,
+          text: state.positionsCount > 0 ? `${state.positionsCount} פוזיציות פעילות` : 'פועל — ממתין לאותות'
+        }
+      : {
+          tone: 'paused' as const,
+          text: state.positionsCount > 0 ? `מושהה • ${state.positionsCount} פוזיציות` : 'מושהה'
+        };
+
+  const dotClass = status.tone === 'live'
+    ? 'bg-profit live-dot'
+    : status.tone === 'paused' ? 'bg-warning' : 'bg-neutral';
 
   return (
-    <Card className="border-border/60 bg-card hover:border-primary/40 transition-all shadow-md">
-      <CardHeader className="pb-3 flex flex-row items-start justify-between gap-2">
-        <div className="flex items-center gap-2.5 min-w-0">
+    // flex column + mt-auto below: titles wrap to different line counts across
+    // the four bots, and without this the metric rows sit at different heights
+    // and the row reads as misaligned.
+    <Card className="glass-card flex h-full flex-col border-0">
+      <CardHeader className="space-y-2.5 pb-3">
+        <div className="flex items-start gap-2.5">
           <div className={`p-2 rounded-lg border shrink-0 ${meta.accent.icon}`}>
-            <Bot className="w-5 h-5" />
+            <Bot className="w-5 h-5" aria-hidden="true" />
           </div>
-          <div className="min-w-0">
-            <CardTitle className="text-base font-bold font-mono truncate">{meta.title}</CardTitle>
-            <p className="text-xs text-muted-foreground font-mono">{meta.subtitle}</p>
+          <div className="min-w-0 flex-1">
+            {/* No truncate: at four cards across, every title was clipped
+                mid-word ("TrendBreakout …"). Wrapping costs one line and
+                keeps the bot identifiable. */}
+            <CardTitle className="font-display text-[15px] font-bold leading-snug">
+              {meta.title}
+            </CardTitle>
+            <p className="mt-0.5 text-xs leading-snug text-muted-foreground">{meta.subtitle}</p>
           </div>
         </div>
-        <Badge variant="outline" className={`font-mono text-[10px] shrink-0 ${meta.accent.badge}`}>
-          {badge}
+        <Badge
+          variant="outline"
+          className={`w-fit gap-1.5 text-[10px] font-medium ${meta.accent.badge}`}
+        >
+          <span className={`h-1.5 w-1.5 rounded-full ${dotClass}`} aria-hidden="true" />
+          {status.text}
         </Badge>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="mt-auto space-y-4">
         <div className="grid grid-cols-3 gap-2 text-center">
-          <div className="p-2.5 rounded-lg bg-background/80 border border-border/40">
+          <div className="rounded-lg border border-border/40 bg-background/50 p-2.5">
             {/* Equity, not cash: cash alone drops by the full size of every open
                 position and reads as a catastrophic loss on a flat bot. */}
-            <div className="text-[11px] text-muted-foreground font-mono">שווי תיק</div>
-            <div className="text-lg font-bold font-mono text-foreground mt-0.5">
+            <div className="text-[11px] leading-tight text-muted-foreground">שווי תיק</div>
+            <div className="tabular mt-1 text-lg font-bold text-foreground">
               {state ? usd0(state.equity) : '—'}
             </div>
             {state && state.positionsCount > 0 && (
-              <div className="text-[10px] text-muted-foreground font-mono mt-0.5">
-                {usd0(state.cash)} מזומן
+              <div className="mt-0.5 text-[10px] text-muted-foreground">
+                <span className="tabular">{usd0(state.cash)}</span> מזומן
               </div>
             )}
           </div>
-          <div className="p-2.5 rounded-lg bg-background/80 border border-border/40">
-            <div className="text-[11px] text-muted-foreground font-mono">סך רווח / הפסד</div>
-            <div className={`text-lg font-bold font-mono mt-0.5 ${up ? 'text-emerald-400' : 'text-red-400'}`}>
+          <div className="rounded-lg border border-border/40 bg-background/50 p-2.5">
+            <div className="text-[11px] leading-tight text-muted-foreground">סך רווח / הפסד</div>
+            <div className={`tabular mt-1 text-lg font-bold ${up ? 'text-profit' : 'text-loss'}`}>
               {state ? `${up ? '+' : '-'}${usd0(Math.abs(profit))}` : '—'}
             </div>
             {state && (
-              <div className={`text-[10px] font-mono mt-0.5 ${up ? 'text-emerald-400/70' : 'text-red-400/70'}`}>
+              <div className={`tabular mt-0.5 text-[10px] ${up ? 'text-profit/75' : 'text-loss/75'}`}>
                 {up ? '+' : ''}{profitPct.toFixed(2)}%
               </div>
             )}
           </div>
-          <div className="p-2.5 rounded-lg bg-background/80 border border-border/40">
-            <div className="text-[11px] text-muted-foreground font-mono">אחוז הצלחה</div>
-            <div className={`text-lg font-bold font-mono mt-0.5 ${meta.accent.stat}`}>
+          <div className="rounded-lg border border-border/40 bg-background/50 p-2.5">
+            <div className="text-[11px] leading-tight text-muted-foreground">אחוז הצלחה</div>
+            <div className={`tabular mt-1 text-lg font-bold ${meta.accent.stat}`}>
               {state ? `${state.winRate.toFixed(1)}%` : '—'}
             </div>
             {state && (
-              <div className="text-[10px] text-muted-foreground font-mono mt-0.5">
-                {state.totalTrades} עסקאות
+              <div className="mt-0.5 text-[10px] text-muted-foreground">
+                <span className="tabular">{state.totalTrades}</span> עסקאות
               </div>
             )}
           </div>
         </div>
-        <div className="flex items-center justify-between pt-2 border-t border-border/40">
-          <div className="text-xs text-muted-foreground font-mono flex items-center gap-1.5 min-w-0">
-            <Activity className={`w-3.5 h-3.5 shrink-0 ${meta.accent.stat}`} />
+        <div className="flex items-center justify-between gap-2 border-t border-border/40 pt-2">
+          <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+            <Activity className={`w-3.5 h-3.5 shrink-0 ${meta.accent.stat}`} aria-hidden="true" />
             <span className="truncate">{meta.footer}</span>
           </div>
-          <Link to="/simulation-bot">
-            <Button variant="ghost" size="sm" className="font-mono text-xs gap-1 h-7 px-2 text-primary hover:text-primary">
+          <Link to="/simulation-bot" className="shrink-0">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 cursor-pointer gap-1 px-2 text-xs text-primary hover:text-primary"
+            >
               כניסה
-              <ChevronRight className="w-3.5 h-3.5" />
+              <ChevronRight className="w-3.5 h-3.5 rotate-180" aria-hidden="true" />
             </Button>
           </Link>
         </div>
