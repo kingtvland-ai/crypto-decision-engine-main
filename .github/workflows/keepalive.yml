@@ -25,8 +25,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping worker /health
+        # This hostname has drifted at least twice before without this file
+        # being updated (crypto-decision-engine-main-hev8 → cde-main →
+        # cde-engine) — each time this ping kept "succeeding" against nothing
+        # (404, or later a suspended service) with no one noticing, since a
+        # scheduled Action's failures aren't surfaced anywhere unless someone
+        # opens the Actions tab. If the worker is ever renamed again, this
+        # line, netlify.toml's VITE_TRADING_API_URL, and
+        # DEFAULT_PUBLIC_WORKER_URL in src/services/workerConfig.ts all need
+        # the same new hostname — see INSTALL_GUIDE.md §3.3.
         run: |
-          url="https://crypto-decision-engine-main-hev8.onrender.com/health"
+          url="https://cde-engine.onrender.com/health"
           echo "GET $url"
           # -f fails the step on a non-2xx response (visible in the Actions
           # log/badge if the worker is down), --max-time bounds a cold-start

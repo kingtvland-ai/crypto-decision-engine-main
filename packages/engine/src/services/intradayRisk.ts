@@ -58,6 +58,23 @@ export interface CostInput {
    *  compatible: omitting it reproduces today's slippage exactly (liquidity
    *  term = 0). */
   relativeVolume?: number;
+  /** The price the §25 reward-vs-cost math measures the move against.
+   *  Defaults to `takeProfit1` when omitted — existing callers (the live bot)
+   *  are unaffected.
+   *
+   *  Required whenever the fixed profit-ladder is active (`calmRegimeScalp`):
+   *  buildRiskPlan's OWN R:R gate already measures gross R:R against TP2 in
+   *  that branch (TP1's 1.8/2.3 = 0.78 is deliberately below minRewardRisk —
+   *  it is a fast partial, not the trade's thesis; see calmRegime.ts), so a
+   *  plan that PASSED that gate reaches here already approved on TP2 math.
+   *  Without this field, evaluateCostEdge recomputed reward from TP1 alone and
+   *  rejected the same plan a second time on the SAME number the risk gate had
+   *  already cleared under a different target — observed live: every ladder
+   *  signal that reached COST failed at a strikingly narrow net R:R band
+   *  (0.67-0.73, i.e. TP1's own ratio minus costs), regardless of setup type
+   *  or symbol, while buildRiskPlan's TP2-based gate (1.52) would have passed
+   *  the same plan. See BOTS_REFERENCE.md §1 "COST", fixed 2026-09-14. */
+  rewardTarget?: number;
   params?: IntradayParams;
 }
 
@@ -116,7 +133,10 @@ export function evaluateCostEdge(input: CostInput): CostAnalysis {
   const slippagePercent = Number((entrySlippage + exitSlippage).toFixed(5));
 
   const totalCostPercent = Number((entryFeePercent + exitFeePercent + slippagePercent).toFixed(5));
-  const expectedMovePercent = input.entryPrice > 0 ? (Math.abs(input.takeProfit1 - input.entryPrice) / input.entryPrice) * 100 : 0;
+  // rewardTarget defaults to takeProfit1 — see the field doc on CostInput for
+  // why a laddered plan must pass TP2 here instead.
+  const rewardTarget = input.rewardTarget ?? input.takeProfit1;
+  const expectedMovePercent = input.entryPrice > 0 ? (Math.abs(rewardTarget - input.entryPrice) / input.entryPrice) * 100 : 0;
   const riskPercent = input.entryPrice > 0 ? (Math.abs(input.entryPrice - input.stopLoss) / input.entryPrice) * 100 : 0;
 
   const edgeRatio = totalCostPercent > 0 ? expectedMovePercent / totalCostPercent : 0;

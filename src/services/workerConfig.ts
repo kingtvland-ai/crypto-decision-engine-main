@@ -23,7 +23,7 @@ export type UrlSource = 'manual' | 'localStorage' | 'env' | 'none';
  * Everything else in the app keeps using resolveWorkerBaseUrl() and stays
  * operator-configurable.
  */
-export const DEFAULT_PUBLIC_WORKER_URL = 'https://cde-main.onrender.com';
+export const DEFAULT_PUBLIC_WORKER_URL = 'https://cde-engine.onrender.com';
 
 /**
  * Ordered, de-duplicated candidates for the public board: whatever the operator

@@ -406,6 +406,12 @@ export function evaluateIntradayDecision(input: IntradayDecisionInput): Intraday
     entryPrice: entry.entryPrice,
     stopLoss: effectiveRisk.stopLoss,
     takeProfit1: effectiveRisk.takeProfit1,
+    // Fixed profit-ladder (calmRegimeScalp, sim only): buildRiskPlan's own
+    // R:R gate already measured gross R:R against TP2 for this plan (TP1's
+    // ratio is deliberately poor — a fast partial, not the thesis) — COST must
+    // measure the same target or it re-rejects an already-approved plan on a
+    // number the risk gate never used. See CostInput.rewardTarget.
+    rewardTarget: params.calmRegimeScalp === true ? effectiveRisk.takeProfit2 : effectiveRisk.takeProfit1,
     spreadPercent,
     atrPercentile: regime.atrPercentile,
     // Default true (live bot + backtest rest limits). A market-fill caller

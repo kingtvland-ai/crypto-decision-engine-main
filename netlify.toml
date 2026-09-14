@@ -7,7 +7,7 @@
   # Baked into the bundle at build time. Without it a fresh clone builds a site
   # with no worker address at all, and /live cannot load for anyone. A value set
   # in the Netlify dashboard overrides this one.
-  VITE_TRADING_API_URL = "https://cde-main.onrender.com"
+  VITE_TRADING_API_URL = "https://cde-engine.onrender.com"
 
 [[redirects]]
   from = "/*"

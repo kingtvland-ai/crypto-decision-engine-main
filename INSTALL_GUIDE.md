@@ -186,14 +186,22 @@ curl "https://<your-worker>.onrender.com/api/bybit-sim/state"   # סימולצי
 > מנוהל-blueprint לפי השם; שינוי שם מייתם את השירות הרץ והורג את ה-hostname
 > שצרוב ב-`VITE_TRADING_API_URL`.
 
-### 3.3 ⚠️ אי-עקביות ידועה ב-hostname
-בקוד יש כרגע שלושה hostname שונים של ה-worker:
-- `keepalive.yml` → `crypto-decision-engine-main-hev8.onrender.com`
-- `render.yaml` CORS → מפנה ל-`crypto-d.netlify.app`
-- הערות ב-docs ישנים → `cde-main.onrender.com`
+### 3.3 Hostname נוכחי — ותולדות אי-העקביות (עדכון 2026-09-14)
+**ה-hostname הנוכחי, החי, הוא `cde-engine.onrender.com`.** מוצמד עכשיו בשלושה
+מקומות: `netlify.toml` (`VITE_TRADING_API_URL`), `src/services/workerConfig.ts`
+(`DEFAULT_PUBLIC_WORKER_URL`, הפולבק ל-`/live`), ו-`.github/workflows/keepalive.yml`.
 
-**לפני פריסה חדשה: החלט על hostname אחד** ותקן את שלושת המקומות + את
-`VITE_TRADING_API_URL` ב-Netlify.
+זהו לפחות ה-hostname **השלישי** שהשירות נשא: `crypto-decision-engine-main-hev8`
+(מת — 404) → `cde-main` (הושעה ע"י Render, 503 "Service Suspended") →
+`cde-engine` (חי, נכון לתאריך העדכון). בכל מעבר, `keepalive.yml` **המשיך
+לרוץ כל 10 דקות מול ה-hostname הקודם**, כישלון שקט ב-Actions log שאיש לא שם
+לב אליו — ping "מצליח" מול hostname מת לא מונע ספינדאון בפועל, ואין שום
+דבר שמתריע על זה חוץ מלפתוח את לשונית Actions ידנית.
+
+**לפני שינוי hostname עתידי: עדכן את כל שלושת המקומות באותו commit**, ולא
+בנפרד — זה בדיוק מה שהחמיץ אותם בפעם הקודמת. `render.yaml` CORS מפנה
+ל-`crypto-d.netlify.app` (צד הלקוח, לא צד ה-worker) — לא קשור לשם ה-worker
+עצמו ואינו צריך להשתנות יחד עם זה.
 
 ### 3.4 בדיקה אחרי deploy
 ```

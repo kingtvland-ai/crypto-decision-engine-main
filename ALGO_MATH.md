@@ -104,6 +104,11 @@ LIQUIDITY → SPREAD → NO_SETUP → NO_ENTRY → RISK → COST → DATA_MISMAT
 + כל מספרי ה-R:R מחושבים על אותם ה-levels בדיוק. `DATA_MISMATCH` = שער
 שעוצר SIGNAL אם ניתוח העלות רץ על levels שונים מהפקודה (סטייה > `1e-8`).
 
+⚠️ תוקן 2026-09-14: כש-הסולם הקבוע פעיל, `evaluateCostEdge` היה מודד רווח מול
+TP1 בלבד (יחס 0.78, מתחת לסף בכוונה) במקום מול TP2 (יחס 1.52) — RISK אישר
+לפי TP2, COST דחה שוב לפי TP1. `CostInput.rewardTarget` מעביר עכשיו את TP2
+מ-`intradayEngine.ts` כש-`calmRegimeScalp` פעיל. ראה BOTS_REFERENCE.md §1.
+
 ### מתמטיקת הביטחון
 ```
 setupScore  = 100 · Σ wᵢ·factorᵢ      wᵢ: trend .25, momentum .20, location .20, participation .15, structure .20

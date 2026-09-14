@@ -278,20 +278,8 @@ export function evaluatePrev4hRange(input: Prev4hRangeInput): SignalEvaluation {
   }
 
   const isLong = direction === 'LONG';
-  
-  // RISK_VS_COST gate — the stop (range midpoint) must clear the modelled
-  // round trip by costSafetyMultiplier. Cost comes from the shared model, not
-  // a local literal; baseSlippagePercent 0.05 = the sim's actual per-leg
-  // market-fill slippage (this bot fills market).
   const structuralStop = mid;
-  const entryRefForCost = currentPrice;
-  const stopDistancePct = (Math.abs(entryRefForCost - structuralStop) / entryRefForCost) * 100;
-  const estimatedRoundTripCost = estimatedRoundTripCostPct({
-    tradeType: isLong ? 'SPOT' : 'FUTURES', entryIsLimit: false, baseSlippagePercent: 0.05
-  });
-  if (stopDistancePct < p.costSafetyMultiplier * estimatedRoundTripCost) {
-    return base('ARMED', 'RISK_VS_COST', debug, { confidence: 0 });
-  }
+
   const breakoutDist = isLong ? currentPrice - H : L - currentPrice;
   // One admissible band, shared with the confidence score below. Previously
   // this used maxExtensionRangeMult (0.5) directly and the RR check further
@@ -346,6 +334,30 @@ export function evaluatePrev4hRange(input: Prev4hRangeInput): SignalEvaluation {
   }
 
   const riskPerUnit = Math.abs(entryRef - stopLoss);
+
+  // RISK_VS_COST gate — the stop actually being traded must clear the
+  // modelled round trip by costSafetyMultiplier. Cost comes from the shared
+  // model, not a local literal; baseSlippagePercent 0.05 = the sim's actual
+  // per-leg market-fill slippage (this bot fills market).
+  //
+  // Moved here 2026-09-14 (was evaluated on `structuralStop`/`mid`, BEFORE the
+  // ladder above could override it): the fixed ladder's floor is 2.3%
+  // (FIXED_SL_PCT, never tighter — see calmRegime.ts), comfortably above any
+  // realistic round-trip cost, but a narrow prev-4H range's own structural
+  // stop can be a fraction of a percent. Checking the OLD number rejected
+  // exactly the tight-range setups this bot's own confidence score treats as
+  // BEST ("מגע נקי + טווח צר = ביטחון גבוה") on a stop that would never
+  // actually be traded once the ladder replaced it — the same "gate checks a
+  // number the ladder already overrode" shape as the Intraday COST bug fixed
+  // the same day (see BOTS_REFERENCE.md §1 "COST").
+  const stopDistancePct = (riskPerUnit / entryRef) * 100;
+  const estimatedRoundTripCost = estimatedRoundTripCostPct({
+    tradeType: isLong ? 'SPOT' : 'FUTURES', entryIsLimit: false, baseSlippagePercent: 0.05
+  });
+  if (stopDistancePct < p.costSafetyMultiplier * estimatedRoundTripCost) {
+    return base('ARMED', 'RISK_VS_COST', debug, { confidence: 0 });
+  }
+
   const takeProfit1 = isLong ? entryRef + tp1Distance : entryRef - tp1Distance;
   const takeProfit2 = isLong ? entryRef + takeProfit2Distance : entryRef - takeProfit2Distance;
   const takeProfit = takeProfit1;

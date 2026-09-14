@@ -53,6 +53,18 @@ LIQUIDITY → SPREAD → NO_SETUP → NO_ENTRY → RISK → COST → DATA_MISMAT
 SIGNAL אם ניתוח העלות רץ על levels שונים מהפקודה (סטייה > `1e-8`), ומדפיס את שני
 הסטים ללוג. אין fallback שמסתיר את זה.
 
+**⚠️ תקלה שתוקנה (2026-09-14) — COST מדד רווח מול TP1 גם כשהסולם הקבוע פעיל.**
+`buildRiskPlan` השער הפנימי שלו, כשהסולם (`calmRegimeScalp`) פעיל, מודד R:R
+גולמי מול **TP2** (3.5/2.3≈1.52 — TP1 הוא 1.8/2.3≈0.78 בכוונה, ראה "סולם רווח").
+אך `evaluateCostEdge` — שער נפרד, במורד הזרם — תמיד מדד את `expectedMovePercent`
+מול `takeProfit1` בלבד, בלי מודעות לסולם. תוכנית שעברה את שער ה-RISK (מול TP2)
+הגיעה ל-COST ונדחתה **שוב**, על מספר ש-RISK כבר אישר תחת יעד אחר. נצפה חי:
+Intraday לא ביצע עסקה אחת ב-3+ שעות; כל האיתותים שהגיעו ל-COST נדחו ב-R:R נטו
+**0.67–0.73** בדיוק — קלאסטר צר וחשוד לחלוטין (זה בדיוק 1.8/2.3 פחות עלויות),
+בלי קשר לסימבול או סוג ה-setup. תוקן: `CostInput.rewardTarget` — ברירת מחדל
+`takeProfit1` (הבוט האמיתי ללא שינוי), אך `intradayEngine.ts` מעביר `takeProfit2`
+כש-`calmRegimeScalp` פעיל. ראה `costGateLadderMismatch.test.ts`.
+
 ### חישוב הביטחון
 `confidence = round((setupScore + entryScore) / 2)` — ממוצע של שני ציונים
 0–100 (`decisionEngine/adapters/intradayAdapter.ts:355`):
@@ -330,8 +342,20 @@ H = prev.high · L = prev.low · mid = (H+L)/2 · range = H−L · rangePct = ra
 `AGAINST_TREND` (אין עסקה).
 
 ### פילטר טווח
-`rangePct` חייב להיות ב-`[minRangePct 0.005, maxRangePct 0.08]` — אחרת
-`RANGE_TOO_TIGHT` / `RANGE_TOO_WIDE`.
+`rangePct` חייב להיות ב-`[minRangePct 0.010, maxRangePct 0.08]` (התיעוד ציין
+0.005 — שגוי, תוקן 2026-09-14) — אחרת `RANGE_TOO_TIGHT` / `RANGE_TOO_WIDE`.
+
+### שער `RISK_VS_COST`
+```
+stopDistancePct  = |entryRef − stopLoss| / entryRef × 100     ← הסטופ הסופי
+estimatedRoundTripCost = מודל עלות משותף (~0.3% ב-SPOT, entryIsLimit=false)
+נדחה כש  stopDistancePct < costSafetyMultiplier (2.0) × estimatedRoundTripCost
+```
+**⚠️ תוקן 2026-09-14** — אותה תבנית תקלה כמו COST ב-Intraday (ראה §1): השער
+היה נבדק מול `structuralStop` (אמצע הטווח) **לפני** בלוק הסולם, שיכול לדרוס
+אותו לרצפה קבועה של 2.3%. טווח צר (בדיוק הסוג שהציון של הבוט מעדיף — "מגע נקי
++ טווח צר = ביטחון גבוה") נדחה על סטופ שלא יסחר בפועל. הועבר עכשיו **אחרי**
+בלוק הסולם, נבדק מול `riskPerUnit` הסופי. ראה `pathRiskVsCostLadderMismatch.test.ts`.
 
 ### סיגנל (פריצה)
 `trendUp AND live > H` → **LONG** (`SPOT`). `trendDown AND live < L` → **SHORT**

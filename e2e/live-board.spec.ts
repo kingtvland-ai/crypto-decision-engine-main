@@ -4,6 +4,12 @@
  */
 import { test, expect } from '@playwright/test';
 import { installMockWorker, samplePosition, sampleClosedTrade } from './fixtures/mockWorker';
+// The real fallback target, not a hardcoded copy — that hostname has already
+// drifted twice (see INSTALL_GUIDE.md §3.3) without every reference to it
+// being updated together. Importing it here means this test tracks whatever
+// the app itself actually falls back to, instead of silently testing against
+// a dead URL forever after the next rename.
+import { DEFAULT_PUBLIC_WORKER_URL } from '../src/services/workerConfig';
 
 test.describe('/live', () => {
   test('shows all four bots and the portfolio-wide summary, with no controls', async ({ page }) => {
@@ -54,7 +60,7 @@ test.describe('/live', () => {
     // something this suite should hit. Intercept it too, distinctly, so the
     // test proves the FALLTHROUGH happened rather than a live network call.
     let fellThrough = false;
-    await page.route('https://cde-main.onrender.com/**', async (route) => {
+    await page.route(`${DEFAULT_PUBLIC_WORKER_URL}/**`, async (route) => {
       fellThrough = true;
       await route.fulfill({
         status: 200,
