@@ -78,7 +78,7 @@ import {
 } from '../utils/technicalAnalysis';
 import { calculateMACD, calculateStochastic } from '../utils/advancedTechnicalAnalysis';
 import type { HistoricalPrice, TechnicalIndicators } from '../types/crypto';
-import { positionPnlPercent, reachedStop, reachedTarget, TP2_PERCENT, TP1_EXIT_FRACTION } from './exitPolicy';
+import { positionPnlPercent, reachedStop, reachedTarget, TP2_PERCENT, TP1_EXIT_FRACTION, capStopLoss } from './exitPolicy';
 import { resolveLadderPercents, type StopNoise } from './calmRegime';
 
 // ── §2 — indicator votes ─────────────────────────────────────────────────────
@@ -757,7 +757,15 @@ export function evaluateProExit(
   // levels uses them; one opened before this change falls back to the flat §5
   // percentages so its behaviour is unchanged.
   const s = isLong ? 1 : -1;
-  const stopLoss = pos.stopLoss ?? pos.entryPrice * (1 - s * PRO_STOP_LOSS_PERCENT / 100);
+  const structuralStopLoss = pos.stopLoss ?? pos.entryPrice * (1 - s * PRO_STOP_LOSS_PERCENT / 100);
+  // Hard 4.2% loss cap, re-applied on every evaluation (2026-09-16) — the same
+  // backstop Intraday/Path/Bybit all re-apply per tick, previously missing
+  // here. Normally a no-op: proStopTpLevels already clamps the entry-time
+  // stop to MAX_LOSS_PERCENT via resolveLadderPercents. This is the net for a
+  // position carrying a wider stop than that path can currently produce (a
+  // stale/migrated position, or a future change to proStopTpLevels) — pulled
+  // in here, never loosened.
+  const stopLoss = capStopLoss(pos.entryPrice, structuralStopLoss, isLong);
   const takeProfit1 = pos.takeProfit1 ?? pos.entryPrice * (1 + s * PRO_TAKE_PROFIT_PERCENT / 100);
   const takeProfit2 = pos.takeProfit2 ?? pos.entryPrice * (1 + s * TP2_PERCENT / 100);
 

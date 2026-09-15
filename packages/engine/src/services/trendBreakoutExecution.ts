@@ -36,7 +36,6 @@ import {
 } from './simExecution';
 import {
   reachedStop,
-  reachedTarget,
   positionPnlPercent,
   capStopLoss,
   maxLossStopLevel,
@@ -287,7 +286,6 @@ export function generateTrendBreakoutOrders(ctx: TrendBreakoutOrderGenContext): 
     const live = ctx.priceFor(lt.base) ?? lt.lots[0].currentPrice ?? lt.lots[0].entryPrice;
     const isLong = lt.side === 'LONG';
     const first = lt.lots[0];
-    const tp = first.takeProfit ?? first.takeProfit1;
     const atrM15Now = currentAtrM15(set, p);
     const { stop, progressR } = effectiveStop(lt, live, atrM15Now, p);
 
@@ -305,8 +303,11 @@ export function generateTrendBreakoutOrders(ctx: TrendBreakoutOrderGenContext): 
     );
 
     const pnlPct = positionPnlPercent(first.entryPrice, live, isLong);
-    const tp2 = first.takeProfit2;
-    const tp2Reached = tp2 !== undefined && reachedTarget(live, tp2, isLong);
+    // No TP-level exit here by design: the ratchet below owns every profit
+    // exit for this bot, so the plan's takeProfit1/takeProfit2 are carried on
+    // the order for reporting only and are never compared against `live`.
+    // (`tp` / `tp2` / `tp2Reached` locals computing exactly that comparison
+    // sat here unread — removed 2026-09-16.)
 
     // Profit ratchet (2026-09-14) — replaced the TP1-half / TP2 pair outright.
     // Crossing 1.8/3/4/5%… marks a rung and sells nothing; coming back down to

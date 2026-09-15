@@ -1,4 +1,21 @@
-// 4H Path engine — the decision layer of the fourth simulation bot.
+// 4H Path engine — the empirical-bucket strategy that the fourth sim bot USED
+// to run.
+//
+// STATUS (verified 2026-09-16 by call-graph, not by comment): the strategy
+// half of this file — `evaluatePathDecision`, `pathKellyFraction`, the
+// PathGate/PathDecision shapes — is NOT reachable from any bot. The bot named
+// "Path" (`server/pathSimEngine.ts`) runs `prev4hRange.ts` instead. The
+// DecisionEngine adapter that wrapped this engine was deleted the same day
+// because it was exported and shown registered in the framework's own usage
+// example while nothing actually registered it.
+//
+// The file stays because its MECHANICAL half is a live dependency:
+// `aggregateToH4` is imported by prev4hRange.ts and prev4hRangeExecution.ts,
+// and `MIN_PATH_CANDLES` / `PATH_MIN_H4_BARS` are re-exported for the candle
+// warm-up. Those are timeframe arithmetic, not strategy. The strategy half is
+// kept exported only so its unit tests (src/__tests__/pathEngine.test.ts)
+// keep running against it; re-wiring it into a live path is a decision, not
+// a refactor.
 //
 // The other three bots ask "is this a good setup". This one asks a narrower
 // question with a measurable answer: given the state the current 4-hour bar

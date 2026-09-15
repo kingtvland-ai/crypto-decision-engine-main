@@ -22,7 +22,7 @@ import {
 } from './tradeEngine';
 import type { SignalEvaluation, DecisionFactor } from './intradayBridge';
 import { POSITION_TARGET_PCT } from './intradayParams';
-import { capStopLoss, stopWasCapped, takeProfitLevels, tp1FloorDistance, MAX_LOSS_PERCENT, TP1_PERCENT, TP2_PERCENT } from './exitPolicy';
+import { capStopLoss, stopWasCapped, tp1FloorDistance, MAX_LOSS_PERCENT } from './exitPolicy';
 import { resolveLadderPercents, isBuyingSurge, measureStopNoise } from './calmRegime';
 import type { MarketRegimeResult } from '../types/crypto';
 

@@ -89,8 +89,8 @@ export function resolveCorrelationLookback(baseLookback: number, atrPercentile?:
   return Math.max(CORRELATION_LOOKBACK_FLOOR, Math.round(shrunk));
 }
 
-export function toPositionDirection(side: string): PositionDirection {
-  const s = side.toUpperCase();
+export function toPositionDirection(side: string | undefined | null): PositionDirection {
+  const s = typeof side === 'string' ? side.toUpperCase() : '';
   return s === 'BUY' || s === 'LONG' ? 'LONG' : 'SHORT';
 }
 

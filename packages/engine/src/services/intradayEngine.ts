@@ -416,7 +416,11 @@ export function evaluateIntradayDecision(input: IntradayDecisionInput): Intraday
   );
   if (fundingVerdict.kind === 'veto') {
     logs.push(`[${symbol}] ${fundingVerdict.reason}`);
-    return finalize(symbol, 'MACRO', 'NO_SIGNAL', regime, setup, entry, null, null, logs, params, now, mkFunnel('MACRO', 'NO_SIGNAL', setup, entry), null);
+    // 'FUNDING', not 'MACRO' (2026-09-16): this refusal and GATE 6's
+    // sell-pressure block used to report the same gate label, so neither the
+    // funnel nor the decision log could separate them without reading the
+    // reason string. See DecisionGate in intradayParams.ts.
+    return finalize(symbol, 'FUNDING', 'NO_SIGNAL', regime, setup, entry, null, null, logs, params, now, mkFunnel('FUNDING', 'NO_SIGNAL', setup, entry), null);
   }
   if (fundingVerdict.kind === 'trim') logs.push(`[${symbol}] ${fundingVerdict.reason}`);
   const fundingSizeMultiplier = fundingVerdict.kind === 'trim' || fundingVerdict.kind === 'allow'

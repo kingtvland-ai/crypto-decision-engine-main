@@ -346,6 +346,17 @@ export interface RiskPlan {
    *  tape actually moved", which the executed stop (deliberately widened past
    *  a calm symbol's real volatility by the flat ladder) cannot answer. */
   naturalStopPct?: number;
+  /** notionalUsd / equity × 100 — what this position is worth as a share of
+   *  the book RIGHT NOW. Reporting only; no gate reads it.
+   *
+   *  Read it as exactly that and nothing more. It is NOT the target
+   *  allocation: sizing divides by `resolveSizingBase(sizingBase, equity)`,
+   *  which is the STARTING capital whenever one is known, so the two diverge
+   *  the moment equity leaves its start. A $10k bot targeting 10% opens
+   *  $1,000; after a drawdown to $5k it still opens $1,000, and this field
+   *  correctly reports 20% — the position really is a fifth of the book. The
+   *  invariant that the 10% target was honoured is asserted separately, and
+   *  against `sizingBase`, in buildRiskPlan (§24 ASSERTION_FAIL). */
   positionPercentOfEquity: number;
   riskPercentUsed: number;
   /** The sizing multiplier actually applied to this plan (1 = base sizing). */

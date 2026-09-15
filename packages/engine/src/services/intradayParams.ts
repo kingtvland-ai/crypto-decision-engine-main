@@ -21,11 +21,16 @@ export type DecisionGate =
   | 'EXPOSURE'
   | 'NO_REGIME'
   | 'VOLATILITY'
-  // Macro Layer (2026-09-16): the sell-pressure proxy (volume-confirmed drop
-  // on contracting Open Interest — the free substitute for Whale Alert) or
-  // the pre-existing funding-crowding veto (fundingRate.ts, calibrated but
-  // unwired until this gate). See derivativesRegime.ts / intradayEngine.ts.
+  // Macro Layer (2026-09-16): the sell-pressure proxy — a volume-confirmed
+  // drop on contracting Open Interest, the free substitute for Whale Alert.
+  // See derivativesRegime.ts / intradayEngine.ts.
   | 'MACRO'
+  // The perpetual-funding crowding veto (fundingRate.ts). Split out of
+  // 'MACRO' on 2026-09-16: both refusals reported the same label, so a
+  // funnel/telemetry reader could not tell a sell-pressure block from a
+  // funding veto without parsing the log text. They are different signals,
+  // fire at different points in the chain, and are tuned separately.
+  | 'FUNDING'
   | 'LIQUIDITY'
   | 'SPREAD'
   | 'NO_SETUP'

@@ -273,14 +273,31 @@ export default function SimulationEngineColumn({
                   );
                   const entryTarget = safeNumber(entryOrder?.signalPrice ?? rec.optimalEntryPrice ?? (rec.willExecute ? rec.price : 0)) || null;
                   const planSl = safeNumber(entryOrder?.stopLoss ?? rec.stopLoss ?? 0) || null;
-                  const planTp1 = safeNumber(entryOrder?.takeProfit1 ?? rec.takeProfit1 ?? rec.takeProfit ?? 0) || null;
-                  const planTp2 = safeNumber(entryOrder?.takeProfit2 ?? rec.takeProfit2 ?? 0) || null;
+                  // TP1/TP2 are NOT shown for a candidate entry, deliberately.
+                  // The profit ratchet owns every profit exit in all four sim
+                  // bots (Path/Bybit call evaluateRatchet unconditionally;
+                  // Intraday via SIM_INTRADAY_PARAMS_OVERRIDE.profitRatchet,
+                  // Pro via proSimExecution's { profitRatchet: true }), and the
+                  // TP1/TP2 comparisons are either gated behind `!ratchet` or
+                  // absent entirely. Those levels are carried on the order for
+                  // reporting only — printing them as "the plan" advertised
+                  // exits no code would ever take. The first ratchet rung is
+                  // the level that actually governs, so that is what is shown.
+                  const planIsLong = rec.tradeSide === 'LONG' || rec.tradeSide === 'BUY' || rec.action === 'buy';
+                  const planFirstRung = entryTarget
+                    ? safeNumber(ratchetLevels({
+                        entryPrice: entryTarget,
+                        peakPrice: entryTarget,
+                        livePrice: entryTarget,
+                        isLong: planIsLong
+                      }).nextRungPrice) || null
+                    : null;
                   const waitingForLimit = !!entryOrder && entryOrder.fill !== 'market';
                   const relPct = (target: number | null) =>
                     target && entryTarget ? ((target - entryTarget) / entryTarget) * 100 : null;
                   const gapFromMarketPct = entryTarget && price ? ((entryTarget - price) / price) * 100 : null;
                   const showPlan = Boolean(
-                    (entryTarget || planSl || planTp1 || planTp2) &&
+                    (entryTarget || planSl || planFirstRung) &&
                     (entryOrder || rec.willExecute || rec.strategyDecision ||
                       /SIGNAL|ORDER_QUEUED|BELOW_THRESHOLD|DOWNTREND/.test(rec.status))
                   );
@@ -330,14 +347,10 @@ export default function SimulationEngineColumn({
                               SL {fmtUsd(planSl)}{relPct(planSl) !== null ? ` (${signedPct(relPct(planSl)!)})` : ''}
                             </span>
                           )}
-                          {planTp1 && (
+                          {planFirstRung && (
                             <span className="text-green-400">
-                              TP1 {fmtUsd(planTp1)}{relPct(planTp1) !== null ? ` (${signedPct(relPct(planTp1)!)})` : ''}
-                            </span>
-                          )}
-                          {planTp2 && (
-                            <span className="text-green-500">
-                              TP2 {fmtUsd(planTp2)}{relPct(planTp2) !== null ? ` (${signedPct(relPct(planTp2)!)})` : ''}
+                              מדרגת רווח ראשונה {fmtUsd(planFirstRung)}
+                              {relPct(planFirstRung) !== null ? ` (${signedPct(relPct(planFirstRung)!)})` : ''}
                             </span>
                           )}
                         </div>

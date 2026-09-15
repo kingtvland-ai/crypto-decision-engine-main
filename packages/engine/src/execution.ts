@@ -92,6 +92,7 @@ export {
   isInEntryCooldown,
   resolveReentryRecovery,
   applySellPressureOverride,
+  applyFundingOverride,
   detectMarketStress,
   MIN_SIM_ENTRY_USD,
   blockEntry,
@@ -174,8 +175,11 @@ export {
 // Prev-4H Range rewrite, so that file had been dead code, invisibly, for the
 // life of the current "נתיב 4H" bot. It was discovered only because a profit-
 // ratchet fix was wired into it by mistake and never reached the live bot.
-// MIN_PATH_CANDLES / PATH_MIN_H4_BARS are still real (pathEngine.ts, used by
-// the DecisionEngine's PathAdapter) — re-exported from their actual source.
+// MIN_PATH_CANDLES / PATH_MIN_H4_BARS are still real (pathEngine.ts) — they
+// are 4H timeframe arithmetic, not strategy, and the candle warm-up reads
+// them. Re-exported from their actual source. (They used to be described here
+// as "used by the DecisionEngine's PathAdapter"; that adapter was deleted
+// 2026-09-16 — see pathEngine.ts's header.)
 export { MIN_PATH_CANDLES, PATH_MIN_H4_BARS } from './services/pathEngine';
 
 // ── Prev-4H Range ("נתיב 4H" sim bot) order generation ───────────────────────

@@ -48,6 +48,8 @@ import {
 } from './adaptiveRisk';
 import { detectSellPressureFromH1 } from './derivativesRegime';
 import type { DerivativesSnapshot } from './derivativesRegime';
+import { evaluateFundingGate } from './fundingRate';
+import type { FundingSnapshot } from './fundingRate';
 
 // Re-exported so the existing call sites (hooks, server engines) keep a
 // single import surface; the implementation now lives in adaptiveRisk.ts
@@ -647,6 +649,52 @@ export function applySellPressureOverride(
     willExecute: false,
     status: 'NO_SIGNAL [MACRO]',
     reasoning: `${sellPressure.reason}\n${evaluation.reasoning}`
+  };
+}
+
+/**
+ * Funding-crowding veto for the bots that open PERPETUAL positions but never
+ * consulted the funding gate (2026-09-16).
+ * ----------------------------------------------------------------------------
+ * `evaluateFundingGate` (fundingRate.ts) was reachable from exactly one
+ * engine, intradayEngine.ts. Path and TrendBreakout both open their SHORT side
+ * as 1x FUTURES (`tradeType: isLong ? 'SPOT' : 'FUTURES'`), and the shared
+ * tick genuinely bills them for it — `applyFundingAccrual` in
+ * server/simEngineFactory.ts charges funding on every open FUTURES position of
+ * every sim bot. So those two bots PAID funding while nothing ever refused a
+ * position for it. That asymmetry is what this closes.
+ *
+ * Scope, deliberately narrow:
+ *
+ *   · FUTURES only. Funding is a perpetual-swap cost; a SPOT position never
+ *     pays or receives it, so a spot LONG is returned untouched. This is why
+ *     the check keys off `tradeType`, not off direction — Pro is spot-only and
+ *     is therefore a no-op here by construction even if it is ever wired in.
+ *   · VETO only, no trim. The gate's middle band returns a `sizeMultiplier`,
+ *     which intradayEngine folds into its own sizing chain. Path and
+ *     TrendBreakout size from `sizingBase × positionTargetPct` inside their own
+ *     order generators and carry no sizing-multiplier field on the evaluation,
+ *     so honouring a trim would mean changing how those two bots size — a
+ *     strategy change, not a missing guard. The veto is the risk half and is
+ *     what is added here; a trim would be a separate, deliberate decision.
+ *   · Abstains on missing or stale data, because the gate itself does.
+ */
+export function applyFundingOverride(
+  evaluation: SignalEvaluation,
+  fundingSnapshot: FundingSnapshot | undefined,
+  now: number = Date.now()
+): SignalEvaluation {
+  if (evaluation.action === 'hold' || !evaluation.willExecute) return evaluation;
+  if (evaluation.tradeType !== 'FUTURES') return evaluation;
+  const direction = evaluation.tradeSide === 'SHORT' || evaluation.tradeSide === 'SELL' ? 'SHORT' : 'LONG';
+  const verdict = evaluateFundingGate(fundingSnapshot, direction, now);
+  if (verdict.kind !== 'veto') return evaluation;
+  return {
+    ...evaluation,
+    action: 'hold',
+    willExecute: false,
+    status: 'NO_SIGNAL [FUNDING]',
+    reasoning: `${verdict.reason}\n${evaluation.reasoning}`
   };
 }
 

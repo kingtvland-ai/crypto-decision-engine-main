@@ -379,7 +379,7 @@ describe('MACRO gate — integration with evaluateIntradayDecision', () => {
     expect(d.gate).not.toBe('MACRO');
   });
 
-  it('an extreme crowded funding reading vetoes the LONG signal at MACRO, right before sizing', () => {
+  it('an extreme crowded funding reading vetoes the LONG signal at FUNDING, right before sizing', () => {
     const now = Date.now();
     const { h1, m15, m5 } = bullScenario(now);
     const d = evaluateIntradayDecision({
@@ -391,7 +391,10 @@ describe('MACRO gate — integration with evaluateIntradayDecision', () => {
       fundingSnapshot: { lastFundingRate: 0.0005, at: now }
     });
     expect(d.outcome).toBe('NO_SIGNAL');
-    expect(d.gate).toBe('MACRO');
+    // Split out of 'MACRO' 2026-09-16 so a funding veto is distinguishable
+    // from a sell-pressure block in the funnel without parsing log text.
+    expect(d.gate).toBe('FUNDING');
+    expect(d.gate).not.toBe('MACRO');
     expect(d.logs.some((l) => l.includes('FUNDING_GATE'))).toBe(true);
   });
 

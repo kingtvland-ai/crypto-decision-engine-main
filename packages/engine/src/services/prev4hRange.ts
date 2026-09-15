@@ -21,7 +21,7 @@ import { aggregateToH4 } from './pathEngine';
 import { barOpenFor, BAR_MS } from './pathStudy';
 import type { SignalEvaluation, DecisionFactor } from './intradayBridge';
 import { POSITION_TARGET_PCT } from './intradayParams';
-import { capStopLoss, stopWasCapped, takeProfitLevels, tp1FloorDistance, MAX_LOSS_PERCENT, TP1_PERCENT, TP2_PERCENT } from './exitPolicy';
+import { capStopLoss, stopWasCapped, tp1FloorDistance, MAX_LOSS_PERCENT, TP1_PERCENT } from './exitPolicy';
 import { estimatedRoundTripCostPct } from './intradayRisk';
 import { resolveLadderPercents, isBuyingSurge, measureStopNoise } from './calmRegime';
 

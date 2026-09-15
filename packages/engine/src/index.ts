@@ -14,7 +14,7 @@
 // ── Decision engine ──────────────────────────────────────────────────────────
 export { DecisionEngine } from './services/decisionEngine';
 export type { DecisionEngineOptions } from './services/decisionEngine';
-export { IntradayAdapter, PathAdapter } from './services/decisionEngine';
+export { IntradayAdapter } from './services/decisionEngine';
 export type {
   DecisionContext,
   DecisionResult,

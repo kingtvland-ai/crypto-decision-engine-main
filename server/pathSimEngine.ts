@@ -22,7 +22,8 @@ import {
   SIM_MIN_CONFIDENCE,
   generatePrev4hRangeOrders,
   Prev4hRangeCandleSet,
-  applySellPressureOverride
+  applySellPressureOverride,
+  applyFundingOverride
 } from '@cde/engine/execution';
 import type { SignalEvaluation } from '@cde/engine';
 import {
@@ -79,7 +80,16 @@ const pathStrategy: SimEngineStrategy = {
       // Macro Layer sell-pressure (2026-09-16) — same check as Intraday's GATE
       // 6, extended to Path. Overrides a signal that already qualified;
       // evaluatePrev4hRange's own gates/thresholds above are untouched.
-      results.push(applySellPressureOverride(evaluation, h1, input.derivativesBySymbol.get(crypto.symbol.toUpperCase()), Date.now()));
+      const now = Date.now();
+      const symbolKey = crypto.symbol.toUpperCase();
+      const afterSellPressure = applySellPressureOverride(
+        evaluation, h1, input.derivativesBySymbol.get(symbolKey), now
+      );
+      // Funding-crowding veto (2026-09-16). This bot's SHORT side is a 1x
+      // FUTURES position that the shared tick already charges funding on
+      // (applyFundingAccrual), so it was paying a cost nothing ever refused a
+      // trade for. SPOT longs are a no-op here. See applyFundingOverride.
+      results.push(applyFundingOverride(afterSellPressure, input.fundingBySymbol.get(symbolKey), now));
     }
 
     return results;

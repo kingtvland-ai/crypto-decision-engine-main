@@ -104,6 +104,25 @@ function sellEval(symbol: string, confidence: number): SignalEvaluation {
 const queuedOrder = (symbol: string, confidence = 80): PendingOrder =>
   ({ id: `o-${symbol}`, symbol, side: 'buy', confidence } as unknown as PendingOrder);
 
+// Correlation gate fixture (added 2026-09-16 alongside the gate itself): a
+// deterministic, genuinely-uncorrelated candle series per symbol, so these
+// slot/threshold tests exercise the NEW correlation gate on real (allowed)
+// data instead of tripping its abstention cap (no candles → "cannot verify
+// independence" → blocks once 3+ positions are already held, exactly what
+// several of these fixtures set up). Each symbol gets its own phase-shifted
+// sine wave — same timestamps so alignCloses can pair them, different enough
+// shapes that Pearson correlation reads near zero.
+const CORR_SYMBOLS = ['LA', 'HELD', 'OTHER', 'AA', 'BB', 'CC', 'MO'];
+const testCandlesBySymbol: Record<string, Candle[]> = {};
+for (const [idx, sym] of CORR_SYMBOLS.entries()) {
+  const bars: Candle[] = [];
+  for (let i = 0; i < 40; i++) {
+    const close = 100 + 5 * Math.sin(i / (3 + idx) + idx * 1.7);
+    bars.push({ timestamp: i * 3_600_000, open: close, high: close + 0.1, low: close - 0.1, close, volume: 1000 });
+  }
+  testCandlesBySymbol[sym] = bars;
+}
+
 const gateCtx = (over: Partial<ProGateContext> = {}): ProGateContext => ({
   positions: [],
   pending: [],
@@ -112,6 +131,7 @@ const gateCtx = (over: Partial<ProGateContext> = {}): ProGateContext => ({
   initialAmount: 10_000,
   maxPositions: 3,
   riskLevel: 'medium',
+  candlesBySymbol: testCandlesBySymbol,
   ...over
 });
 

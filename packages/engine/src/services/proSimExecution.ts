@@ -38,7 +38,15 @@ import type { SignalEvaluation, DecisionFactor } from './intradayBridge';
 import type { SimPosition, PendingOrder } from './simExecution';
 import { MIN_SIM_ENTRY_USD, MIN_ORDER_EXCEEDS_POSITION_TARGET, blockEntry, pickPreemptibleEntryOrder, isInEntryCooldown } from './simExecution';
 import type { ReentryCooldownState } from './simExecution';
-import { isLongSide, TP1_EXIT_FRACTION, TP1_PERCENT, TP2_PERCENT, MAX_LOSS_PERCENT } from './exitPolicy';
+import { isLongSide, TP1_EXIT_FRACTION, TP1_PERCENT, TP2_PERCENT, MAX_LOSS_PERCENT, capStopLoss } from './exitPolicy';
+import {
+  evaluateCorrelationGate,
+  blocksOnAbstention,
+  abstentionBlockReason,
+  toPositionDirection,
+  DEFAULT_MAX_CORRELATED,
+  type CorrelatedHolding
+} from './correlation';
 
 export const uid = (p: string) => `pro-${p}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
@@ -186,6 +194,11 @@ export interface ProGateContext {
   maxPositions: number;
   riskLevel: ProRiskLevel;
   minConfidenceOverride?: number;
+  /** H1 candles per symbol, keyed the same way ev.symbol/positions[].symbol
+   *  are (crypto.symbol.toUpperCase()). Feeds the correlation gate below —
+   *  optional only so a caller mid-migration degrades to "no candles, gate
+   *  abstains" rather than a type error. */
+  candlesBySymbol?: Record<string, Candle[] | undefined>;
 }
 
 function gateResult(
@@ -228,6 +241,19 @@ export function applyProEntryGates(
   // an order the fill step then refuses, producing "ready to buy" with no
   // purchase. projectedCash decreases as we allocate within this batch.
   let projectedCash = ctx.cash;
+
+  // Correlation cluster gate (2026-09-16) — the same helper Intraday/Path/
+  // Bybit already use. Pro was the one bot with NO concentration check at
+  // all: SPOT-only, so every held position is a LONG, and nothing stopped it
+  // stacking BTC+ETH+SOL+... (up to 7 slots) as one leveraged bet on the same
+  // risk factor during a correlated leg. Direction is always LONG here —
+  // toPositionDirection is used anyway for the same call shape the other
+  // three bots share, not because Pro can actually open a SHORT.
+  const candlesBySymbol = ctx.candlesBySymbol ?? {};
+  const correlationBook: CorrelatedHolding[] = [
+    ...ctx.positions.map((p) => ({ symbol: p.symbol, direction: toPositionDirection(p.side) })),
+    ...ctx.pending.filter((o) => o.side === 'buy').map((o) => ({ symbol: o.symbol, direction: toPositionDirection(o.side) }))
+  ];
 
   return evaluations
     .map((ev, i) => ({ ev, i }))
@@ -274,6 +300,24 @@ export function applyProEntryGates(
         return gateResult(ev, 'NO_SIGNAL [BELOW_THRESHOLD]', `ביטחון נמוך מהסף (${ev.confidence.toFixed(1)} < ${minConfidence})`, false, minConfidence);
       }
 
+      // Correlation cluster gate (2026-09-16, not part of alg.md §4 — added
+      // alongside the other three bots' own version). Checked before slots so
+      // a correlated candidate is refused before it can evict a weaker,
+      // independent resting order.
+      const evDirection = toPositionDirection('BUY');
+      const corr = evaluateCorrelationGate({
+        symbol: ev.symbol,
+        direction: evDirection,
+        held: correlationBook,
+        candlesBySymbol
+      });
+      if (!corr.allowed) {
+        return gateResult(ev, 'NO_SIGNAL [CORRELATION]', corr.reason ?? 'ריכוז יתר בנכסים מתואמים', false, minConfidence);
+      }
+      if (blocksOnAbstention(corr, correlationBook.length, DEFAULT_MAX_CORRELATED)) {
+        return gateResult(ev, 'NO_SIGNAL [CORRELATION]', abstentionBlockReason(correlationBook.length, DEFAULT_MAX_CORRELATED), false, minConfidence);
+      }
+
       if (occupiedSlots >= ctx.maxPositions) {                                                                                  // 5
         // A resting (unfilled) buy is a reservation, not a position. If this
         // BUY clearly outranks the weakest resting one, evict it and take the
@@ -316,6 +360,7 @@ export function applyProEntryGates(
       }
       occupiedSlots++;                                                                                                          // 8
       projectedCash -= rawBudget;
+      correlationBook.push({ symbol: ev.symbol, direction: evDirection });
       return gateResult(ev, 'SIGNAL SPOT BUY', `אות BUY בביטחון ${ev.confidence.toFixed(1)} >= סף ${minConfidence} — מבצע קנייה`, true, minConfidence, rawBudget);
     });
 }

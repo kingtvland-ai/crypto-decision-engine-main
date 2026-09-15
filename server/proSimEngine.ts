@@ -84,7 +84,8 @@ const proStrategy: SimEngineStrategy = {
       initialAmount: input.initialAmount,
       maxPositions: input.maxPositions,
       riskLevel,
-      minConfidenceOverride
+      minConfidenceOverride,
+      candlesBySymbol: input.candlesBySymbol
     });
   },
 

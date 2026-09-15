@@ -21,7 +21,8 @@ import {
   SIM_MIN_CONFIDENCE,
   generateTrendBreakoutOrders,
   TrendBreakoutCandleSet,
-  applySellPressureOverride
+  applySellPressureOverride,
+  applyFundingOverride
 } from '@cde/engine/execution';
 import { SignalEvaluation } from '@cde/engine';
 import {
@@ -85,8 +86,18 @@ const bybitStrategy: SimEngineStrategy = {
       // Macro Layer sell-pressure (2026-09-16) — same check as Intraday's GATE
       // 6, extended to Bybit/TrendBreakout. Overrides a signal that already
       // qualified; evaluateTrendBreakout's own gates/thresholds are untouched.
-      const derivKey = crypto?.symbol?.toUpperCase();
-      results.push(applySellPressureOverride(evaluation, h1, derivKey ? input.derivativesBySymbol.get(derivKey) : undefined, Date.now()));
+      const now = Date.now();
+      const symbolKey = crypto?.symbol?.toUpperCase();
+      const afterSellPressure = applySellPressureOverride(
+        evaluation, h1, symbolKey ? input.derivativesBySymbol.get(symbolKey) : undefined, now
+      );
+      // Funding-crowding veto (2026-09-16). SHORT lots here are 1x FUTURES and
+      // the shared tick already bills them funding (applyFundingAccrual), so
+      // the cost was being paid with no gate refusing the entry. SPOT longs
+      // are a no-op. See applyFundingOverride.
+      results.push(applyFundingOverride(
+        afterSellPressure, symbolKey ? input.fundingBySymbol.get(symbolKey) : undefined, now
+      ));
     }
 
     return results;
