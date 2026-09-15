@@ -485,18 +485,26 @@ export default function SimulationEngineColumn({
                   onChange={(e) => setBotConfig({ ...botConfig, minConfidenceOverride: e.target.value === '' ? 0 : Math.max(0, Math.min(100, Number(e.target.value))) })}
                 />
               </div>
-              <div className="flex items-center gap-3 pt-6">
-                <input
-                  id={`${title}-limit-entries`}
-                  type="checkbox"
-                  checked={botConfig.proLimitEntries === true}
-                  onChange={(e) => setBotConfig({ ...botConfig, proLimitEntries: e.target.checked })}
-                />
-                <label htmlFor={`${title}-limit-entries`} className="text-sm text-muted-foreground cursor-pointer">
-                  כניסה לפי שער (לימיט) — מסומן: הבוט ממתין שהשוק יגיע למחיר האות ורק אז קונה.
-                  לא מסומן: כניסת MARKET מיידית במחיר החי. חל על כל 4 הבוטים.
-                </label>
-              </div>
+              {/* Bybit/TrendBreakout deliberately never reads this flag for entries
+                  (trendBreakoutExecution.ts) — a resting limit BELOW market is
+                  adverse selection for a breakout strategy (a break that runs
+                  never fills; only a failing break does). Hidden here instead of
+                  shown-but-lying, found 2026-09-16 when the panel's own "חל על
+                  כל 4 הבוטים" claim was checked against the code and was false. */}
+              {testId !== 'bybit' && (
+                <div className="flex items-center gap-3 pt-6">
+                  <input
+                    id={`${title}-limit-entries`}
+                    type="checkbox"
+                    checked={botConfig.proLimitEntries === true}
+                    onChange={(e) => setBotConfig({ ...botConfig, proLimitEntries: e.target.checked })}
+                  />
+                  <label htmlFor={`${title}-limit-entries`} className="text-sm text-muted-foreground cursor-pointer">
+                    כניסה לפי שער (לימיט) — מסומן: הבוט ממתין שהשוק יגיע למחיר האות ורק אז קונה.
+                    לא מסומן: כניסת MARKET מיידית במחיר החי.
+                  </label>
+                </div>
+              )}
               <div className="flex items-center gap-3 pt-3">
                 <input
                   id={`${title}-fear-boost`}

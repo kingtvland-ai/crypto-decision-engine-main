@@ -98,6 +98,13 @@ export interface Prev4hRangeOrderGenContext {
 
 const ENTRY_SIDES = new Set(['buy', 'sell', 'long', 'short']);
 
+/** Below this fraction of entryRef, breakoutLimitPrice's discount is too thin
+ *  to be a genuine "rest and wait for a retest" — ordinary price noise closes
+ *  it within a tick or two, same as a market fill, but was still charged the
+ *  cheaper Maker fee with zero slippage (2026-09-16 finding). See
+ *  hasGenuineDiscount at its call site. */
+const MIN_GENUINE_LIMIT_DISCOUNT_FRACTION = 0.0005; // 0.05%
+
 function h4EmaTrend(h1: Candle[] | undefined, emaPeriod: number): 'UP' | 'DOWN' | 'FLAT' | undefined {
   if (!h1 || h1.length < emaPeriod * 4) return undefined;
   const h4 = aggregateToH4(h1);
@@ -314,6 +321,19 @@ export function generatePrev4hRangeOrders(ctx: Prev4hRangeOrderGenContext): Pend
     // LIMIT mode rests at the plan's own discounted level; MARKET mode fires at
     // the live price. Sizing is off whichever price the order actually uses.
     const price = ctx.limitEntries ? plan.limitEntryPrice : plan.entryRef;
+    // A razor-fresh breakout can leave breakoutLimitPrice with no room to rest
+    // below market at all — the floor that keeps the order from buying back
+    // INSIDE the broken range (prev4hRange.ts's own comment on limitEntryPrice)
+    // can sit above market, and the function clamps back down to market itself
+    // (see breakoutLimitPrice's "never above it" invariant, tested since
+    // 2026-09-08). That clamp is correct and stays — a genuine breakout that
+    // fresh has no meaningful retest to wait for. What was still wrong
+    // (2026-09-16): the order kept `fill: 'limit'` anyway, which in
+    // fillDueOrders means Maker treatment — zero slippage, the cheaper fee —
+    // for a fill that in practice happens exactly as fast as a market order.
+    // Label it honestly: only call it a resting limit when it actually rests.
+    const hasGenuineDiscount = ctx.limitEntries &&
+      Math.abs(plan.entryRef - plan.limitEntryPrice) > plan.entryRef * MIN_GENUINE_LIMIT_DISCOUNT_FRACTION;
 
     // Position sizing: 10% of equity, independent of stop-loss distance.
     // SL is used only to measure the resulting dollar risk.
@@ -371,8 +391,9 @@ export function generatePrev4hRangeOrders(ctx: Prev4hRangeOrderGenContext): Pend
       leverage: 1,
       // Default MARKET: a breakout entry normally wants the fill now. LIMIT
       // (proLimitEntries on) rests at the signal price — fills only if price
-      // pulls back to it (a retest), else expires.
-      fill: ctx.limitEntries ? 'limit' : 'market',
+      // pulls back to it (a retest), else expires. Falls back to 'market' when
+      // limitEntryPrice carries no genuine discount (see hasGenuineDiscount).
+      fill: hasGenuineDiscount ? 'limit' : 'market',
       stopLoss: plan.stopLoss,
       takeProfit: plan.takeProfit,
       takeProfit1: plan.takeProfit1,
