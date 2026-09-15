@@ -1,5 +1,6 @@
 /**
- * The fixed scalp ladder — SL 2.3% / TP1 1.8% / TP2 3.5% — and its one exception.
+ * The fixed scalp ladder — SL 2.3% / TP1 1.8% / TP2 3.5% — and its two
+ * independent widening conditions.
  * ============================================================================
  * Operator decision (2026-09-11): every sim bot trades ONE fixed ladder, so
  * small moves get taken instead of chased:
@@ -9,19 +10,29 @@
  * TP1 is FIXED at 1.8% — it is never widened AND never narrowed to a bot's own
  * dynamic target. A previous revision floored it at `min(1.8, dynamicTp1)`,
  * which quietly gave Path and Bybit a 1.5% target; the operator wants 1.8
- * everywhere.
+ * everywhere. TP1 stays 1.8% under BOTH widening conditions below — the whole
+ * point is a fast small profit. That makes TP1's own reward:risk deliberately
+ * poor (1.8/4.2 = 0.43 at the widest stop), which is why the R:R gate in every
+ * bot is measured against TP2, not TP1 — and why TP2 scales with the stop
+ * (`max(3.5%, 1.2 × SL)`) so the gate stays satisfiable instead of silently
+ * rejecting every widened-stop trade.
  *
- * THE ONE EXCEPTION — a buying surge. When a lot of buyers show up at once, a
- * flat 2.3% stop is inside the noise of the move and gets wicked out of a trade
- * that was right. Only then does the stop widen, to the bot's OWN dynamic
- * (ATR / structure) stop — the number that already reflects that symbol's real
- * volatility — clamped to [2.3%, MAX_LOSS_PERCENT].
+ * WIDENING CONDITION 1 — a buying surge (2026-09-11). When a lot of buyers
+ * show up at once, a flat 2.3% stop is inside the noise of the move and gets
+ * wicked out of a trade that was right. Only then does the stop widen, to the
+ * bot's OWN dynamic (ATR / structure) stop — the number that already
+ * reflects that symbol's real volatility — clamped to [2.3%, MAX_LOSS_PERCENT].
  *
- * TP1 stays 1.8% even in a surge: the whole point is a fast small profit. That
- * does make TP1's reward:risk worse (1.8/4.2 = 0.43), which is intentional and
- * why the R:R gate in every bot is measured against TP2, not TP1 — and why TP2
- * scales with the stop (`max(3.5%, 1.2 × SL)`) so the gate stays satisfiable
- * instead of silently rejecting every surge trade.
+ * WIDENING CONDITION 2 — the noise floor (2026-09-14, opt-in via
+ * `noiseFloorStop`). Independent of any surge: some symbols' ORDINARY bars
+ * are simply wider than 2.3% (a fat-tailed micro-cap), so a flat stop there
+ * is inside the noise on EVERY trade, not just surges. The floor is the wider
+ * of 1.6 × ATR and the symbol's own 90th-percentile bar width
+ * (`measureStopNoise`, `NOISE_PERCENTILE`) — see that function's doc comment
+ * for why ATR alone underestimates the bad bar by ~1.8× on every symbol
+ * measured. When even the 4.2% ceiling sits inside that noise, the trade is
+ * refused outright (`tooVolatile`) rather than opened with a coin-flip stop.
+ * The wider of the two conditions' results wins when both apply.
  */
 
 import type { Candle } from './tradeEngine';

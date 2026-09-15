@@ -31,8 +31,7 @@ const basePlanInput = {
   equity: 10_000,
   openPositions: 0,
   openFutures: 0,
-  currentLeveragedExposureUsd: 0,
-  riskPercent: 0.5
+  currentLeveragedExposureUsd: 0
 };
 
 describe('Intraday R:R — the 13.3119 → 13.0723 → 13.7113 case from the report', () => {

@@ -299,7 +299,6 @@ export interface RiskPlanInput {
   currentLeveragedExposureUsd: number;
   /** Current notional exposure per asset for per-asset cap */
   existingExposureByAsset?: Record<string, number>;
-  riskPercent?: number;
   params?: IntradayParams;
   /** Signal confidence (0-100). Telemetry only — nothing in buildRiskPlan reads
    *  it. */
@@ -337,6 +336,16 @@ export interface RiskPlan {
   rewardRisk2: number;
   maxHoldMs: number;
   timeStopMs: number;
+  /** The symbol's own natural noise floor at entry (measureStopNoise().floorPct,
+   *  a percent of entry price) — frozen here the same way the executed stop is,
+   *  so it stays comparable across the life of the position. Only set when
+   *  `noiseFloorStop` is on and a measurement was available; undefined means
+   *  "use the old executed-stop-distance behavior" (see intradayExit.ts's
+   *  time-stop check, the ONE consumer of this field). NOT used for sizing,
+   *  NOT the executed stop — it exists to answer "has this specific symbol's
+   *  tape actually moved", which the executed stop (deliberately widened past
+   *  a calm symbol's real volatility by the flat ladder) cannot answer. */
+  naturalStopPct?: number;
   positionPercentOfEquity: number;
   riskPercentUsed: number;
   /** The sizing multiplier actually applied to this plan (1 = base sizing). */
@@ -507,11 +516,21 @@ export function buildRiskPlan(input: RiskPlanInput): RiskPlan {
   // below is measured against TP2 instead, which scales with the stop.
   const ladderActive = params.calmRegimeScalp === true;
   let ladderTp2Distance: number | undefined;
+  // The symbol's own natural noise floor (measureStopNoise().floorPct),
+  // hoisted out of the `if (ladderActive)` block below so it survives to the
+  // return statement. Feeds `naturalStopPct` on the plan — the unit the time
+  // stop's stagnation check uses instead of the executed stop distance. See
+  // the field's own doc comment for why: the executed stop is a RISK budget
+  // (can be far wider than a calm symbol's real movement), and "has this
+  // trade moved" needs to be measured against what the symbol actually does,
+  // not against how much was risked on it.
+  let naturalStopPct: number | undefined;
   if (ladderActive) {
     // The stop must clear one 5M bar's own range, or an ordinary candle takes
     // it out on a thesis that never failed. Off unless `noiseFloorStop` is on,
     // which leaves the flat ladder exactly as it was.
     const noise = params.noiseFloorStop === true ? input.stopNoise : undefined;
+    naturalStopPct = noise && noise.floorPct > 0 ? noise.floorPct : undefined;
     const ladder = resolveLadderPercents({
       // The PRE-ceiling dynamic stop — see where it is computed above.
       dynamicSlPct,
@@ -740,6 +759,7 @@ export function buildRiskPlan(input: RiskPlanInput): RiskPlan {
     rewardRisk2: Number(rewardRisk2.toFixed(2)),
     maxHoldMs,
     timeStopMs: Math.round(maxHoldMs * params.timeStopFraction),
+    naturalStopPct,
     positionPercentOfEquity: Number(((notionalUsd / input.equity) * 100).toFixed(2)),
      riskPercentUsed: Number(riskPct.toFixed(6)),
      sizingMultiplier: typeof input.sizingMultiplier === 'number' && Number.isFinite(input.sizingMultiplier)

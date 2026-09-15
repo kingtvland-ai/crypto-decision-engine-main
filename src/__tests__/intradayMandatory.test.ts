@@ -250,8 +250,7 @@ describe('E. Risk plan', () => {
       equity: 10_000,
       openPositions: 0,
       openFutures: 0,
-      currentLeveragedExposureUsd: 0,
-      riskPercent: 0.5
+      currentLeveragedExposureUsd: 0
     });
     expect(plan.approved).toBe(true);
     expect(plan.leverage).toBeGreaterThanOrEqual(1);

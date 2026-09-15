@@ -381,7 +381,6 @@ export function evaluateIntradayDecision(input: IntradayDecisionInput): Intraday
     openFutures: p.openFuturesPositionsCount,
     currentLeveragedExposureUsd: p.totalLeveragedExposureUsd,
     existingExposureByAsset: input.existingExposureByAsset ?? p.existingExposureByAsset ?? {},
-    riskPercent: params.riskPerTradePercent,
     confidence,
     sizingMultiplier,
     params

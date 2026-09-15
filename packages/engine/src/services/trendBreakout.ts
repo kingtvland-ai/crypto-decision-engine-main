@@ -62,10 +62,6 @@ export interface TrendBreakoutParams {
    *  never failed. Refuses the trade outright when even the ceiling sits inside
    *  that noise (VOLATILITY_TOO_HIGH). See calmRegime.ts. */
   noiseFloorStop?: boolean;
-  /** Risk budget for the FULL position, as a fraction of equity.
-   *  Deprecated: position sizing now uses positionTargetPct (10% of equity).
-   *  Kept for API stability — do not use for sizing. */
-  riskPerTrade: number;
   /** Target notional as a fraction of equity (e.g. 0.10 = 10%).
    *  Single source of truth for position sizing. Stop-loss distance does NOT
    *  affect notional — it only determines the resulting dollar risk. */
@@ -122,9 +118,6 @@ export const DEFAULT_TREND_BREAKOUT_PARAMS: TrendBreakoutParams = {
   // prev4hRange). With tpRMultiplier 2.0 the real R:R never drops here — this
   // only bites if the TP formula is later changed to invert the levels.
   minRewardRisk: 1.2,
-  /** Deprecated: position sizing now uses positionTargetPct (10% of equity).
-   *  Kept for API stability — do not use for sizing. */
-  riskPerTrade: 0.005,
   positionTargetPct: POSITION_TARGET_PCT,
   breakEvenR: 1.0,
   trailingStartR: 1.5,

@@ -418,6 +418,9 @@ export interface ExitPositionInput {
    *  (TREND_PULLBACK's) for every position regardless of its real setup type. */
   maxHoldMs?: number;
   timeStopMs?: number;
+  /** See IntradayPositionView.naturalStopPct (intradayExit.ts) — frozen at
+   *  entry from RiskPlan.naturalStopPct (intradayRisk.ts). */
+  naturalStopPct?: number;
 }
 
 export function buildExitView(pos: ExitPositionInput): IntradayPositionView {
@@ -440,7 +443,8 @@ export function buildExitView(pos: ExitPositionInput): IntradayPositionView {
     highestPriceSinceTP1: pos.highestPriceSinceTP1,
     lowestPriceSinceTP1: pos.lowestPriceSinceTP1,
     maxHoldMs: pos.maxHoldMs,
-    timeStopMs: pos.timeStopMs
+    timeStopMs: pos.timeStopMs,
+    naturalStopPct: pos.naturalStopPct
   };
 }
 

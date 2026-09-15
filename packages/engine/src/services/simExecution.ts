@@ -247,6 +247,12 @@ export interface SimPosition {
    *  would incorrectly get held up to twice as long. */
   maxHoldMs?: number;
   timeStopMs?: number;
+  /** Frozen at entry from the RiskPlan (RiskPlan.naturalStopPct — see its own
+   *  doc comment). The time stop's stagnation check reads this instead of the
+   *  executed stop distance when present, so a calm symbol's flat-but-wide
+   *  ladder stop doesn't make "has this moved at all" an unreasonably high
+   *  bar. Undefined = old behavior (compare against the executed stop). */
+  naturalStopPct?: number;
    /** Per-setup exit tuning at exit-check time: the maxHold / timeStop / trailing
     *  activation tables in intradayExit.ts are all keyed by setup type. */
    setupType?: SetupType;
@@ -343,6 +349,8 @@ export interface PendingOrder {
   /** Carried from the entry-time RiskPlan through to the resulting SimPosition — see SimPosition.maxHoldMs. */
   maxHoldMs?: number;
   timeStopMs?: number;
+  /** Carried from the entry-time RiskPlan through to the resulting SimPosition — see SimPosition.naturalStopPct. */
+  naturalStopPct?: number;
   setupType?: SetupType;
 }
 
@@ -844,6 +852,7 @@ export function generateNewOrders(ctx: OrderGenContext): PendingOrder[] {
         lowestPriceSinceTP1: pos.lowestPriceSinceTP1,
         maxHoldMs: pos.maxHoldMs,
         timeStopMs: pos.timeStopMs,
+        naturalStopPct: pos.naturalStopPct,
         setupType: pos.setupType,
         ratchetConsumed: pos.ratchetConsumed
       },
@@ -1125,6 +1134,7 @@ export function generateNewOrders(ctx: OrderGenContext): PendingOrder[] {
       // position falls back to a single hardcoded default at exit-check time.
       maxHoldMs: ev.decision?.risk?.maxHoldMs,
       timeStopMs: ev.decision?.risk?.timeStopMs,
+      naturalStopPct: ev.decision?.risk?.naturalStopPct,
       setupType: ev.decision?.setupType
     });
   }
@@ -1388,6 +1398,7 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
         entryFee: fee,
         maxHoldMs: order.maxHoldMs,
         timeStopMs: order.timeStopMs,
+        naturalStopPct: order.naturalStopPct,
         setupType: order.setupType
       };
       // Snapshot risk-at-entry AFTER newPos is built: it needs the reanchored

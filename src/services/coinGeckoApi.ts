@@ -1,17 +1,17 @@
 
-import { CryptoData, HistoricalPrice } from '@cde/engine';
+import { HistoricalPrice } from '@cde/engine';
 import { CRYPTO_IDS } from '@cde/engine/market-data';
 
 const COINGECKO_BASE_URL = 'https://api.coingecko.com/api/v3';
 
 // ── Rate limiter state ────────────────────────────────────────────────────────
-// CoinGecko free tier: 30 req/min. These guards enforce minimum inter-call gaps
-// so a single transient outage from Bybit/Binance can't blow the shared budget.
-
-/** Minimum gap between getCurrentPrices() calls: 2 minutes */
-const PRICE_FETCH_MIN_GAP_MS = 2 * 60 * 1000;
-let lastPriceFetchAt = 0;
-let cachedPriceData: CryptoData[] = [];
+// CoinGecko's free-tier rate limit gates the calls below. getCurrentPrices()
+// used to live here with its own 2-minute gate — removed 2026-09-15 once
+// useCryptoData.ts stopped calling it in favor of the shared
+// getAggregatedPrices() (cryptoPriceAggregator.ts), which already tries
+// Bybit → Binance → CoinGecko itself. This file's historical-price/volume
+// calls (AdvancedAnalysis.tsx's only remaining callers) are unrelated to that
+// cascade and keep their own gate below.
 
 /** Minimum gap per-coin for historical candle fetches: 10 minutes */
 const HIST_FETCH_MIN_GAP_MS = 10 * 60 * 1000;
@@ -64,48 +64,6 @@ async function apiCall<T>(url: string, retries = 1, delay = 1000): Promise<T | n
 }
 
 export const coinGeckoApi = {
-  /**
-   * Returns current prices for all tracked coins.
-   * RATE-GATED: Returns cached data if called within 2 minutes of last fetch.
-   * Prefer cryptoPriceAggregator.getAggregatedPrices() which uses Bybit/Binance first.
-   */
-  async getCurrentPrices(): Promise<CryptoData[]> {
-    const now = Date.now();
-
-    // Serve cache if within the minimum gap
-    if (now - lastPriceFetchAt < PRICE_FETCH_MIN_GAP_MS && cachedPriceData.length > 0) {
-      console.log(`[CoinGecko] Serving cached prices (${cachedPriceData.length} coins, age ${Math.round((now - lastPriceFetchAt) / 1000)}s)`);
-      return cachedPriceData;
-    }
-
-    const ids = Object.values(CRYPTO_IDS).join(',');
-    const url = `${COINGECKO_BASE_URL}/coins/markets?vs_currency=usd&ids=${ids}&order=market_cap_desc&per_page=100&page=1&sparkline=false&price_change_percentage=24h&locale=en`;
-
-    console.log('[CoinGecko] Fetching current prices (100 coins)...');
-    const data = await apiCall<CryptoData[]>(url, 1, 2000);
-
-    if (!data || data.length === 0) {
-      // Return cached data rather than throwing (stale > nothing)
-      if (cachedPriceData.length > 0) {
-        console.warn('[CoinGecko] Fetch failed — returning last-known-good prices');
-        return cachedPriceData;
-      }
-      throw new Error('CoinGecko: no live prices and no cache available');
-    }
-
-    console.log(`[CoinGecko] Fetched ${data.length} coin prices`);
-
-    const mappedData = data.map(coin => {
-      const symbolEntry = Object.entries(CRYPTO_IDS).find(([, id]) => id === coin.id);
-      const mappedSymbol = symbolEntry ? symbolEntry[0] : coin.symbol.toUpperCase();
-      return { ...coin, symbol: mappedSymbol.toLowerCase() };
-    });
-
-    lastPriceFetchAt = now;
-    cachedPriceData = mappedData;
-    return mappedData;
-  },
-
   /**
    * Returns daily historical prices for a coin.
    * RATE-GATED per coin: returns cached data if called within 10 minutes.

@@ -4,9 +4,13 @@
  * Priority order for prices:   Bybit → Binance → CoinGecko (cached)
  * Priority order for candles:  Bybit → Binance → CoinGecko (heavily rate-gated)
  *
- * CoinGecko free tier: 30 req/min shared across ALL callers on the same IP.
- * This aggregator enforces a 120s minimum TTL for CoinGecko calls so stale
- * cached data is returned instead of blowing the rate limit.
+ * CoinGecko is last-resort ONLY — Bybit's bulk ticker call already covers
+ * this pipeline's normal case, so CoinGecko is reached only when BOTH Bybit
+ * AND Binance fail. This aggregator enforces a 120s minimum TTL for CoinGecko
+ * calls regardless of CoinGecko's own current free-tier limit (which changes
+ * over time and is not worth hardcoding a number for here) — 120s keeps this
+ * pipeline's CoinGecko usage far under any plausible free-tier ceiling, and
+ * stale cached data is served rather than risking a rate-limit block.
  *
  * Binance public API: 1200 req/min, no API key needed. Fetch ALL 24h tickers
  * in a SINGLE call instead of one per symbol.
@@ -61,8 +65,15 @@ const COINGECKO_PRICE_TTL = 2 * 60 * 1000;
 const COINGECKO_CANDLE_TTL = 10 * 60 * 1000;
 /** Binance full-ticker cache TTL (15 seconds — Binance allows it) */
 const BINANCE_TICKER_TTL = 15_000;
-/** Bybit ticker cache TTL (10 seconds) */
-const BYBIT_TICKER_TTL = 10_000;
+/** Bybit ticker cache TTL. One bulk call (`/v5/market/tickers?category=spot`,
+ *  no `symbol` param) returns EVERY USDT pair on the exchange regardless of
+ *  how many symbols a caller actually wants, so shortening this costs nothing
+ *  extra per request — it only controls how often that one request repeats.
+ *  2.5s (2026-09-15, down from 10s) matches the sim bots' tick cadence
+ *  (server/simEngineFactory.ts TICK_MS) so live positions mark-to-market and
+ *  their stop-loss/profit-ratchet checks are never computed against a price
+ *  older than roughly one tick. */
+const BYBIT_TICKER_TTL = 2_500;
 
 // ── CoinGecko symbol → ID map — see coinGeckoIds.ts ───────────────────────────
 

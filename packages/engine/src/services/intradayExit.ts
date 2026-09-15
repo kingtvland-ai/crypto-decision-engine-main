@@ -47,6 +47,14 @@ export interface IntradayPositionView {
   timeStopMs?: number;
   setupType?: SetupType;
   plannedStopDistance?: number;
+  /** The symbol's own natural noise floor at entry, as a percent of entry
+   *  price — see RiskPlan.naturalStopPct (intradayRisk.ts) for the full
+   *  rationale. Read ONLY by the time-stop stagnation check below; every
+   *  other R-based check (trailing activation, max-hold extension) keeps
+   *  using the executed stop, because those are legitimately about how much
+   *  of the RISK budget has been used, not about the symbol's own movement.
+   *  Undefined = old behavior (time stop also uses the executed stop). */
+  naturalStopPct?: number;
   highestPrice?: number;
   lowestPrice?: number;
   highestPriceSinceTP1?: number;
@@ -314,16 +322,36 @@ export function evaluateIntradayExit(pos: IntradayPositionView, ctx: IntradayExi
   // it has earned the full maxHold budget (MAX_DURATION above still ends it on
   // time), so the early 0.7× checkpoint no longer cuts it at a small loss.
   // Those early cuts were a large share of the bot's losing-trade COUNT.
+  //
+  // "R" here is measured against `naturalStopPct` (the symbol's own measured
+  // noise floor, frozen at entry — see the field's doc comment) instead of the
+  // executed stop distance, when available. Fixed 2026-09-15: the executed
+  // stop under the flat scalp ladder sits at a uniform 2.3%+ regardless of a
+  // calm symbol's real volatility, so `progressR` (denominated in THAT stop)
+  // made 0.3R an unreasonably high bar even for BTC — its typical 63-minute
+  // drift (~0.60%, ATR 0.17%) fell short of the 0.69% the flat stop demanded.
+  // Every other R-based check in this function (trailing activation, max-hold
+  // extension) keeps using the executed stop deliberately — those measure how
+  // much of the RISK budget is used, which correctly IS about the stop. Only
+  // "has this symbol's tape actually moved" should be measured against what
+  // the symbol actually does. Undefined naturalStopPct (live bot, or no
+  // measurement available) falls through to the old executed-stop behavior
+  // exactly — same numbers, same threshold, byte-identical result.
+  const naturalStopDistance = typeof pos.naturalStopPct === 'number' && pos.naturalStopPct > 0
+    ? pos.entryPrice * (pos.naturalStopPct / 100)
+    : stopDistance;
+  const progressNaturalR = ((price - pos.entryPrice) * s) / naturalStopDistance;
+  const mfeNaturalR = ((peak - pos.entryPrice) * s) / naturalStopDistance;
   if (
     heldMs >= timeStopMs &&
-    progressR < params.timeStopMinProgressR &&
-    mfeR < params.timeStopStagnantMfeR
+    progressNaturalR < params.timeStopMinProgressR &&
+    mfeNaturalR < params.timeStopStagnantMfeR
   ) {
     return {
       shouldExit: true,
       exitType: 'FULL',
       reasonCode: 'TIME_STOP',
-      reason: `Time Stop: אחרי ${heldMinutes} דק' התקדמות ${progressR.toFixed(2)}R < ${params.timeStopMinProgressR}R (MFE ${mfeR.toFixed(2)}R)`,
+      reason: `Time Stop: אחרי ${heldMinutes} דק' התקדמות ${progressNaturalR.toFixed(2)}R < ${params.timeStopMinProgressR}R (MFE ${mfeNaturalR.toFixed(2)}R)`,
       ...base
     };
   }

@@ -34,11 +34,10 @@ export interface BinanceKline {
   volume: number;
 }
 
-/** In-memory cache for the bulk ticker list to avoid redundant calls */
-let _allTickersCache: { data: Binance24hTicker[]; fetchedAt: number } | null = null;
-const ALL_TICKERS_TTL_MS = 15_000; // 15 seconds
-
-/** getAllTickers() has its own TTL cache, but the per-symbol calls below (get24hTicker/getKlines) had no backoff at all — a 429 was treated the same as any other failure (silently swallowed, no retry). One retry with a short backoff is enough for Binance's generous 1200 req/min limit. */
+/** The bulk ticker calls below (get24hTicker/getKlines) had no backoff at
+ *  all — a 429 was treated the same as any other failure (silently
+ *  swallowed, no retry). One retry with a short backoff is enough for
+ *  Binance's generous 1200 req/min limit. */
 async function fetchWithBackoff(url: string, timeoutMs: number, attempt = 0): Promise<Response | null> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -58,39 +57,12 @@ async function fetchWithBackoff(url: string, timeoutMs: number, attempt = 0): Pr
 
 export const binancePublicApi = {
   /**
-   * Fetch ALL 24h tickers in a single call (most efficient).
-   * Returns all USDT pairs from Binance spot market.
-   * Cached for 15 seconds to avoid redundant calls.
-   */
-  async getAllTickers(): Promise<Binance24hTicker[]> {
-    const now = Date.now();
-    if (_allTickersCache && now - _allTickersCache.fetchedAt < ALL_TICKERS_TTL_MS) {
-      return _allTickersCache.data;
-    }
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000);
-      const res = await fetch(`${BINANCE_BASE_URL}/ticker/24hr`, {
-        headers: { 'Accept': 'application/json' },
-        signal: controller.signal
-      });
-      clearTimeout(timeout);
-      if (!res.ok) return _allTickersCache?.data ?? [];
-      const all = await readJson<Binance24hTicker[]>(res, 'binance 24h tickers');
-      // Filter to USDT pairs with real volume
-      const filtered = all.filter(t =>
-        t.symbol.endsWith('USDT') && parseFloat(t.quoteVolume) > 10000
-      );
-      _allTickersCache = { data: filtered, fetchedAt: now };
-      return filtered;
-    } catch {
-      return _allTickersCache?.data ?? [];
-    }
-  },
-
-  /**
    * Fetch 24h ticker for cross-exchange volume/price validation (single symbol).
-   * For bulk lookups, prefer getAllTickers() + filter instead.
+   * For bulk price data, the app reads from `getAggregatedPrices()`
+   * (packages/engine/src/services/cryptoPriceAggregator.ts) instead, which
+   * has its own Bybit-first bulk-ticker cascade — this file's own bulk
+   * `getAllTickers()` was a second, unused copy of that and was removed
+   * 2026-09-15 once nothing called it anymore.
    */
   async get24hTicker(symbol: string): Promise<Binance24hTicker | null> {
     const formatted = symbol.toUpperCase().endsWith('USDT') ? symbol.toUpperCase() : `${symbol.toUpperCase()}USDT`;

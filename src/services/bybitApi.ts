@@ -1,16 +1,6 @@
 
 const BYBIT_BASE_URL = 'https://api.bybit.com';
 
-interface BybitTicker {
-  symbol: string;
-  lastPrice: string;
-  priceChangePercent: string;
-  price24hPcnt: string;
-  volume24h: string;
-  highPrice24h: string;
-  lowPrice24h: string;
-}
-
 interface BybitKlineData {
   openTime: string;
   open: string;
@@ -55,7 +45,6 @@ async function bybitApiCall<T>(endpoint: string, params: Record<string, string> 
 // because they never produce trading signals.
 // Wrapped tokens (WBTC) excluded — same price action as underlying.
 
-import { getActiveSymbols } from './liveUniverse';
 import { TARGET_SYMBOLS as STATIC_TARGET_SYMBOLS } from '@cde/engine/market-data';
 import { toBaseAsset, toBybitSymbol } from '@cde/engine/market-data';
 
@@ -70,26 +59,6 @@ function toInternalSymbol(bybitSymbol: string): string {
 }
 
 export const bybitApi = {
-  async getTickers(): Promise<BybitTicker[]> {
-    const data = await bybitApiCall<{ list: BybitTicker[] }>(
-      '/v5/market/tickers',
-      { category: 'spot' }
-    );
-    
-    if (!data || !data.list) {
-      return [];
-    }
-    
-    // Filter for our target symbols — the live liquidity-based universe when
-    // the trading worker is reachable, else the static fallback list.
-    const targetSet = new Set(await getActiveSymbols());
-    const filteredTickers = data.list.filter(ticker =>
-      targetSet.has(ticker.symbol)
-    );
-    
-    return filteredTickers;
-  },
-
   async getKlineData(symbol: string, interval: string = 'D', limit: number = 60): Promise<BybitKlineData[]> {
     const validInterval = interval === '1d' ? 'D' : interval;
     

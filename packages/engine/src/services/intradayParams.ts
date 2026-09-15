@@ -126,12 +126,13 @@ export interface IntradayParams {
   minStopCostMultiple: number;
 
   // ── Risk (§30-§35) ────────────────────────────────────────────────────────
-  /** Deprecated: position sizing now uses positionTargetPct (10% of equity).
-   *  Kept for API stability during the transition — do not use for sizing. */
+  /** Deprecated for SIZING — position sizing uses positionTargetPct (10% of
+   *  equity), not this. Still a genuine, live sweep knob for
+   *  `intradayBacktest.ts` (`runRiskVariants`/`runWalkForward` vary this
+   *  value across backtest runs to compare risk levels) — do not remove
+   *  without checking those callers first. `maxRiskPerTradePercent`, its
+   *  sibling, had zero readers anywhere and was removed 2026-09-15. */
   riskPerTradePercent: number;
-  /** Deprecated: position sizing now uses positionTargetPct (10% of equity).
-   *  Kept for API stability during the transition — do not use for sizing. */
-  maxRiskPerTradePercent: number;
   /** Target notional as a fraction of equity (e.g. 0.10 = 10%).
    *  Single source of truth for position sizing. Stop-loss distance does NOT
    *  affect notional — it only determines the resulting dollar risk.
@@ -377,11 +378,13 @@ export const DEFAULT_INTRADAY_PARAMS: IntradayParams = {
   minRewardRisk: 1.2,
   minStopCostMultiple: 2.0,
 
-  // Deprecated for SIZING (that is positionTargetPct now), but still read:
-  // intradayEngine passes it to buildRiskPlan as the risk-%% telemetry base,
-  // and the walk-forward harness sweeps it. Kept rather than rewire both.
+  // Deprecated for SIZING (that is positionTargetPct now). intradayEngine.ts
+  // used to pass this to buildRiskPlan as `RiskPlanInput.riskPercent`, which
+  // that function never actually read (verified 2026-09-15 — removed, see
+  // intradayRisk.ts). What's genuinely still live: intradayBacktest.ts's
+  // walk-forward harness sweeps this value across backtest runs to compare
+  // risk levels. Kept for that; do not wire it back into buildRiskPlan.
   riskPerTradePercent: 0.5,
-  maxRiskPerTradePercent: 0.75,
   positionTargetPct: POSITION_TARGET_PCT,
   minStopAtrMult: 0.8,
   maxStopAtrMult: 2.5,

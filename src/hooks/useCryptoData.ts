@@ -1,82 +1,29 @@
 
 import { useQuery } from '@tanstack/react-query';
-import { coinGeckoApi } from '../services/coinGeckoApi';
 import { bybitApi } from '../services/bybitApi';
 import { binancePublicApi } from '../services/binancePublicApi';
 import { fearGreedApi } from '../services/fearGreedApi';
 import { calculateTechnicalIndicators } from '@cde/engine/analysis';
 import { generateSmartRecommendation } from '@cde/engine/analysis';
+import { getAggregatedPrices } from '@cde/engine/market-data';
 import { CryptoData, CryptoRecommendation, HistoricalPrice } from '@cde/engine';
 import { getActiveSymbols } from '../services/liveUniverse';
 
-/** Map a Bybit USDT symbol to our internal symbol name (e.g. BTCUSDT → btc) */
-const fromBybitSymbol = (s: string) => s.replace(/USDT$/i, '').toLowerCase();
-
 export function useCryptoData() {
+  // Bybit → Binance → CoinGecko, in that order, is ALREADY implemented once
+  // in packages/engine/src/services/cryptoPriceAggregator.ts (the same
+  // pipeline server/simEngineFactory.ts uses for the live sim bots). This
+  // hook used to carry its own second copy of that exact cascade — found
+  // 2026-09-15 during a cleanup pass. Consolidated onto the shared one: same
+  // output shape (CryptoData[]), runs fine in the browser (fetch-only, no
+  // Node-specific imports), and inherits BYBIT_TICKER_TTL (2.5s) instead of
+  // drifting out of sync with the server's own freshness fix.
   const { data: cryptoData, isLoading: cryptoLoading, error: cryptoError } = useQuery({
     queryKey: ['crypto-prices'],
     queryFn: async (): Promise<CryptoData[]> => {
-      console.log('🚀 Fetching live crypto prices...');
-      const targetSet = new Set(await getActiveSymbols());
-
-      // ── 1) Bybit spot tickers (fastest, real-time) ──────────────────────────
-      try {
-        const bybitTickers = await bybitApi.getTickers();
-        if (bybitTickers && bybitTickers.length > 10) {
-          console.log('✅ Using live Bybit data as primary source');
-          return bybitTickers.map(ticker => ({
-            id: fromBybitSymbol(ticker.symbol),
-            symbol: fromBybitSymbol(ticker.symbol),
-            name: ticker.symbol,
-            current_price: parseFloat(ticker.lastPrice),
-            price_change_percentage_24h: parseFloat(ticker.price24hPcnt ?? ticker.priceChangePercent),
-            total_volume: parseFloat(ticker.volume24h),
-            // Real market cap needs circulating supply, which ticker
-            // endpoints don't provide — price × volume is NOT market cap.
-            // 0 = genuinely unknown; recommendationEngine.ts treats that as
-            // neutral instead of assuming the smallest/riskiest tier.
-            market_cap: 0,
-            last_updated: new Date().toISOString()
-          }));
-        }
-      } catch (e) {
-        console.warn('⚠️ Bybit tickers failed:', e instanceof Error ? e.message : String(e));
-      }
-
-      // ── 2) Binance bulk ticker (single call, 1200 req/min free) ─────────────
-      try {
-        const allBinance = await binancePublicApi.getAllTickers();
-        const filtered = allBinance.filter(t => targetSet.has(t.symbol));
-        if (filtered.length > 10) {
-          console.log(`✅ Using Binance bulk data (${filtered.length} coins)`);
-          return filtered.map(t => {
-            const sym = fromBybitSymbol(t.symbol);
-            const price = parseFloat(t.lastPrice);
-            const vol   = parseFloat(t.quoteVolume);
-            return {
-              id: sym,
-              symbol: sym,
-              name: t.symbol,
-              current_price: price,
-              price_change_percentage_24h: parseFloat(t.priceChangePercent),
-              total_volume: vol,
-              market_cap: 0, // genuinely unknown — see the Bybit branch above for why
-              last_updated: new Date().toISOString()
-            } as CryptoData;
-          });
-        }
-      } catch (e) {
-        console.warn('⚠️ Binance bulk tickers failed:', e instanceof Error ? e.message : String(e));
-      }
-
-      // ── 3) CoinGecko (rate-gated, 2min cache minimum) ────────────────────────
-      console.log('📈 Falling back to CoinGecko (rate-gated)');
-      const data = await coinGeckoApi.getCurrentPrices();
-      if (data && data.length > 0) {
-        console.log(`✅ CoinGecko: ${data.length} coins`);
-        return data;
-      }
-
+      const targetSymbols = await getActiveSymbols();
+      const data = await getAggregatedPrices(targetSymbols);
+      if (data && data.length > 0) return data;
       throw new Error('All live price sources failed (Bybit, Binance, CoinGecko)');
     },
     refetchInterval: 90 * 1000,  // 90 seconds — Bybit/Binance are fast, no need to hammer

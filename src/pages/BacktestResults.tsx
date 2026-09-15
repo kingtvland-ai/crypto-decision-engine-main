@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Activity, TrendingUp, TrendingDown, AlertTriangle } from 'lucide-react';
+import { Activity, TrendingUp, TrendingDown, AlertTriangle, ChevronDown, ChevronUp } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import Navigation from '../components/Navigation';
 import { useWorkerAuth } from '../contexts/WorkerAuthContext';
@@ -147,6 +147,11 @@ export default function BacktestResults() {
 
   const [selectedBot, setSelectedBot] = useState<'all' | BotKey>('all');
   const [sortBy, setSortBy] = useState<'time' | 'pnl'>('time');
+  /** Exit reasons carry the numbers that explain the trade ("MFE 0.05R",
+   *  the actual stop level). Truncating them to a `title` tooltip hid that
+   *  from touch devices entirely and made it uncopyable everywhere. */
+  const [showFullReasons, setShowFullReasons] = useState(false);
+  const [expandedReasons, setExpandedReasons] = useState<Set<string>>(new Set());
   const [includeHistory, setIncludeHistory] = useState(true);
 
   // §9/#4 — historical runs archived server-side at each reset. A plain
@@ -422,6 +427,23 @@ export default function BacktestResults() {
           </Card>
         ) : (
           <Card className="bg-card/60 border-border overflow-hidden">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
+              <span className="text-xs text-muted-foreground">
+                יומן עסקאות · <span className="tabular">{Math.min(sorted.length, 200)}</span> מתוך{' '}
+                <span className="tabular">{sorted.length}</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowFullReasons((v) => !v)}
+                aria-pressed={showFullReasons}
+                className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+              >
+                {showFullReasons
+                  ? <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+                  : <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />}
+                {showFullReasons ? 'כווץ סיבות' : 'הצג סיבות מלאות'}
+              </button>
+            </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -464,15 +486,35 @@ export default function BacktestResults() {
                         <td className="px-4 py-2.5 font-mono">${fmt(t.price, t.price < 1 ? 6 : 2)}</td>
                         <td className={`px-4 py-2.5 font-mono font-medium ${pnlColor(pnl)}`}>{pnl >= 0 ? '+' : ''}${fmt(pnl)}</td>
                         <td className={`px-4 py-2.5 font-mono ${pnlColor(pct)}`}>{pct >= 0 ? '+' : ''}{fmt(pct)}%</td>
-                        <td className="px-4 py-2.5 text-muted-foreground text-xs max-w-[220px] truncate" title={t.reason}>{t.reason}</td>
+                        <td className="px-4 py-2.5 text-xs text-muted-foreground">
+                          {(() => {
+                            const key = `${t.botKey}-${t.id}-${i}`;
+                            const open = showFullReasons || expandedReasons.has(key);
+                            return (
+                              <button
+                                type="button"
+                                onClick={() => setExpandedReasons((prev) => {
+                                  const next = new Set(prev);
+                                  next.has(key) ? next.delete(key) : next.add(key);
+                                  return next;
+                                })}
+                                aria-expanded={open}
+                                title={open ? undefined : t.reason}
+                                className={[
+                                  'w-full cursor-pointer rounded text-right transition-colors hover:text-foreground',
+                                  open ? 'whitespace-pre-wrap break-words' : 'block max-w-[220px] truncate',
+                                ].join(' ')}
+                              >
+                                {t.reason}
+                              </button>
+                            );
+                          })()}
+                        </td>
                       </tr>
                     );
                   })}
                 </tbody>
               </table>
-              {sorted.length > 200 && (
-                <p className="text-center text-muted-foreground text-xs py-3">מוצג 200 מתוך {sorted.length} עסקאות</p>
-              )}
             </div>
           </Card>
         )}

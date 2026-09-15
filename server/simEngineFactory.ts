@@ -1,14 +1,17 @@
 // Shared server-side simulation engine — the tick/market-data/persistence
-// plumbing used by all THREE sim bots (intraday multi-timeframe, pro/alg.md,
-// 4H Path/Empirical). A fourth bot, "Legacy" (single-timeframe), existed
-// early on and was deleted along with legacySimEngine.ts/
-// legacySimExecution.ts — this factory itself was written to end three
-// separate copy-pastes of this plumbing (server/simEngine.ts,
+// plumbing used by all FOUR sim bots (intraday multi-timeframe, pro/alg.md,
+// 4H Path/Empirical, Bybit/TrendBreakout). A fifth bot, "Legacy"
+// (single-timeframe), existed early on and was deleted along with
+// legacySimEngine.ts/legacySimExecution.ts — this factory itself was written
+// to end three separate copy-pastes of this plumbing (server/simEngine.ts,
 // legacySimEngine.ts, proSimEngine.ts) down to one, and now backs
-// simEngine.ts / proSimEngine.ts / pathSimEngine.ts, each supplying a small
-// `SimEngineStrategy` that plugs its own evaluation/order-generation
-// functions — from simExecution.ts / proSimExecution.ts /
-// pathSimExecution.ts — into this shared loop.
+// simEngine.ts / proSimEngine.ts / pathSimEngine.ts / bybitSimEngine.ts, each
+// supplying a small `SimEngineStrategy` that plugs its own
+// evaluation/order-generation functions — from simExecution.ts /
+// proSimExecution.ts / prev4hRangeExecution.ts / trendBreakoutExecution.ts —
+// into this shared loop. Because all four run in this one loop, this file is
+// also the single place that can see every bot at once — see
+// crossBotExposure.ts for the one thing that actually needs that.
 import { formatDynamicPrice, validateExposureModel, POSITION_TARGET_PCT, MAX_TOTAL_EXPOSURE_PERCENT, SIM_BASE_DEFAULTS } from '@cde/engine/execution';
 import type { Candle } from '@cde/engine';
 import { getAggregatedPrices } from '@cde/engine/market-data';
@@ -29,6 +32,7 @@ import {
   PendingOrder,
   SimBotConfig
 } from '@cde/engine/execution';
+import { registerBotHoldings, wouldExceedCrossBotCap, otherBotsHolding } from './crossBotExposure';
 
 export type { SimPosition, SimTrade, SimPoint, PendingOrder, SimBotConfig };
 
@@ -89,9 +93,60 @@ export interface ArchivedRun {
   archivedAt: number;
 }
 
-const TICK_MS = 4000;
-const CRYPTO_REFRESH_MS = 60_000; // 60s — Bybit/Binance are fast, no need to hammer CoinGecko
-const CANDLE_REFRESH_MS = 5 * 60_000;
+// 2.5s (2026-09-15, down from 4s), matched to LIVE_PRICE_FRESHNESS_MS below.
+const TICK_MS = 2500;
+// Bulk price refresh — one call for the whole traded universe via
+// getAggregatedPrices() → fetchBybitAllTickers(), which itself caches for
+// BYBIT_TICKER_TTL (2.5s, cryptoPriceAggregator.ts) shared across all four
+// sim bots. Matching that here means every tick asks, but the exchange is
+// only actually hit once per ~2.5s total, not once per bot per tick.
+// 2.5s (2026-09-15, down from 60s) — the 60s value throttled the LOCAL copy
+// of the price (`lastPrices`, read by every stop-loss/ratchet/PnL check via
+// priceFor()) far below what the aggregator itself could already provide,
+// which is what LIVE_PRICE_FRESHNESS_MS below now exists to catch when it
+// still happens (a slow tick, a failed fetch).
+const CRYPTO_REFRESH_MS = 2_500;
+// Candle refresh — same bug shape as CRYPTO_REFRESH_MS above, found and fixed
+// 2026-09-15. marketDataService.ts (TIMEFRAME_SPECS) is ALREADY designed with
+// its own per-timeframe cadence — 5m every 45s, 15m every 90s, 1h every 5min —
+// checked inside getMultiTimeframeData every time it's called. But this outer
+// gate controlled whether it was called AT ALL, and 5 minutes sat well above
+// even the slowest inner cadence, so none of those inner numbers ever
+// mattered: `liveCandles` (the only place buildM5CandlesForSymbol /
+// buildH1CandlesForSymbol read from) went up to ~10 minutes stale (5min gate
+// + one dropped forming-candle period) while confirmEntry5M's chase-penalty
+// and trigger-confirmation logic — meant to react to what the tape is doing
+// RIGHT NOW — evaluated candles from up to 10 minutes ago, alongside a live
+// PRICE (post the CRYPTO_REFRESH_MS fix) fresh to ~3 seconds. 15s — comfortably
+// under the fastest inner TTL (45s for 5m) — makes that inner TTL the real
+// limiter again, the same relationship CRYPTO_REFRESH_MS now has with
+// BYBIT_TICKER_TTL. No rate-limit rationale ever justified 5 minutes here
+// (unlike the removed CRYPTO_REFRESH_MS comment, which had one for CoinGecko);
+// the curated per-bot symbol universe (not the 400+-pair full Bybit universe)
+// is what keeps this cheap either way — see the comment on refreshCryptoPrices.
+const CANDLE_REFRESH_MS = 15_000;
+// Live Freshness Guarantee (2026-09-15): stop-loss, take-profit and the
+// profit ratchet must never be evaluated against a price older than this.
+// Under normal conditions CRYPTO_REFRESH_MS already keeps `lastPrices` this
+// fresh every tick; this is the hard backstop for when it doesn't — a slow
+// tick (candle refresh, GC pause) or a failed fetch that left cryptoRefreshAt
+// stale. See the forced re-fetch in tick(), right before positions mark to
+// market and generateNewOrders evaluates exits.
+const LIVE_PRICE_FRESHNESS_MS = 3_000;
+
+/** Pure predicate behind the Live Freshness Guarantee — pulled out of tick()
+ *  so the 3-second boundary is unit-testable without spinning up an engine,
+ *  mocking fetch, or faking timers. `lastRefreshAt` is the engine's
+ *  `cryptoRefreshAt`; `hasOpenPositions` skips the check entirely when there
+ *  is nothing to mark-to-market or exit-evaluate this tick. */
+export function needsForcedPriceRefresh(
+  lastRefreshAt: number,
+  now: number,
+  hasOpenPositions: boolean,
+  freshnessMs: number = LIVE_PRICE_FRESHNESS_MS
+): boolean {
+  return hasOpenPositions && now - lastRefreshAt > freshnessMs;
+}
 
 /**
  * Everything a strategy's buildEvaluations/generateOrders might need for one
@@ -306,27 +361,39 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
     }, 0);
   }
 
+  // Bulk Spot Ticker Sync — one call for every symbol this bot trades
+  // (`getSymbols()`, the bot's own configured universe: portfolio + candidate
+  // watchlist), not one call per symbol. `force` bypasses CRYPTO_REFRESH_MS
+  // for the Live Freshness Guarantee below; the normal per-tick path still
+  // gates on it so a healthy run makes exactly one aggregator call per tick,
+  // and the aggregator's own BYBIT_TICKER_TTL (2.5s) dedupes the ACTUAL
+  // exchange request across all four bots regardless of how often any one of
+  // them asks.
+  async function refreshCryptoPrices(force = false): Promise<void> {
+    const now = Date.now();
+    if (!force && now - cryptoRefreshAt <= CRYPTO_REFRESH_MS && cryptoData.length > 0) return;
+    try {
+      // Use multi-source aggregator: Bybit → Binance → CoinGecko (rate-gated).
+      // Restrict to the SAME curated liquid universe the real bot trades —
+      // without this filter, getAggregatedPrices() returns EVERY Bybit USDT
+      // pair (400+), and refreshCandles() below then has to fetch 1H/15M/5M
+      // klines for all of them every cycle. That starves the pipeline under
+      // rate limits so only a handful of symbols ever reach READY status,
+      // meaning most SIGNAL evaluations never get a chance to actually fill.
+      const data = await getAggregatedPrices(getSymbols?.());
+      if (data && data.length) {
+        cryptoData = data;
+        cryptoRefreshAt = Date.now();
+        for (const c of data) lastPrices[toBaseAsset(c.symbol)] = c.current_price;
+      }
+    } catch {
+      /* keep last-known-good prices */
+    }
+  }
+
   async function refreshMarketData() {
     const now = Date.now();
-    if (now - cryptoRefreshAt > CRYPTO_REFRESH_MS || cryptoData.length === 0) {
-      try {
-        // Use multi-source aggregator: Bybit → Binance → CoinGecko (rate-gated).
-        // Restrict to the SAME curated liquid universe the real bot trades —
-        // without this filter, getAggregatedPrices() returns EVERY Bybit USDT
-        // pair (400+), and refreshCandles() below then has to fetch 1H/15M/5M
-        // klines for all of them every cycle. That starves the pipeline under
-        // rate limits so only a handful of symbols ever reach READY status,
-        // meaning most SIGNAL evaluations never get a chance to actually fill.
-        const data = await getAggregatedPrices(getSymbols?.());
-        if (data && data.length) {
-          cryptoData = data;
-          cryptoRefreshAt = now;
-          for (const c of data) lastPrices[toBaseAsset(c.symbol)] = c.current_price;
-        }
-      } catch {
-        /* keep last-known-good prices */
-      }
-    }
+    await refreshCryptoPrices();
     // Candle refresh is NON-BLOCKING: the tick must return a snapshot immediately
     // (so the bot shows as running and history grows) even before candles load.
     // Candles fill in the background; trading begins once they are available.
@@ -360,10 +427,11 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
 
   // TICK_MS is the interval the worker POLLS on, not the cadence snapshots
   // actually land at: a tick whose market-data refresh takes ~16s makes the
-  // caller's `tickInProgress` guard skip four intervals, so snapshots arrive
-  // ~20s apart. Advertising `now + TICK_MS` therefore promised a tick in 4s
-  // that took 20s, and the client's countdown sat pinned at its floor for the
-  // remaining ~16s — which reads as a frozen page. Measure the real thing.
+  // caller's `tickInProgress` guard skip several intervals, so snapshots
+  // arrive ~20s apart. Advertising `now + TICK_MS` therefore promised a tick
+  // in 2.5s that took 20s, and the client's countdown sat pinned at its floor
+  // for the remaining time — which reads as a frozen page. Measure the real
+  // thing.
   let lastTickDurationMs = 0;
 
   // Confidence floor this engine is gating on right now — config override when
@@ -401,6 +469,19 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
     }
     await refreshMarketData();
     for (const c of cryptoData) lastPrices[toBaseAsset(c.symbol)] = c.current_price;
+
+    // Live Freshness Guarantee: nothing below this point — mark-to-market,
+    // stop-loss, take-profit, or the profit ratchet — may run against a price
+    // older than LIVE_PRICE_FRESHNESS_MS (3s). refreshMarketData() above
+    // already refreshes every tick under normal conditions; this is what
+    // fires when it didn't (a slow tick — candle refresh, GC pause — or the
+    // fetch inside it failed and fell through to "keep last-known-good"). A
+    // forced call here bypasses CRYPTO_REFRESH_MS entirely and blocks this
+    // tick's exit evaluation on a genuinely fresh bulk fetch rather than
+    // computing SL/ratchet against however old `lastPrices` happens to be.
+    if (needsForcedPriceRefresh(cryptoRefreshAt, Date.now(), positions.length > 0)) {
+      await refreshCryptoPrices(true);
+    }
 
     // Perpetual funding — one request for the whole universe, cached 30 min.
     // Never throws: returns an empty map on any failure.
@@ -483,7 +564,25 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
     const we = evaluations.filter((r) => r.willExecute).length;
     console.log(`${strategy.logPrefix} evals=${evaluations.length} willExecute=${we} pending=${pending.length} pos=${positions.length} cash=${cash.toFixed(2)}`);
 
-    const newOrders = strategy.generateOrders(input, evaluations);
+    // Publish this bot's currently open symbols BEFORE asking it for new
+    // entries, so the cross-bot check below sees this tick's true starting
+    // state — not last tick's, and not polluted by orders this tick is about
+    // to place. See crossBotExposure.ts.
+    registerBotHoldings(strategy.id, positions.map((p) => p.symbol));
+
+    const generatedOrders = strategy.generateOrders(input, evaluations);
+    // Cross-bot symbol concentration cap (2026-09-15): every one of the four
+    // sim bots independently approved a 10%-of-equity LA position on
+    // 2026-09-15 — three bots, one symbol, a combined bet the per-bot risk
+    // model never saw as single. `generateOrders` returns entries only (exits
+    // are handled elsewhere, in fillDueOrders/evaluatePositionExit), so every
+    // order here is a NEW position candidate and safe to gate on.
+    const newOrders = generatedOrders.filter((o) => {
+      if (!wouldExceedCrossBotCap(o.symbol, strategy.id)) return true;
+      const holders = otherBotsHolding(o.symbol, strategy.id);
+      console.log(`${strategy.logPrefix} cross-bot cap — ${o.symbol} already held by ${holders.join(', ')}, skipping new entry`);
+      return false;
+    });
     // Slot preemption: an evaluation that claimed a full slot by evicting the
     // weakest resting entry carries its id — cancel that incumbent, but only now
     // that its replacement actually placed (a downstream budget refusal leaves
