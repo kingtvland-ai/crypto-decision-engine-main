@@ -43,6 +43,30 @@ export {
 } from './services/fundingRate';
 export type { FundingSnapshot, FundingVerdict } from './services/fundingRate';
 
+// ── Derivatives regime: Open Interest + Long/Short ratio + sell-pressure ─────
+export {
+  classifyOpenInterestTrend,
+  classifyLongShortSentiment,
+  evaluateDerivativesRegime,
+  detectSellPressure,
+  OI_TREND_THRESHOLD_PCT,
+  LONG_SHORT_CROWDED_LONG_RATIO,
+  LONG_SHORT_CROWDED_SHORT_RATIO,
+  SELL_PRESSURE_REL_VOLUME,
+  SELL_PRESSURE_MIN_DROP_PCT
+} from './services/derivativesRegime';
+export type {
+  OpenInterestPoint,
+  LongShortPoint,
+  OpenInterestTrend,
+  OpenInterestVerdict,
+  LongShortSentiment,
+  DerivativesSnapshot,
+  DerivativesRegimeVerdict,
+  SellPressureInput,
+  SellPressureVerdict
+} from './services/derivativesRegime';
+
 // ── Multi-Timeframe intraday engine ──────────────────────────────────────────
 export type { IntradayDecisionInput, IntradayDecision } from './services/intradayEngine';
 export { evaluateIntradayDecision } from './services/intradayEngine';

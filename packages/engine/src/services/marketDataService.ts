@@ -17,6 +17,7 @@
 import { Candle } from './tradeEngine';
 import { toBybitSymbol, toBaseAsset } from './assetUniverse';
 import type { FundingSnapshot } from './fundingRate';
+import type { DerivativesSnapshot, OpenInterestPoint, LongShortPoint } from './derivativesRegime';
 
 // ── Endpoints ────────────────────────────────────────────────────────────────
 const BYBIT_PUBLIC_BASE = 'https://api.bybit.com';
@@ -271,6 +272,187 @@ export async function fetchFundingRates(): Promise<Map<string, FundingSnapshot>>
 export function clearFundingCache(): void {
   fundingPromise = null;
   fundingFetchedAt = 0;
+}
+
+// ── Derivatives snapshot: Open Interest + Long/Short ratio ──────────────────
+// Bybit's own free public endpoints (2026-09-16, operator request — the
+// "Bybit Native Derivatives Layer" of the Macro Layer). Unlike funding
+// (fetchFundingRates above), Bybit has no bulk "every symbol" variant for
+// these two, so each is one request PER SYMBOL — batched with limited
+// concurrency, the same pattern getUniverseMarketData already uses for MTF
+// candles, so a curated ~60-symbol universe stays cheap and a 400+-symbol one
+// would not (see the rate-limit warning on that function).
+const BYBIT_DERIVATIVES_TTL_MS = 15 * 60 * 1000; // OI/L-S move slowly; no need to hammer
+const derivativesCache = new Map<string, { snapshot: DerivativesSnapshot; fetchedAt: number }>();
+
+async function fetchOpenInterestForSymbol(bybitSymbol: string): Promise<OpenInterestPoint[]> {
+  try {
+    const res = await timedFetch(
+      `${BYBIT_PUBLIC_BASE}/v5/market/open-interest?category=linear&symbol=${bybitSymbol}&intervalTime=1h&limit=6`
+    );
+    if (!res.ok) return [];
+    const data = (await res.json()) as {
+      retCode?: number;
+      result?: { list?: { openInterest?: string; timestamp?: string }[] };
+    };
+    if (data.retCode !== 0 || !data.result?.list) return [];
+    return data.result.list
+      .map((row) => ({ openInterest: Number(row.openInterest), timestamp: Number(row.timestamp) }))
+      .filter((p) => Number.isFinite(p.openInterest) && Number.isFinite(p.timestamp));
+  } catch {
+    return [];
+  }
+}
+
+async function fetchLongShortForSymbol(bybitSymbol: string): Promise<LongShortPoint | undefined> {
+  try {
+    const res = await timedFetch(
+      `${BYBIT_PUBLIC_BASE}/v5/market/account-ratio?category=linear&symbol=${bybitSymbol}&period=1h&limit=1`
+    );
+    if (!res.ok) return undefined;
+    const data = (await res.json()) as {
+      retCode?: number;
+      result?: { list?: { buyRatio?: string; sellRatio?: string; timestamp?: string }[] };
+    };
+    const row = data.retCode === 0 ? data.result?.list?.[0] : undefined;
+    if (!row) return undefined;
+    const buyRatio = Number(row.buyRatio);
+    const sellRatio = Number(row.sellRatio);
+    const timestamp = Number(row.timestamp);
+    if (!Number.isFinite(buyRatio) || !Number.isFinite(timestamp)) return undefined;
+    return { buyRatio, sellRatio: Number.isFinite(sellRatio) ? sellRatio : 1 - buyRatio, timestamp };
+  } catch {
+    return undefined;
+  }
+}
+
+// ── Spot + cross-exchange relative volume — the OTC blind-spot fix ──────────
+// (2026-09-16, two rounds). getMultiTimeframeData defaults to LINEAR candles
+// (primaryCategory in fetchTimeframe), so the H1 series the sell-pressure
+// check already has is derivatives-venue volume, not spot. A dump that never
+// touches the derivatives book (OTC, exchange-to-exchange) can still show up
+// as unusual volume once it actually hits an open market — SPOT (first
+// round) or a DEEPER exchange (second round, below).
+const RELVOL_LOOKBACK = 20;
+
+function relativeVolumeFromSeries(volumesOldestFirst: number[], lookback: number = RELVOL_LOOKBACK): number | undefined {
+  if (volumesOldestFirst.length < lookback + 1) return undefined;
+  const last = volumesOldestFirst[volumesOldestFirst.length - 1];
+  const history = volumesOldestFirst.slice(-(lookback + 1), -1);
+  const avg = history.reduce((s, v) => s + v, 0) / history.length;
+  if (!(avg > 0)) return undefined;
+  return last / avg;
+}
+
+async function fetchSpotRelativeVolumeForSymbol(bybitSymbol: string): Promise<number | undefined> {
+  try {
+    const res = await timedFetch(
+      `${BYBIT_PUBLIC_BASE}/v5/market/kline?category=spot&symbol=${bybitSymbol}&interval=60&limit=${RELVOL_LOOKBACK + 1}`
+    );
+    if (!res.ok) return undefined;
+    const data = (await res.json()) as { retCode?: number; result?: { list?: string[][] } };
+    if (data.retCode !== 0 || !data.result?.list) return undefined;
+    // Bybit returns newest-first; oldest-to-newest for a plain windowed average.
+    const volumes = data.result.list.slice().reverse().map((row) => Number(row[5])).filter(Number.isFinite);
+    return relativeVolumeFromSeries(volumes);
+  } catch {
+    return undefined;
+  }
+}
+
+// Cross-exchange leg (2026-09-16, second round). Measured live across our own
+// traded universe (61 symbols): Binance's spot book runs 2-8x deeper than
+// Bybit's on every symbol checked, including LA specifically (7.6x) — one of
+// the two symbols in the 2026-09-15 incident this whole Macro Layer answers.
+// A large seller routes through the deeper venue first; on a THIN Bybit
+// symbol, Bybit's own volume signal (spot or linear) can be too noisy (small
+// base) to clearly show a real move that Binance's cleaner, deeper book
+// already reflects. 50/61 of this repo's traded universe is listed on
+// Binance — the other 11 (newer/smaller listings) simply abstain here, same
+// as any other missing-data case.
+async function fetchBinanceRelativeVolumeForSymbol(bybitSymbol: string): Promise<number | undefined> {
+  try {
+    const res = await timedFetch(
+      `${BINANCE_PUBLIC_BASE}/klines?symbol=${bybitSymbol}&interval=1h&limit=${RELVOL_LOOKBACK + 1}`
+    );
+    if (!res.ok) return undefined; // includes "not listed on Binance" (400) — abstain, don't throw
+    const rows = (await res.json()) as unknown[][];
+    if (!Array.isArray(rows) || !rows.length) return undefined;
+    // Binance returns oldest-first already, unlike Bybit.
+    const volumes = rows.map((row) => Number(row[5])).filter(Number.isFinite);
+    return relativeVolumeFromSeries(volumes);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Open Interest history + Long/Short ratio + spot relative volume + Binance
+ * cross-exchange relative volume for every symbol in `symbols`, batched at
+ * limited concurrency (four requests per symbol: linear OI, linear
+ * account-ratio, Bybit spot kline, Binance kline). A symbol missing any one
+ * of the four (no linear perpetual, delisted, not listed on the other
+ * exchange, etc.) returns a partial snapshot rather than throwing — every
+ * consumer (derivativesRegime.ts) already treats missing data as "abstain,
+ * never block", matching the funding gate's own rule.
+ *
+ * Per-symbol 15-minute cache: a symbol re-requested inside the TTL is served
+ * from cache with no network call, so calling this every tick (like
+ * fetchFundingRates) costs nothing extra once warm.
+ */
+export async function fetchDerivativesSnapshots(
+  symbols: string[],
+  opts: { concurrency?: number } = {}
+): Promise<Map<string, DerivativesSnapshot>> {
+  const out = new Map<string, DerivativesSnapshot>();
+  const now = Date.now();
+  const toFetch: string[] = [];
+
+  for (const raw of symbols) {
+    const sym = toBybitSymbol(raw);
+    if (!sym) continue;
+    const cached = derivativesCache.get(sym);
+    if (cached && now - cached.fetchedAt < BYBIT_DERIVATIVES_TTL_MS) {
+      out.set(sym, cached.snapshot);
+    } else {
+      toFetch.push(sym);
+    }
+  }
+
+  const concurrency = opts.concurrency ?? 4;
+  for (let i = 0; i < toFetch.length; i += concurrency) {
+    const batch = toFetch.slice(i, i + concurrency);
+    const results = await Promise.all(
+      batch.map(async (sym) => {
+        const [openInterestHistory, longShort, spotRelativeVolume, crossExchangeRelativeVolume] = await Promise.all([
+          fetchOpenInterestForSymbol(sym),
+          fetchLongShortForSymbol(sym),
+          fetchSpotRelativeVolumeForSymbol(sym),
+          fetchBinanceRelativeVolumeForSymbol(sym)
+        ]);
+        const snapshot: DerivativesSnapshot = {
+          symbol: sym,
+          openInterestHistory,
+          longShort,
+          spotRelativeVolume,
+          crossExchangeRelativeVolume,
+          fetchedAt: Date.now()
+        };
+        return { sym, snapshot };
+      })
+    );
+    for (const { sym, snapshot } of results) {
+      derivativesCache.set(sym, { snapshot, fetchedAt: Date.now() });
+      out.set(sym, snapshot);
+    }
+  }
+
+  return out;
+}
+
+/** Test seam — drops the cached derivatives snapshots. */
+export function clearDerivativesCache(): void {
+  derivativesCache.clear();
 }
 
 async function binanceListsSymbol(pair: string): Promise<boolean> {

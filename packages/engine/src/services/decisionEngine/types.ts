@@ -21,6 +21,7 @@
 // does NOT bind it inside this module — hence "Cannot find name 'Candle'".
 import type { Candle } from '../tradeEngine';
 import type { ClosedTradeRecord } from '../adaptiveRisk';
+import type { DerivativesSnapshot } from '../derivativesRegime';
 
 // ── Shared Types ──────────────────────────────────────────────────────────────
 
@@ -46,6 +47,11 @@ export interface MarketDataSnapshot {
    *  funding gate abstains when it is missing or stale, so a feed outage costs
    *  the engines an opinion, not their ability to trade. */
   funding?: { lastFundingRate: number; at: number };
+  /** Macro Layer (2026-09-16): Open Interest history + Long/Short ratio for
+   *  this symbol, from Bybit's own free public endpoints. Same rule as
+   *  `funding` — optional, abstains rather than blocks when absent. See
+   *  derivativesRegime.ts. */
+  derivatives?: DerivativesSnapshot;
 }
 
 /** Portfolio risk statistics — shared across all engines */

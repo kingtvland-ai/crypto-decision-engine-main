@@ -124,7 +124,14 @@ const intradayStrategy: SimEngineStrategy = {
           quoteVolume24h: snap.liquidity?.quoteVolume24h ?? 0,
           quoteVolume24hSpot: snap.liquidity?.quoteVolume24hSpot ?? 0,
           livePrice: snap.livePrice,
-          priceChange24h
+          priceChange24h,
+          // Macro Layer (2026-09-16). Both maps are keyed by the uppercase
+          // suffixed symbol (e.g. "BTCUSDT"); a missing entry (feed outage,
+          // or a symbol with no Bybit linear perpetual) leaves this
+          // undefined, and every downstream gate abstains rather than blocks
+          // on that — see fundingRate.ts / derivativesRegime.ts.
+          funding: input.fundingBySymbol.get(symbol.toUpperCase()),
+          derivatives: input.derivativesBySymbol.get(symbol.toUpperCase())
         },
         // Simulation-only param layer — NOT the real bot's (tradingWorker.ts's
         // scan() passes DEFAULT_INTRADAY_PARAMS unmodified). Carries the sim's

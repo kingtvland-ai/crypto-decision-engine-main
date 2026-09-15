@@ -21,6 +21,11 @@ export type DecisionGate =
   | 'EXPOSURE'
   | 'NO_REGIME'
   | 'VOLATILITY'
+  // Macro Layer (2026-09-16): the sell-pressure proxy (volume-confirmed drop
+  // on contracting Open Interest — the free substitute for Whale Alert) or
+  // the pre-existing funding-crowding veto (fundingRate.ts, calibrated but
+  // unwired until this gate). See derivativesRegime.ts / intradayEngine.ts.
+  | 'MACRO'
   | 'LIQUIDITY'
   | 'SPREAD'
   | 'NO_SETUP'

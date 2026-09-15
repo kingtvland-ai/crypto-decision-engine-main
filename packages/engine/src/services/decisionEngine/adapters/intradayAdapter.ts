@@ -203,6 +203,8 @@ class RunEngineStage implements PipelineStage<DecisionContext> {
       quoteVolume24h: context.marketData.quoteVolume24h,
       quoteVolume24hSpot: context.marketData.quoteVolume24hSpot,
       livePrice: context.marketData.livePrice ?? context.currentPrice,
+      fundingSnapshot: context.marketData.funding,
+      derivativesSnapshot: context.marketData.derivatives,
       portfolio: context.portfolio as PortfolioRiskStats,
       openPositions: context.openPositions,
       // Merge, don't replace: context.params always carries at least the

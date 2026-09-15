@@ -11,8 +11,14 @@
  *   - the backtest harness (intradayBacktest.ts) over historical 5M candles
  *
  * Gate order (§55) — the FIRST failing gate is reported as the block reason:
- *   NO_DATA → CIRCUIT_BREAKER → EXPOSURE → NO_REGIME → VOLATILITY →
+ *   NO_DATA → CIRCUIT_BREAKER → EXPOSURE → NO_REGIME → VOLATILITY → MACRO →
  *   LIQUIDITY → SPREAD → NO_SETUP → NO_ENTRY → RISK → COST → DATA_MISMATCH
+ *
+ * MACRO (2026-09-16) is the Macro Layer: Bybit's own free Open Interest,
+ * Long/Short ratio and funding-rate data. It can ONLY refuse a trade
+ * (sell-pressure proxy, funding veto) or trim its size (funding crowding) —
+ * missing/partial derivatives data always abstains, never blocks, the same
+ * rule fundingRate.ts already established. See derivativesRegime.ts.
  *
  * RISK before COST is deliberate: buildRiskPlan produces the FINAL, executed
  * entry / SL / TP1 (dynamic ATR/structure SL, TP with a 3% floor), and the
@@ -22,7 +28,7 @@
  * the order.
  */
 
-import { Candle, PortfolioRiskStats, formatDynamicPrice } from './tradeEngine';
+import { Candle, PortfolioRiskStats, formatDynamicPrice, computeRelativeVolume } from './tradeEngine';
 import { detectRegime1H, Regime1H } from './intradayRegime';
 import { detectSetup15M, Setup15M } from './intradaySetup';
 import { confirmEntry5M, Entry5M } from './intradayEntry';
@@ -31,6 +37,10 @@ import { isBuyingSurge, SURGE_VOLUME_LOOKBACK, measureStopNoise } from './calmRe
 import { DEFAULT_INTRADAY_PARAMS, DecisionGate, Direction, IntradayParams, SetupType,
   withParams
 } from './intradayParams';
+import type { FundingSnapshot } from './fundingRate';
+import { evaluateFundingGate } from './fundingRate';
+import type { DerivativesSnapshot } from './derivativesRegime';
+import { evaluateDerivativesRegime, detectSellPressure } from './derivativesRegime';
 
 export type TradeType = 'SPOT' | 'FUTURES';
 export type DecisionOutcome = 'SIGNAL' | 'NO_SIGNAL' | 'NO_DATA';
@@ -64,6 +74,14 @@ export interface IntradayDecisionInput {
    *  taker + full slippage; a caller that fills at market should pass false so
    *  the gate prices the real cost rather than the cheaper resting fill. */
   entryIsLimit?: boolean;
+  /** Macro Layer (§MACRO, 2026-09-16): Bybit Open Interest + Long/Short ratio
+   *  for this symbol. Optional — absent/partial data makes the MACRO gate a
+   *  no-op (abstain, never block on missing data). See derivativesRegime.ts. */
+  derivativesSnapshot?: DerivativesSnapshot;
+  /** Macro Layer: perpetual funding rate for this symbol (already fetched by
+   *  every caller for funding ACCRUAL — see fetchFundingRates — just not
+   *  previously read for a trading decision). Optional, same abstain rule. */
+  fundingSnapshot?: FundingSnapshot;
 }
 
 export interface IntradayDecision {
@@ -235,6 +253,42 @@ export function evaluateIntradayDecision(input: IntradayDecisionInput): Intraday
     logs.push(`[${symbol}] VOLATILITY — EXTREME; Futures חסום, Spot רק במסלול מחמיר (§10)`);
   }
 
+  // ── GATE 6: MACRO — sell-pressure proxy (§MACRO, 2026-09-16) ────────────────
+  // A volume-confirmed sharp drop on CONTRACTING open interest — the
+  // zero-cost Bybit-only substitute for a large exchange-bound whale
+  // transfer (Whale Alert has no free API tier; verified 2026-09-15). Runs
+  // BEFORE the setup/entry layers, direction-agnostic: this asset should not
+  // be traded right now at all, regardless of what setup it would have
+  // produced. Missing OI data abstains — see detectSellPressure's own doc.
+  const h1RelativeVolume = computeRelativeVolume(input.h1, 20, now);
+  const h1Last = input.h1[input.h1.length - 1];
+  const h1Prev = input.h1[input.h1.length - 2];
+  const h1PriceChangePercent =
+    h1Last && h1Prev && h1Prev.close > 0 ? ((h1Last.close - h1Prev.close) / h1Prev.close) * 100 : 0;
+  const sellPressure = detectSellPressure({
+    relativeVolume: h1RelativeVolume ?? 0,
+    priceChangePercent: h1PriceChangePercent,
+    openInterestHistory: input.derivativesSnapshot?.openInterestHistory,
+    // OTC blind-spot partial fix (2026-09-16) — an independent OR alongside
+    // falling OI. See DerivativesSnapshot.spotRelativeVolume's doc comment.
+    spotRelativeVolume: input.derivativesSnapshot?.spotRelativeVolume,
+    // OTC blind-spot fix, round 2 (2026-09-16) — Binance's deeper book as a
+    // third independent OR alongside OI and Bybit spot volume.
+    crossExchangeRelativeVolume: input.derivativesSnapshot?.crossExchangeRelativeVolume
+  });
+  if (sellPressure.blocked) {
+    logs.push(`[${symbol}] ${sellPressure.reason}`);
+    return finalize(symbol, 'MACRO', 'NO_SIGNAL', regime, null, null, null, null, logs, params, now, mkFunnel('MACRO', 'NO_SIGNAL', null, null), null);
+  }
+  // Advisory only — OI trend + Long/Short crowding, logged against the
+  // regime's own bias (the closest thing to a direction known this early).
+  // Never blocks; a caller wanting the raw verdict can compute it directly
+  // from input.derivativesSnapshot via evaluateDerivativesRegime.
+  if (regime.bias !== 'NONE') {
+    const derivRegime = evaluateDerivativesRegime(input.derivativesSnapshot, regime.bias);
+    for (const note of derivRegime.notes) logs.push(`[${symbol}] MACRO — ${note}`);
+  }
+
   // ── LAYER B: 15M SETUP ──────────────────────────────────────────────────────
   const setup = detectSetup15M(input.m15, regime, params);
   if (setup.setupType === 'NONE') {
@@ -354,9 +408,32 @@ export function evaluateIntradayDecision(input: IntradayDecisionInput): Intraday
   // `_sizingMultiplier` into params from recent closed-trade performance.
   // The live scan() path passes no multiplier → 1 (base sizing, unchanged).
   const rawSizing = (input.params as Record<string, unknown> | undefined)?._sizingMultiplier;
-  const sizingMultiplier = typeof rawSizing === 'number' && Number.isFinite(rawSizing)
+  const adaptiveSizingMultiplier = typeof rawSizing === 'number' && Number.isFinite(rawSizing)
     ? Math.min(1, Math.max(0, rawSizing))
     : 1;
+
+  // Funding gate (fundingRate.ts) — built and calibrated (3,156-signal A/B
+  // study, scripts/fundingOrthogonality.ts) well before this session, but
+  // never actually WIRED into a live decision until now (2026-09-16, part of
+  // the Macro Layer addition). Direction is known here (setup.direction),
+  // unlike at GATE 6 above. Abstains on missing/stale funding — never blocks
+  // on absent data.
+  const isLongDirection = setup.direction === 'LONG';
+  const fundingVerdict = evaluateFundingGate(
+    input.fundingSnapshot,
+    isLongDirection ? 'LONG' : 'SHORT',
+    now
+  );
+  if (fundingVerdict.kind === 'veto') {
+    logs.push(`[${symbol}] ${fundingVerdict.reason}`);
+    return finalize(symbol, 'MACRO', 'NO_SIGNAL', regime, setup, entry, null, null, logs, params, now, mkFunnel('MACRO', 'NO_SIGNAL', setup, entry), null);
+  }
+  if (fundingVerdict.kind === 'trim') logs.push(`[${symbol}] ${fundingVerdict.reason}`);
+  const fundingSizeMultiplier = fundingVerdict.kind === 'trim' || fundingVerdict.kind === 'allow'
+    ? fundingVerdict.sizeMultiplier
+    : 1;
+  const sizingMultiplier = adaptiveSizingMultiplier * fundingSizeMultiplier;
+
   const risk = buildRiskPlan({
     symbol,
     direction: setup.direction as Exclude<Direction, 'NONE'>,

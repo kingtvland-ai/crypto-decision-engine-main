@@ -18,8 +18,9 @@ import { getAggregatedPrices } from '@cde/engine/market-data';
 import type { CryptoData } from '@cde/engine';
 import { computeAtr5, SignalEvaluation } from '@cde/engine';
 import type { MultiTimeframeSnapshot } from '@cde/engine/market-data';
-import { getUniverseMarketData, fetchFundingRates } from '@cde/engine/market-data';
+import { getUniverseMarketData, fetchFundingRates, fetchDerivativesSnapshots } from '@cde/engine/market-data';
 import type { FundingSnapshot } from '@cde/engine/analysis';
+import type { DerivativesSnapshot } from '@cde/engine/analysis';
 import { toBaseAsset } from '@cde/engine/market-data';
 import {
   fillDueOrders,
@@ -133,6 +134,14 @@ const CANDLE_REFRESH_MS = 15_000;
 // stale. See the forced re-fetch in tick(), right before positions mark to
 // market and generateNewOrders evaluates exits.
 const LIVE_PRICE_FRESHNESS_MS = 3_000;
+// Macro Layer derivatives outer gate (2026-09-16) — deliberately NOT a
+// freshness guarantee like LIVE_PRICE_FRESHNESS_MS above. The MACRO gate
+// already abstains on missing/stale derivatives data (see
+// derivativesRegime.ts), so there is nothing here that needs forcing; this
+// value only controls how often the (non-blocking) background refresh is
+// even attempted. fetchDerivativesSnapshots' own 15-min per-symbol TTL does
+// the actual freshness work.
+const DERIVATIVES_REFRESH_MS = 15_000;
 
 /** Pure predicate behind the Live Freshness Guarantee — pulled out of tick()
  *  so the 3-second boundary is unit-testable without spinning up an engine,
@@ -189,6 +198,10 @@ export interface StrategyTickInput {
    *  Empty when the feed is unavailable — the funding gate abstains, so an
    *  outage costs an opinion rather than the ability to trade. */
   fundingBySymbol: Map<string, FundingSnapshot>;
+  /** Macro Layer (2026-09-16): Open Interest + Long/Short ratio, keyed by
+   *  Bybit symbol (e.g. "BTCUSDT"). Empty/missing entries abstain — same
+   *  never-block-on-missing-data rule as fundingBySymbol. */
+  derivativesBySymbol: Map<string, DerivativesSnapshot>;
   cash: number;
   exitCooldown: Record<string, number>;
   priceFor: (symbol: string) => number | undefined;
@@ -268,6 +281,23 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
   let cryptoRefreshAt = 0;
   let candleRefreshAt = 0;
   let candleRefreshing = false;
+  // Macro Layer derivatives (2026-09-16) — same non-blocking pattern as
+  // liveCandles/candleRefreshing right above, and for the identical reason.
+  // Found 2026-09-16 during a readiness audit: this was ORIGINALLY written as
+  // `await fetchDerivativesSnapshots(...)` directly in tick(), sitting between
+  // the Live Freshness Guarantee and the position mark-to-market/exit-check
+  // loop below — a real bug, not a style choice. fetchDerivativesSnapshots is
+  // up to 4 requests PER SYMBOL; a cold cache (server restart, or the whole
+  // universe's 15-min TTLs co-expiring, since they were mostly seeded in the
+  // same startup window and therefore roughly co-expire ~every 15 minutes
+  // afterward too) could block SL/TP/ratchet evaluation for open positions by
+  // many seconds — undermining the exact guarantee LIVE_PRICE_FRESHNESS_MS
+  // exists to provide. The MACRO gate already treats missing/stale derivatives
+  // data as "abstain" (see derivativesRegime.ts), so there is no correctness
+  // reason for this to be synchronous at all.
+  let derivativesBySymbol: Map<string, DerivativesSnapshot> = new Map();
+  let derivativesRefreshAt = 0;
+  let derivativesRefreshing = false;
   let initialAmount = 10000;
   let runId: string | null = null;
 
@@ -406,6 +436,20 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
           candleRefreshAt = Date.now();
         });
     }
+    // Macro Layer derivatives — same non-blocking shape as candles above, for
+    // the same reason (see the field declarations' doc comment). The outer
+    // gate here just avoids kicking off the background fetch needlessly on
+    // every tick; fetchDerivativesSnapshots' own per-symbol 15-min TTL does
+    // the real work of only fetching what's actually stale.
+    if (now - derivativesRefreshAt > DERIVATIVES_REFRESH_MS && !derivativesRefreshing) {
+      derivativesRefreshing = true;
+      refreshDerivatives()
+        .catch(() => {})
+        .finally(() => {
+          derivativesRefreshing = false;
+          derivativesRefreshAt = Date.now();
+        });
+    }
   }
 
   async function refreshCandles() {
@@ -422,6 +466,15 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
       liveCandles = next;
     } catch {
       /* keep last-known-good MTF data on failure */
+    }
+  }
+
+  async function refreshDerivatives() {
+    if (!cryptoData.length) return;
+    try {
+      derivativesBySymbol = await fetchDerivativesSnapshots(cryptoData.map((c) => c.symbol.toUpperCase()));
+    } catch {
+      /* keep last-known-good derivatives data on failure */
     }
   }
 
@@ -487,6 +540,15 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
     // Never throws: returns an empty map on any failure.
     const fundingBySymbol = await fetchFundingRates();
 
+    // Macro Layer (2026-09-16): Open Interest + Long/Short ratio + spot/
+    // cross-exchange volume, per symbol. Refreshed in the BACKGROUND by
+    // refreshMarketData() above (see refreshDerivatives/derivativesRefreshing
+    // right next to candleRefreshing) — reading the closure variable here is
+    // synchronous and never blocks this tick, unlike an earlier version of
+    // this line that awaited the fetch directly and could stall SL/TP/ratchet
+    // evaluation below by several seconds on a cold cache. Found and fixed
+    // 2026-09-16 during a readiness audit.
+
     // Mark-to-market live price updates on each tick for open positions
     positions = positions.map((p) => {
       const live = priceFor(p.symbol) ?? p.currentPrice;
@@ -550,6 +612,7 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
       closedTradeMetrics,
       fearGreedIndex: fearGreed,
       fundingBySymbol,
+      derivativesBySymbol,
       cash,
       exitCooldown,
       priceFor,
