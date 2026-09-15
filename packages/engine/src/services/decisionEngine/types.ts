@@ -22,6 +22,7 @@
 import type { Candle } from '../tradeEngine';
 import type { ClosedTradeRecord } from '../adaptiveRisk';
 import type { DerivativesSnapshot } from '../derivativesRegime';
+import type { VolatilityProfile } from '../../types/volatilityProfile';
 
 // ── Shared Types ──────────────────────────────────────────────────────────────
 
@@ -123,6 +124,13 @@ export interface DecisionContext {
      *  `config.proLimitEntries === true` here. Absent → engine default (true =
      *  the live bot / backtest, which do rest limits). */
     entryIsLimit?: boolean;
+    /** Deterministic Dynamic Volatility Profile store (sim only — see
+     *  server/volatilityProfileStore.ts). Absent = every adapter's volatility
+     *  ladder is a no-op, unchanged from before this field existed. Threaded
+     *  through here rather than a top-level DecisionContext field because
+     *  this is the same "operator config, not market data" bucket
+     *  maxPositions/entryIsLimit already live in. */
+    volatilityProfiles?: Map<string, VolatilityProfile>;
   };
 }
 

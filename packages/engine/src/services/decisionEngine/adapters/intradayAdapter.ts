@@ -227,7 +227,8 @@ class RunEngineStage implements PipelineStage<DecisionContext> {
       // sims pass `proLimitEntries === true`; when it's false the gate now
       // prices the taker fee + full slippage a market entry really pays instead
       // of the cheaper resting-limit assumption. Absent → engine default (true).
-      entryIsLimit: context.config?.entryIsLimit
+      entryIsLimit: context.config?.entryIsLimit,
+      volatilityProfiles: context.config?.volatilityProfiles
     };
 
     const result = evaluateIntradayDecision(input);

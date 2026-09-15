@@ -315,6 +315,54 @@ export function buildDynamicRiskReference(
 
 // ── §28 logging (context only — never phrased as a trading recommendation) ──
 
+// ── ladder resolution — the single "try it, fall back to null" entry point ──
+
+/** The two numbers a bot's SL/TP computation actually needs, once a valid
+ *  profile is available. Never fabricated — see resolveVolatilityLadder. */
+export interface VolatilityLadder {
+  stopPct: number;
+  targetPct: number;
+  regime: VolatilityRegime;
+}
+
+/**
+ * The one place every bot's SL/TP wiring calls into this module. Looks up
+ * the profile, builds context from the last CLOSED 1H candle, and returns
+ * the dynamic risk/opportunity distances as a ready-to-use ladder — or
+ * `null` on ANY failure (no profile, insufficient history, invalid profile,
+ * missing/degenerate candle). Never throws.
+ *
+ * `null` is not an error to react to — it's the signal for the caller to
+ * fall through to its own existing SL/TP computation unchanged. This
+ * function is where that "try it, else keep doing what you were doing"
+ * policy lives exactly once, so no bot re-implements the fallback logic.
+ */
+export function resolveVolatilityLadder(args: {
+  profiles: Map<string, VolatilityProfile>;
+  market: VolatilityMarket;
+  symbol: string;
+  side: VolatilitySide;
+  lastClosedH1: VolatilityInputCandle | undefined;
+}): VolatilityLadder | null {
+  const { profiles, market, symbol, side, lastClosedH1 } = args;
+  if (!lastClosedH1) return null;
+
+  const profileResult = getVolatilityProfile(profiles, market, symbol);
+  if (isVolatilityErr(profileResult)) return null;
+
+  const contextResult = buildVolatilityContext(market, symbol, lastClosedH1, profileResult.value);
+  if (isVolatilityErr(contextResult)) return null;
+
+  const refResult = buildDynamicRiskReference(side, profileResult.value, contextResult.value.volatilityFactor);
+  if (isVolatilityErr(refResult)) return null;
+
+  return {
+    stopPct: refResult.value.dynamicRiskPct,
+    targetPct: refResult.value.dynamicOpportunityPct,
+    regime: contextResult.value.regime
+  };
+}
+
 export function formatVolatilityProfileLog(context: VolatilityContext, profile: VolatilityProfile): string {
   return (
     `[volatility-profile] market=${context.market} symbol=${context.symbol} ` +

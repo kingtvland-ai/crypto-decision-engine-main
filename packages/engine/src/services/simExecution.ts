@@ -108,6 +108,13 @@ export const SIM_INTRADAY_PARAMS_OVERRIDE: Partial<IntradayParams> = {
   // are bypassed. Sim only — DEFAULT_INTRADAY_PARAMS leaves this unset, so the
   // LIVE bot keeps its existing ladder untouched. See profitRatchet.ts.
   profitRatchet: true,
+  // Deterministic Dynamic Volatility Profile ladder (2026-09-16, operator
+  // decision): ON by default in simulation, unlike every other opt-in above.
+  // When a valid profile exists for the symbol it fully replaces this
+  // ladder (and calmRegimeScalp's) with the module's own historical-
+  // volatility-based SL/TP. Live bot untouched — DEFAULT_INTRADAY_PARAMS
+  // leaves this unset. See volatilityProfile.ts / volatilityProfileStore.ts.
+  volatilityProfileLadder: true,
   // Operator floor: no sim position opens below $100. Per the 10% target model,
   // a budget below MIN_SIM_ENTRY_USD is SKIPPED — never bumped up.
   // This override makes buildRiskPlan enforce the same floor.

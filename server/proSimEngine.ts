@@ -28,6 +28,7 @@ import {
 } from '@cde/engine/execution';
 import { computeProSignal, proMinConfidence, type ProSignalResult, type ProRiskLevel } from '@cde/engine/analysis';
 import { SignalEvaluation } from '@cde/engine';
+import { getVolatilityProfileStore } from './volatilityProfileStore';
 
 export type { SimPosition, SimTrade, SimPoint, PendingOrder, SimBotConfig } from '@cde/engine/execution';
 export type ProSimSnapshot = SimSnapshot;
@@ -66,7 +67,9 @@ const proStrategy: SimEngineStrategy = {
       const candles = input.candlesBySymbol[symbol];
       if (!candles || candles.length < MIN_PRO_CANDLES) continue;
 
-      const evaluation = buildProEvaluation(symbol, candles, currentPrice, priceChange24h, riskLevel, minConfidenceOverride);
+      const evaluation = buildProEvaluation(
+        symbol, candles, currentPrice, priceChange24h, riskLevel, minConfidenceOverride, getVolatilityProfileStore()
+      );
       // Macro Layer sell-pressure (2026-09-16) — same check as Intraday's GATE
       // 6, extended to Pro. Overrides a buy that already qualified; §4's own
       // scoring/thresholds above are untouched.

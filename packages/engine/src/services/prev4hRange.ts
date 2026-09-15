@@ -24,6 +24,8 @@ import { POSITION_TARGET_PCT } from './intradayParams';
 import { capStopLoss, stopWasCapped, tp1FloorDistance, MAX_LOSS_PERCENT, TP1_PERCENT } from './exitPolicy';
 import { estimatedRoundTripCostPct } from './intradayRisk';
 import { resolveLadderPercents, isBuyingSurge, measureStopNoise } from './calmRegime';
+import { resolveVolatilityLadder } from './volatilityProfile';
+import type { VolatilityMarket, VolatilityProfile } from '../types/volatilityProfile';
 
 // ── Parameters (all configurable — no auto-optimisation) ────────────────────
 
@@ -190,6 +192,11 @@ export interface Prev4hRangeInput {
   priceChange24h?: number;
   now?: number;
   params?: Partial<Prev4hRangeParams>;
+  /** Deterministic Dynamic Volatility Profile store (sim only, see
+   *  server/volatilityProfileStore.ts). Market is derived from direction —
+   *  this bot routes LONG to SPOT, SHORT to FUTURES(1x), same as its order
+   *  generator. Absent = the ladders below run unchanged. */
+  volatilityProfiles?: Map<string, VolatilityProfile>;
 }
 
 function clamp01(x: number): number {
@@ -328,7 +335,31 @@ export function evaluatePrev4hRange(input: Prev4hRangeInput): SignalEvaluation {
   // so its own R:R is deliberately poor and the `minRR` gate below is measured
   // against TP2 — which scales with the stop so the gate stays satisfiable.
   const dynSlPct = (rUnit / entryRef) * 100;
-  const calmActive = p.calmRegimeScalp === true;
+
+  // Deterministic Dynamic Volatility Profile ladder (2026-09-16, sim only,
+  // highest precedence of the three). LONG routes SPOT, SHORT routes
+  // FUTURES(1x) — same routing this bot's order generator already uses.
+  const volatilityMarket: VolatilityMarket = isLong ? 'spot' : 'linear';
+  const lastClosedH1 = h1.length ? h1[h1.length - 1] : undefined;
+  const volatilityLadder = input.volatilityProfiles
+    ? resolveVolatilityLadder({
+        profiles: input.volatilityProfiles,
+        market: volatilityMarket,
+        symbol,
+        side: direction,
+        lastClosedH1
+      })
+    : null;
+  if (volatilityLadder) {
+    // Same MAX_LOSS_PERCENT ceiling every other ladder respects.
+    const stopPct = Math.min(MAX_LOSS_PERCENT, volatilityLadder.stopPct);
+    const slDistance = entryRef * stopPct / 100;
+    stopLoss = isLong ? entryRef - slDistance : entryRef + slDistance;
+    tp1Distance = entryRef * volatilityLadder.targetPct / 100;
+    takeProfit2Distance = tp1Distance * 1.5;
+  }
+
+  const calmActive = !volatilityLadder && p.calmRegimeScalp === true;
   if (calmActive) {
     // Second widening condition alongside the surge: the stop must clear one H1
     // bar's own range — this bot holds across hours, so an hourly bar is the
@@ -394,7 +425,7 @@ export function evaluatePrev4hRange(input: Prev4hRangeInput): SignalEvaluation {
   // frequency work elsewhere never touches this number. In the calm branch the
   // gate is measured against TP2 (the runner), not the fast TP1 partial.
   const actualRR = riskPerUnit > 0
-    ? Math.abs((calmActive ? takeProfit2 : takeProfit1) - entryRef) / riskPerUnit
+    ? Math.abs(((calmActive || volatilityLadder) ? takeProfit2 : takeProfit1) - entryRef) / riskPerUnit
     : 0;
   if (actualRR < p.minRR) {
     return base('ARMED', 'RR_BELOW_MIN', debug, { confidence: 0 });

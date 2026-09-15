@@ -591,24 +591,42 @@ TP1 הקבוע 1.8% הוא **הלב של האסטרטגיה**: יחס-סיכוי
 
 ---
 
-## 8. Volatility Profile — מודול נפרד, **לא מחובר לאף בוט** (2026-09-16)
+## 8. Volatility Profile — מחובר לכל 4 הבוטים (סימולציה בלבד, 2026-09-16)
 
 מודל סטטיסטי-דטרמיניסטי (**לא** ML, **לא** LLM) של "חתימת התנודתיות"
 ההיסטורית של סימבול, מבוסס Median/P25/P75 על 24 חודשי excursion מקסימלי
-(High/Low מול Open) בנרות 1H. נוסף כ**יכולת עצמאית** — אף אחד מ-4 בוטי
-הסימולציה (Intraday / Pro / Path / Bybit) לא קורא לו כרגע, ולכן שום מתמטיקה
-בסעיפים 1–5 למעלה לא השתנתה.
+(High/Low מול Open) בנרות 1H. **מחליף החלטה מלאה, לא מכפיל**: כש-profile תקף
+נמצא, ה-SL/TP1 של אותה עסקה מגיעים **ישירות** מ-`dynamicRiskPct`/
+`dynamicOpportunityPct` — לא הסולם ה-ATR/מבני של הבוט ולא הסולם הקבוע של
+`calmRegimeScalp` (סדר עדיפות: volatility-profile ← calmRegimeScalp ← הסולם
+הדינמי המקורי). כברירת מחדל **דלוק בסימולציה** בכל 4 הבוטים (Intraday / Pro /
+Path / Bybit), **כבוי ב-LIVE** — אותו דפוס בדיוק כמו `profitRatchet`/
+`calmRegimeScalp`: `DEFAULT_INTRADAY_PARAMS` ומקביליו ב-LIVE משאירים את הדגל
+לא מוגדר, אז שום החלטה אמיתית לא מושפעת.
+
+**תקרת ביטחון שנשארת בכל מקרה:** `MAX_LOSS_PERCENT` (4.2%, או
+`PRO_STOP_LOSS_PERCENT` אצל Pro) עדיין חותכת את הסטופ הסופי — ה-`dynamicRiskPct`
+של המודול הוא רפרנס היסטורי, לא פטור מתקרת הסיכון הקיימת. פרופיל חסר/פגום/
+פחות מ-24 חודשים (`PROFILE_NOT_FOUND` / `PROFILE_INSUFFICIENT_HISTORY` /
+`INVALID_PROFILE`) → נפילה נקייה לסולם הקודם של אותו בוט, בלי לחסום עסקה
+ובלי להמציא נתון.
 
 ### קבצים
 ```
 packages/engine/src/types/volatilityProfile.ts        ← טיפוסים (VolatilityProfile, VolatilityRegime, ...)
 packages/engine/src/services/volatilityCalibration.ts  ← סטטיסטיקה טהורה (mean/median/percentile, buildVolatilityProfiles)
-packages/engine/src/services/volatilityProfile.ts      ← שירות runtime (load/get/classify/calculate...)
+packages/engine/src/services/volatilityProfile.ts      ← שירות runtime + resolveVolatilityLadder (§9 למטה)
 packages/engine/src/volatility.ts                      ← ברזל ייצוא — @cde/engine/volatility
 scripts/generateVolatilityProfiles.ts                  ← סקריפט כיול (CSV → JSON), דטרמיניסטי
 data/volatility-profiles/monthly-results.csv           ← מקור (24 חודשים, per category+symbol)
-data/volatility-profiles/volatility-profiles.json      ← קומפילציה, ה-runtime קורא **רק** אותו
-src/__tests__/volatilityProfile.test.ts                ← 36 טסטים
+data/volatility-profiles/volatility-profiles.json      ← קומפילציה; ה-sim engines קוראים **רק** אותה
+server/volatilityProfileStore.ts                       ← טעינה חד-פעמית מדיסק (Node בלבד), קאש לכל חיי התהליך
+src/__tests__/volatilityProfile.test.ts                ← 45 טסטים (מודול הליבה + resolveVolatilityLadder)
+src/__tests__/intradayVolatilityLadder.test.ts         ← 6 טסטים (buildRiskPlan)
+src/__tests__/proVolatilityLadder.test.ts              ← 6 טסטים (proStopTpLevels)
+src/__tests__/pathVolatilityLadder.test.ts             ← 5 טסטים (evaluatePrev4hRange)
+src/__tests__/bybitVolatilityLadder.test.ts            ← 6 טסטים (evaluateTrendBreakout + trailing)
+src/__tests__/backtestVolatilityGuard.test.ts          ← 4 טסטים (VolatilityBacktestGuard.applyToRisk)
 ```
 `data/` (לא `ASSETS/`) כי `ASSETS/` מוחרג לגמרי מ-git (`.gitignore`) — נועד
 לדאמפים גולמיים לניתוח, לא לקוד/קונפיג שאמורים להיכנס לריפו.
@@ -625,22 +643,57 @@ dynamicOpportunityPct = (LONG→medianUp : SHORT→medianDown) · regimeMultipli
 כל שגיאה (`PROFILE_NOT_FOUND` / `PROFILE_INSUFFICIENT_HISTORY` / `INVALID_PROFILE`)
 מוחזרת כערך מפורש (`VolatilityResult<T>`) — אין fallback מזויף, אין ניחוש.
 
-### חיבור ל-Backtest — opt-in בלבד, לא משפיע כברירת מחדל
-`runPortfolioBacktest` (`server/backtestRunner.ts`) קיבל פרמטר **רביעי,
-אופציונלי**, `volatilityGuard?: VolatilityBacktestGuard`. אף קורא קיים
-(לא `abBacktest.ts`, לא הטסטים) לא מעביר אותו → `undefined` בכל מקום →
-**אפס שינוי התנהגות**. כשכן מועבר: בכל פתיחת פוזיציה מודפס `[volatility-profile]`/
-`[volatility-risk]` (§28-style), ותו לא — לא נוגע בגודל/כניסה/סטופ/יציאה.
+### `resolveVolatilityLadder` — נקודת הכניסה היחידה לכל 4 הבוטים
+```
+resolveVolatilityLadder({ profiles, market, symbol, side, lastClosedH1 })
+  → { stopPct, targetPct, regime }   כש-profile תקף נמצא
+  → null                             בכל כשל (לא נמצא / פחות מ-24 חודש / פגום / אין נר סגור)
+```
+`null` הוא לא שגיאה לטפל בה — הוא הסימן לקורא לחזור לחישוב הקודם שלו בלי
+שינוי. כל 4 הבוטים קוראים **רק** לפונקציה הזו; שום בוט לא מממש את לוגיקת
+ה-fallback בעצמו.
 
-**הגנת look-ahead:** הפרופיל **לא** נלקח מ-`volatility-profiles.json` המקומפל
-(שנבנה מכל 24 החודשים — היה look-ahead בתוך אותו חלון). הוא נבנה מחדש
-בכל כניסה מ-`monthlyRows` הגולמי, מוגבל לחודשים שנסגרו **לפני** חודש
-הכניסה בלבד (`buildVolatilityProfileAsOf`), ומחושב על ה-H1 האחרון שכבר
-נסגר — אותו מצביע `cursors.h1` שהמנוע עצמו כבר משתמש בו למניעת look-ahead.
+### חיבור לכל בוט (אותה נקודת הזרקה שכבר קיימת ל-calmRegimeScalp)
+| בוט | קובץ + נקודת הזרקה | market |
+|---|---|---|
+| Intraday | `intradayEngine.ts` (לפני `buildRiskPlan`) → `RiskPlanInput.volatilityLadder` | `tradeType==='SPOT' ? 'spot' : 'linear'` |
+| Pro | `proSimExecution.ts` → `proStopTpLevels(...).opts.volatilityLadder` | תמיד `'spot'` (Pro ספוט בלבד) |
+| Path | `prev4hRange.ts` (`evaluatePrev4hRange`) → `Prev4hRangeInput.volatilityProfiles` | LONG→`'spot'`, SHORT→`'linear'` |
+| Bybit | `trendBreakout.ts` (`evaluateTrendBreakout`) → `TrendBreakoutInput.volatilityProfiles` | תמיד `'linear'` (פיוצ'רס בלבד) |
 
-### מה עדיין לא קיים
-אף לא אחד מ-4 הבוטים קורא ל-`buildDynamicRiskReference`/`buildVolatilityContext`
-בזמן החלטה חיה — הפונקציות טהורות, בדוקות (36/36) ומוכנות לצריכה ע"י Risk
-Engine עתידי, אך אף מנוע סיגנל/סיכון קיים (`intradayRisk.ts`, `proAlgEngine.ts`,
-`prev4hRangeExecution.ts`, `trendBreakoutExecution.ts`) לא נוגע בהן. שילוב חי
-הוא עבודה עתידית נפרדת.
+ב-Bybit הסטופ הנגזר **מוקפא ברגע הכניסה** על הפוזיציה (`plan.stopLoss`) —
+`effectiveStop` (טריילינג) כבר קורא את `rUnit` מה-stop השמור על ה-lot, לא
+מחשב מחדש מ-ATR, כך שהוא ממשיך את הסולם המקורי בלי חיווט נוסף.
+
+**דגל ההפעלה (per-bot, זהה בכל 4):** `params.volatilityProfileLadder` —
+מוגדר `true` בכל אובייקט ה-override של הסימולציה (`SIM_INTRADAY_PARAMS_OVERRIDE`
+ומקביליו ב-`proSimEngine.ts`/`pathSimEngine.ts`/`bybitSimEngine.ts`), לא מוגדר
+כלל ב-LIVE. **הנתונים** (`Map<string, VolatilityProfile>`) מגיעים מ-
+`server/volatilityProfileStore.ts` — נטענים פעם אחת מהדיסק, מוזרקים לכל בוט
+ב-`server/*SimEngine.ts`.
+
+### חיבור ל-Backtest — opt-in, ברירת מחדל log-only
+`runPortfolioBacktest` (`server/backtestRunner.ts`) מקבל פרמטר רביעי אופציונלי,
+`volatilityGuard?: VolatilityBacktestGuard`. שני מצבים:
+- **ברירת מחדל / `applyToRisk` לא מוגדר:** log-only בדיוק כמו קודם — מדפיס
+  `[volatility-profile]`/`[volatility-risk]` בכל פתיחת פוזיציה, לא נוגע בגודל/
+  כניסה/סטופ/יציאה. אף קורא קיים (`abBacktest.ts`, הטסטים) לא מעביר guard כלל.
+- **`applyToRisk: true`:** מזין את אותו `resolveVolatilityLadder` ש-live/sim
+  משתמשים בו ישירות ל-`buildRiskPlan` (דרך `params.volatilityProfileLadder`),
+  כך שריצת backtest משחזרת בדיוק את מה שסימולציה תעשה — כדי למדוד את ההשפעה
+  (`scripts/abBacktest.ts`) לפני שמציעים את זה ל-LIVE.
+
+**הגנת look-ahead (שני המצבים):** הפרופיל **לא** נלקח מ-`volatility-profiles.json`
+המקומפל (שנבנה מכל 24 החודשים — היה look-ahead בתוך אותו חלון). הוא נבנה
+מחדש בכל כניסה מ-`monthlyRows` הגולמי, מוגבל לחודשים שנסגרו **לפני** חודש
+ההחלטה בלבד (`buildVolatilityProfileAsOf` ל-log-only,
+`makeVolatilityProfilesAsOfResolver` הממוזכר-לפי-חודש ל-`applyToRisk`),
+ומחושב על ה-H1 האחרון שכבר נסגר — אותו מצביע `cursors.h1` שהמנוע עצמו כבר
+משתמש בו למניעת look-ahead.
+
+### וידוא (2026-09-16)
+אחרי החיבור לכל 4 הבוטים + מצב `applyToRisk`: 896 טסטים עברו (70 קבצים, 0
+נכשלו), `typecheck` + `typecheck:worker` נקיים, `build` + `build:worker`
+עברו. LIVE אומת כלא-מושפע ישירות — הקריאה ב-`tradingWorker.ts:1118` (הנתיב
+היחיד שבאמת שולח סימולציית-אמת) לא מעבירה `params` בכלל, כך שהיא תמיד
+מקבלת `DEFAULT_INTRADAY_PARAMS` המקורי, ו-Pro אין לו קריאה כלל מ-`tradingWorker.ts`.

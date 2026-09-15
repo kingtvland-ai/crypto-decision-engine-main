@@ -25,6 +25,8 @@ import { POSITION_TARGET_PCT } from './intradayParams';
 import { capStopLoss, stopWasCapped, tp1FloorDistance, MAX_LOSS_PERCENT } from './exitPolicy';
 import { resolveLadderPercents, isBuyingSurge, measureStopNoise } from './calmRegime';
 import type { MarketRegimeResult } from '../types/crypto';
+import { resolveVolatilityLadder } from './volatilityProfile';
+import type { VolatilityMarket, VolatilityProfile, VolatilitySide } from '../types/volatilityProfile';
 
 // ── Parameters (spec §23 — every knob configurable, no auto-optimisation) ────
 
@@ -288,6 +290,11 @@ export interface TrendBreakoutInput {
   currentPrice: number;
   priceChange24h?: number;
   params?: Partial<TrendBreakoutParams>;
+  /** Deterministic Dynamic Volatility Profile store (sim only, see
+   *  server/volatilityProfileStore.ts). This bot trades FUTURES only
+   *  (perpetuals, 1x) — market is always 'linear'. Absent = the ladders
+   *  below run unchanged. */
+  volatilityProfiles?: Map<string, VolatilityProfile>;
 }
 
 /**
@@ -436,7 +443,34 @@ export function evaluateTrendBreakout(input: TrendBreakoutInput): SignalEvaluati
   // R:R is deliberately poor and the gate below is measured against TP2, which
   // scales with the stop so it stays satisfiable.
   const dynSlPct = (cappedR / entryRef) * 100;
-  const calmActive = p.calmRegimeScalp === true;
+
+  // Deterministic Dynamic Volatility Profile ladder (2026-09-16, sim only,
+  // highest precedence of the three). FUTURES-only bot — market is always
+  // 'linear'. Resolved and applied ONCE here, at signal time — the position
+  // this opens into snapshots the resulting stop/TP distances, so the
+  // trailing-stop math later in the trade's life reuses this frozen ladder
+  // instead of recomputing a possibly-different one mid-trade.
+  const volatilityMarket: VolatilityMarket = 'linear';
+  const lastClosedH1 = h1.length ? h1[h1.length - 1] : undefined;
+  const volatilityLadder = input.volatilityProfiles
+    ? resolveVolatilityLadder({
+        profiles: input.volatilityProfiles,
+        market: volatilityMarket,
+        symbol,
+        side: direction as VolatilitySide,
+        lastClosedH1
+      })
+    : null;
+  if (volatilityLadder) {
+    // Same MAX_LOSS_PERCENT ceiling every other ladder respects.
+    const stopPct = Math.min(MAX_LOSS_PERCENT, volatilityLadder.stopPct);
+    const slDistance = entryRef * stopPct / 100;
+    stopLoss = isLong ? entryRef - slDistance : entryRef + slDistance;
+    tp1Distance = entryRef * volatilityLadder.targetPct / 100;
+    takeProfit2Distance = tp1Distance * 1.5;
+  }
+
+  const calmActive = !volatilityLadder && p.calmRegimeScalp === true;
   if (calmActive) {
     // Second widening condition alongside the surge: the stop must clear one
     // M15 bar's own range — the frame the breakout is confirmed on — or an
@@ -476,7 +510,7 @@ export function evaluateTrendBreakout(input: TrendBreakoutInput): SignalEvaluati
   // calm branch the gate is measured against TP2 (the runner), not TP1.
   const riskDistance = Math.abs(entryRef - stopLoss);
   const grossRewardRisk = riskDistance > 0
-    ? Math.abs((calmActive ? takeProfit2 : takeProfit1) - entryRef) / riskDistance
+    ? Math.abs(((calmActive || volatilityLadder) ? takeProfit2 : takeProfit1) - entryRef) / riskDistance
     : 0;
   if (grossRewardRisk < p.minRewardRisk) {
     return base('SETUP', 'RR_TOO_LOW', { regime: regimeResult }, [

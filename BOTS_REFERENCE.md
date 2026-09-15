@@ -3,7 +3,7 @@
 > קובץ זה נבנה ע"י קריאת הקוד עצמו (לא תיעוד קודם). כל שורה כאן מצוינת עם
 > הקובץ שבו היא באמת קורית. עדכן אותו כשהחישוב עצמו משתנה — לא לפני.
 > נכון לתאריך: 2026-09-07, מסביב לקומיטים עד `e1ca516` + תוספת בוט 4 (Bybit)
-> + תוספת מודול Volatility Profile ב-2026-09-16 (§5, לא מחובר לאף בוט).
+> + חיבור מודול Volatility Profile לכל 4 הבוטים ב-2026-09-16 (§5, סימולציה בלבד).
 
 ארבעת הבוטים רצים כ-4 מופעים נפרדים לגמרי של אותה תשתית
 (`server/simEngineFactory.ts` → `createGenericSimEngine`) — לכל אחד `cash`,
@@ -528,6 +528,7 @@ setup שהתבטל → חוסם scale-in נוסף, לא סוגר. **TP הישן 
 | שער קורלציה | ρ ≥ 0.7 על 72 נרות H1, מקס' 3 | `correlation.ts` — Intraday · Path · Bybit (**לא** Pro) |
 | רצפת גודל בפחד (opt-in) | F&G 20–35 + MEAN_REVERSION BUY → מכפיל ≥ 0.9 | `simExecution.ts` — **Intraday בלבד** |
 | מדרגת Scalp קבועה (opt-in) | תמיד SL 2.3/TP1 1.8/TP2 3.5; גל קונים → סטופ רחב | `calmRegime.ts` — **כל 4 הבוטים** |
+| Volatility Profile (sim-default) | SL/TP1 מ-`dynamicRiskPct`/`dynamicOpportunityPct` (עוקף calmRegimeScalp) | `volatilityProfile.ts` — **כל 4 הבוטים, §5** |
 | סולם רווח (opt-in) | 1.8→3→4→5…; חזרה למדרגה = 30%, רצפת 1.8% = סגירה | `profitRatchet.ts` — **כל 4 הבוטים** |
 | צינון כניסה חוזרת | 60 דק' אחרי **כל** יציאה מלאה | `ENTRY_COOLDOWN_MS` — **כל 4 הבוטים** |
 
@@ -625,45 +626,76 @@ SHORT מקבל. חלון הצבירה חסום ל-8 שעות כדי שהשבתת
 ה-futures של Intraday והשורטים של Bybit מרגישים את זה. זהו תיקון מודל-עלויות
 אחיד — לא שינוי באלגוריתם של אף מנוע.
 
-## 5. Volatility Profile — מודול נפרד, **לא מחובר לאף בוט** (2026-09-16)
+## 5. Volatility Profile — מחובר לכל 4 הבוטים, סימולציה בלבד (2026-09-16)
 
-יכולת עצמאית שנוספה, **לא** שינוי בהתנהגות של אף אחד מ-4 הבוטים למעלה.
 מודל סטטיסטי-דטרמיניסטי (Median/P25/P75 על 24 חודשי excursion מקסימלי בנרות
-1H) — **לא** ML, **לא** LLM. שום מנוע סיגנל/סיכון קיים לא קורא לו.
+1H) — **לא** ML, **לא** LLM. **מחליף, לא מכפיל:** כש-profile תקף נמצא, ה-SL/
+TP1 של העסקה מגיעים ישירות מ-`dynamicRiskPct`/`dynamicOpportunityPct` —
+עוקף גם את הסולם הדינמי של הבוט וגם את `calmRegimeScalp`. עדיפות: volatility-
+profile ← calmRegimeScalp ← הסולם המקורי. דלוק כברירת מחדל **בסימולציה בלבד**
+בכל 4 הבוטים; LIVE לא נוגע בדגל בכלל (אותו דפוס כמו `profitRatchet`/
+`calmRegimeScalp`). `MAX_LOSS_PERCENT`/`PRO_STOP_LOSS_PERCENT` עדיין חותכים
+את הסטופ הסופי — לא פטור מהתקרה.
 
 **קבצים:**
 ```
 packages/engine/src/types/volatilityProfile.ts        ← טיפוסים
 packages/engine/src/services/volatilityCalibration.ts ← סטטיסטיקה טהורה (mean/median/percentile, buildVolatilityProfiles)
-packages/engine/src/services/volatilityProfile.ts      ← שירות runtime (loadVolatilityProfiles, getVolatilityProfile, calculateCurrentVolatility, calculateVolatilityFactor, classifyVolatilityRegime, calculateDynamicRiskPct/OpportunityPct, calculateExpectedRewardRisk, validateVolatilityProfile)
+packages/engine/src/services/volatilityProfile.ts      ← שירות runtime + resolveVolatilityLadder (הכניסה היחידה לכל 4 הבוטים)
 packages/engine/src/volatility.ts                      ← ברזל ייצוא, @cde/engine/volatility
 scripts/generateVolatilityProfiles.ts                  ← כיול CSV→JSON, דטרמיניסטי
 data/volatility-profiles/monthly-results.csv           ← מקור (per category+symbol, 24 חודשים)
-data/volatility-profiles/volatility-profiles.json      ← קומפילציה; ה-runtime קורא רק אותו
-src/__tests__/volatilityProfile.test.ts                ← 36 טסטים (BTC Spot/Linear אמיתיים + כל מקרי הקצה)
+data/volatility-profiles/volatility-profiles.json      ← קומפילציה; ה-sim engines קוראים רק אותה
+server/volatilityProfileStore.ts                       ← טעינה חד-פעמית מדיסק, קאש לכל חיי התהליך
+src/__tests__/volatilityProfile.test.ts                ← 45 טסטים (מודול הליבה + resolveVolatilityLadder)
+src/__tests__/intradayVolatilityLadder.test.ts         ← 6 · src/__tests__/proVolatilityLadder.test.ts ← 6
+src/__tests__/pathVolatilityLadder.test.ts             ← 5 · src/__tests__/bybitVolatilityLadder.test.ts ← 6
+src/__tests__/backtestVolatilityGuard.test.ts          ← 4
 ```
 ב-`data/` ולא ב-`ASSETS/` — `ASSETS/` מוחרג לגמרי מ-`.gitignore` (מיועד
 לדאמפים גולמיים, לא לקוד/קונפיג שנכנס לריפו).
 
 **נוסחאות מדויקות:** ראה `ALGO_MATH.md` §8 (זהה, לא כפול כאן).
 
-**חיבור ל-Backtest (`server/backtestRunner.ts`) — opt-in, לא ברירת מחדל:**
-`runPortfolioBacktest` קיבל פרמטר רביעי אופציונלי, `volatilityGuard?`.
-נבדק כל קורא קיים (`scripts/abBacktest.ts`, `intradayBacktestParity.test.ts`)
-— אף אחד לא מעביר אותו, אז ההתנהגות **זהה לחלוטין** למה שהייתה. כשמועבר:
-מדפיס `[volatility-profile]`/`[volatility-risk]` בכל פתיחת פוזיציה בלבד,
-בלי לגעת בגודל/כניסה/יציאה. הגנת look-ahead: הפרופיל **לא** נלקח מ-JSON
-המקומפל (שנבנה מכל 24 החודשים) אלא נבנה מחדש בכל כניסה, מוגבל לחודשים
-שנסגרו **לפני** חודש הכניסה (`buildVolatilityProfileAsOf`), על ה-H1 האחרון
-שכבר נסגר (`cursors.h1` — אותו מצביע שהמנוע עצמו כבר משתמש בו).
+**חיבור per-bot (אותה נקודת הזרקה שכבר קיימת ל-`calmRegimeScalp`):**
+| בוט | קובץ + נקודת הזרקה | market |
+|---|---|---|
+| Intraday | `intradayEngine.ts`→`RiskPlanInput.volatilityLadder` (`intradayRisk.ts`) | SPOT/FUTURES לפי `tradeType` |
+| Pro | `proSimExecution.ts`→`proStopTpLevels(...).opts.volatilityLadder` | תמיד `spot` |
+| Path | `prev4hRange.ts`→`Prev4hRangeInput.volatilityProfiles` | LONG→`spot`, SHORT→`linear` |
+| Bybit | `trendBreakout.ts`→`TrendBreakoutInput.volatilityProfiles` | תמיד `linear` |
 
-**מה עדיין לא קיים:** שום חיבור חי ל-`intradayRisk.ts` / `proAlgEngine.ts` /
-`prev4hRangeExecution.ts` / `trendBreakoutExecution.ts` — הפונקציות מוכנות
-(טהורות, נבדקות) אך לא נצרכות. שילוב חי הוא עבודה עתידית נפרדת.
+Bybit מקפיא את הסטופ שנפתר על הפוזיציה בכניסה (`plan.stopLoss`) —
+`effectiveStop` (טריילינג, `trendBreakoutExecution.ts`) כבר קורא `rUnit`
+מה-stop **השמור על ה-lot**, לא מחשב מחדש מ-ATR, אז הוא ממשיך אוטומטית בלי
+חיווט נוסף (מאומת ב-`bybitVolatilityLadder.test.ts`).
 
-**וידוא (2026-09-16):** אחרי ההוספה — 860 טסטים עברו (65 קבצים, 0 נכשלו),
-`typecheck` + `typecheck:worker` נקיים, `build` + `build:worker` עברו. השינוי
-היחיד לקוד סימולציה קיים הוא ה-4 שורות המותנות ב-`volatilityGuard` למעלה.
+**דגל ההפעלה:** `params.volatilityProfileLadder`, `true` בכל אובייקט ה-override
+של הסימולציה (`SIM_INTRADAY_PARAMS_OVERRIDE` ב-`simExecution.ts` ומקביליו),
+לא מוגדר ב-LIVE. **הנתונים** (`getVolatilityProfileStore()`) נטענים פעם אחת
+ב-`server/volatilityProfileStore.ts` ומוזרקים לכל בוט ב-`server/*SimEngine.ts`.
+
+**חיבור ל-Backtest (`server/backtestRunner.ts`) — opt-in, ברירת מחדל log-only:**
+`runPortfolioBacktest` מקבל פרמטר רביעי אופציונלי, `volatilityGuard?`.
+בלי `applyToRisk` (או `false`): log-only בדיוק כמו קודם — מדפיס
+`[volatility-profile]`/`[volatility-risk]` בכל פתיחת פוזיציה, לא נוגע
+בגודל/כניסה/יציאה; נבדק מול כל קורא קיים (`scripts/abBacktest.ts`,
+`intradayBacktestParity.test.ts`) — אף אחד לא מעביר guard, אז ההתנהגות
+זהה לחלוטין למה שהייתה. עם `applyToRisk: true`: מזין את אותו
+`resolveVolatilityLadder` ש-live/sim משתמשים בו ישירות ל-`buildRiskPlan`,
+כך שהבקטסט משחזר בדיוק מה שהסימולציה תעשה — למדידה לפני הצעה ל-LIVE.
+
+הגנת look-ahead (שני המצבים): הפרופיל **לא** נלקח מ-JSON המקומפל (שנבנה
+מכל 24 החודשים) אלא נבנה מחדש מ-`monthlyRows` הגולמי, מוגבל לחודשים
+שנסגרו **לפני** חודש ההחלטה (`buildVolatilityProfileAsOf` ל-log-only,
+`makeVolatilityProfilesAsOfResolver` הממוזכר-לפי-חודש ל-`applyToRisk`), על
+ה-H1 האחרון שכבר נסגר (`cursors.h1` — אותו מצביע שהמנוע עצמו כבר משתמש בו).
+
+**וידוא (2026-09-16, אחרי החיבור לכל 4 הבוטים + `applyToRisk`):** 896 טסטים
+עברו (70 קבצים, 0 נכשלו), `typecheck` + `typecheck:worker` נקיים, `build` +
+`build:worker` עברו. LIVE אומת כלא-מושפע: `tradingWorker.ts:1118` (הנתיב
+היחיד שבאמת שולח החלטה חיה) לא מעביר `params` בכלל → תמיד
+`DEFAULT_INTRADAY_PARAMS` המקורי; ל-Pro אין קריאה כלל מ-`tradingWorker.ts`.
 
 ---
 

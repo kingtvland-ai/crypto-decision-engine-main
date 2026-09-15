@@ -656,6 +656,13 @@ export function proStopTpLevels(
      *  `measureStopNoise` on the caller's own candle series. */
     noiseFloorStop?: boolean;
     stopNoise?: StopNoise;
+    /** Deterministic Dynamic Volatility Profile ladder (sim only, see
+     *  proSimExecution.ts / resolveVolatilityLadder). Highest precedence of
+     *  the three ladder sources — when present it replaces BOTH the ATR
+     *  ladder and `calmRegimeScalp`'s fixed one, still capped at
+     *  PRO_STOP_LOSS_PERCENT. Absent (no profile for the symbol) leaves the
+     *  ladders below running exactly as before. */
+    volatilityLadder?: { stopPct: number; targetPct: number };
   } = {}
 ): { stopLoss: number; takeProfit1: number; takeProfit2: number; tooVolatile: boolean; noiseFloorPct: number } {
   const stopPct = Math.min(PRO_STOP_LOSS_PERCENT, Math.max(PRO_STOP_MIN_PERCENT, atrPercent * PRO_STOP_ATR_MULT));
@@ -664,6 +671,17 @@ export function proStopTpLevels(
   let finalStopPct = stopPct;
   let tooVolatile = false;
   let noiseFloorPct = 0;
+  const volatilityLadderActive =
+    opts.volatilityLadder !== undefined &&
+    opts.volatilityLadder.stopPct > 0 &&
+    opts.volatilityLadder.targetPct > 0;
+  if (volatilityLadderActive) {
+    // Same ceiling every other ladder respects — a REFERENCE distance from
+    // the module, not an exemption from this bot's hard risk limit.
+    finalStopPct = Math.min(PRO_STOP_LOSS_PERCENT, opts.volatilityLadder!.stopPct);
+    tp1Pct = opts.volatilityLadder!.targetPct;
+    tp2Pct = tp1Pct * 1.5;
+  }
   // The fixed scalp ladder replaces the ATR ladder outright. Two things widen
   // the stop back off the flat 2.3%: a BUYING SURGE, and the noise floor —
   // `atrPercent × PRO_STOP_ATR_MULT` is the stop this function computes one
@@ -672,7 +690,7 @@ export function proStopTpLevels(
   // deliberately poor — it is a fast 50% partial, not the whole thesis. Pro
   // carries no R:R reject gate, so there is nothing to reconcile here (unlike
   // Intraday/Path/Bybit, whose gates are re-pointed at TP2).
-  if (opts.calmRegimeScalp === true) {
+  if (!volatilityLadderActive && opts.calmRegimeScalp === true) {
     const ladder = resolveLadderPercents({
       dynamicSlPct: stopPct,
       buyingSurge: opts.buyingSurge,

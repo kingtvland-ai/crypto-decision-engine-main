@@ -17,6 +17,7 @@ import { generateNewOrders } from '@cde/engine/execution';
 import { SignalEvaluation, DecisionFactor, resolveTradeSide } from '@cde/engine';
 import { Candle, PortfolioRiskStats } from '@cde/engine';
 import { IntradayParams, DEFAULT_INTRADAY_PARAMS } from '@cde/engine';
+import { getVolatilityProfileStore } from './volatilityProfileStore';
 
 /**
  * Notional exposure per base asset — feeds the 8%-per-asset cap in the risk
@@ -150,7 +151,12 @@ const intradayStrategy: SimEngineStrategy = {
           maxFuturesPositions: input.config.maxFuturesPositions ?? DEFAULT_INTRADAY_PARAMS.maxOpenFutures,
           // Cost/edge gate prices the fill this sim actually gets: MARKET
           // (taker + full slippage) unless the operator turned limit entries on.
-          entryIsLimit: input.config.proLimitEntries === true
+          entryIsLimit: input.config.proLimitEntries === true,
+          // Deterministic Dynamic Volatility Profile (2026-09-16, sim only —
+          // params.volatilityProfileLadder from SIM_INTRADAY_PARAMS_OVERRIDE
+          // is the flag that actually enables it; this just makes the data
+          // available). Loaded once by the store, never re-read per tick.
+          volatilityProfiles: getVolatilityProfileStore()
         }
       };
 

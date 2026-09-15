@@ -47,6 +47,8 @@ import {
   DEFAULT_MAX_CORRELATED,
   type CorrelatedHolding
 } from './correlation';
+import { resolveVolatilityLadder } from './volatilityProfile';
+import type { VolatilityProfile } from '../types/volatilityProfile';
 
 export const uid = (p: string) => `pro-${p}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
@@ -65,7 +67,12 @@ export function buildProEvaluation(
   currentPrice: number,
   priceChange24h: number,
   riskLevel: ProRiskLevel,
-  minConfidenceOverride: number | undefined
+  minConfidenceOverride: number | undefined,
+  /** Deterministic Dynamic Volatility Profile store (sim only, see
+   *  server/volatilityProfileStore.ts). Pro is spot-only, so the lookup
+   *  market is always 'spot'. Absent (the browser preview hook doesn't pass
+   *  it) is a clean no-op — the ATR ladder below runs unchanged. */
+  volatilityProfiles?: Map<string, VolatilityProfile>
 ): SignalEvaluation {
   if (!candles || candles.length < MIN_PRO_CANDLES) {
     return {
@@ -80,6 +87,21 @@ export function buildProEvaluation(
   /** §16 raw signal threshold check, before any state or risk gate. */
   const signalPasses = signal.action === 'BUY' && signal.confidence >= minConfidence;
 
+  // Deterministic Dynamic Volatility Profile (2026-09-16, sim only). Pro is
+  // spot-only (isLong=true, hardcoded below), so market is always 'spot'.
+  // `candles` is the same H1 series §2's indicators are computed from — its
+  // last element is the most recent CLOSED bar.
+  const lastClosedH1 = candles.length ? candles[candles.length - 1] : undefined;
+  const volatilityLadder = volatilityProfiles
+    ? resolveVolatilityLadder({
+        profiles: volatilityProfiles,
+        market: 'spot',
+        symbol,
+        side: 'LONG',
+        lastClosedH1
+      })
+    : null;
+
   // ATR-scaled stop + stop-relative TP ladder, as absolute prices off the
   // signal price. fillDueOrders reanchors them to the actual fill, preserving
   // the % distances. Spot is LONG only.
@@ -91,7 +113,8 @@ export function buildProEvaluation(
     // The two things that widen the fixed 2.3% stop — both measured on the same
     // candle series §2's own indicators are computed from.
     buyingSurge: isBuyingSurge(candles),
-    stopNoise: measureStopNoise(candles)
+    stopNoise: measureStopNoise(candles),
+    volatilityLadder: volatilityLadder ?? undefined
   });
 
   // A stop that sits inside one bar's ordinary range is a coin flip on noise,

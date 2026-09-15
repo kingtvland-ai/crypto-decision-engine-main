@@ -126,6 +126,17 @@ export interface IntradayParams {
    *  and the 1.8% floor closes the position. TP1/TP2 and the trailing stop are
    *  bypassed while it is on. See `profitRatchet.ts`. */
   profitRatchet?: boolean;
+  /** Opt-in (default off live — see `SIM_INTRADAY_PARAMS_OVERRIDE`, ON by
+   *  default in every sim bot). Highest-precedence ladder of the three: when
+   *  a valid Deterministic Dynamic Volatility Profile exists for this symbol
+   *  (`${market}:${symbol}` in volatility-profiles.json, resolved via
+   *  `resolveVolatilityLadder`), it REPLACES both the dynamic ATR/structure
+   *  ladder and `calmRegimeScalp`'s fixed one with the module's own
+   *  `dynamicRiskPct`/`dynamicOpportunityPct` for the symbol's current
+   *  volatility regime (still capped by MAX_LOSS_PERCENT). No profile for
+   *  the symbol (missing/insufficient history/invalid) falls straight
+   *  through to the ladders below, unchanged. See volatilityProfile.ts. */
+  volatilityProfileLadder?: boolean;
   /** The stop distance must be at least this multiple of the modelled
    *  round-trip cost, or the trade is rejected (DecisionGate 'RISK_VS_COST').
    *  minRewardRisk guards the REWARD side; this guards the RISK side, which

@@ -307,6 +307,17 @@ export interface RiskPlanInput {
    *  DecisionEngine orchestrator from recent closed-trade performance — it
    *  only ever de-risks. The live scan() path passes none → 1 (base sizing). */
   sizingMultiplier?: number;
+  /** Deterministic Dynamic Volatility Profile ladder (sim only, resolved by
+   *  the caller via `resolveVolatilityLadder` from `@cde/engine/volatility`
+   *  — this file does no profile lookup itself). When present and both
+   *  distances are positive, it REPLACES the dynamic ATR/structure SL/TP1
+   *  computation and the fixed `calmRegimeScalp` ladder outright — highest
+   *  precedence of the three ladder sources. `targetPct` becomes TP1;
+   *  TP2 is still scaled from it by `tp2RewardRisk/tp1RewardRisk`, so the
+   *  two-tier partial/runner structure survives. Absent (undefined) on
+   *  every call site that doesn't resolve a profile (e.g. PROFILE_NOT_FOUND)
+   *  — the plan then falls through to the ladders below exactly as before. */
+  volatilityLadder?: { stopPct: number; targetPct: number };
 }
 
 export interface RiskPlan {
@@ -525,7 +536,29 @@ export function buildRiskPlan(input: RiskPlanInput): RiskPlan {
   // inside the noise of such a move. TP1 stays 1.8% regardless — that is the
   // point of the strategy — so its own R:R is deliberately poor and the gate
   // below is measured against TP2 instead, which scales with the stop.
-  const ladderActive = params.calmRegimeScalp === true;
+  // ── Volatility Profile ladder (opt-in, sim only, highest precedence) ────
+  // Resolved upstream (intradayEngine.ts) via resolveVolatilityLadder — this
+  // file never touches candles or the compiled profile file itself, it only
+  // consumes the two already-computed distances. Present only when a valid,
+  // sufficient-history profile exists for this symbol/market/side; every
+  // other case (no profile, insufficient history, invalid data, no closed H1
+  // candle) leaves this undefined and the ladders below run unchanged.
+  const volatilityLadderActive =
+    input.volatilityLadder !== undefined &&
+    input.volatilityLadder.stopPct > 0 &&
+    input.volatilityLadder.targetPct > 0;
+  let volatilityTp2Distance: number | undefined;
+  if (volatilityLadderActive) {
+    // Same portfolio-wide ceiling every other ladder source respects — the
+    // module's own dynamicRiskPct is a REFERENCE distance (see its doc
+    // comment), not an exemption from this bot's hard risk limit.
+    slDistancePct = Math.max(params.minStopPercent, Math.min(MAX_LOSS_PERCENT, input.volatilityLadder!.stopPct));
+    slDistance = entry * slDistancePct / 100;
+    tp1Distance = entry * input.volatilityLadder!.targetPct / 100;
+    volatilityTp2Distance = tp1Distance * (params.tp2RewardRisk / params.tp1RewardRisk);
+  }
+
+  const ladderActive = !volatilityLadderActive && params.calmRegimeScalp === true;
   let ladderTp2Distance: number | undefined;
   // The symbol's own natural noise floor (measureStopNoise().floorPct),
   // hoisted out of the `if (ladderActive)` block below so it survives to the
@@ -562,8 +595,12 @@ export function buildRiskPlan(input: RiskPlanInput): RiskPlan {
   // ── TP impossible gate ──────────────────────────────────────────────────
   // If the dynamic SL makes it impossible to achieve a reasonable R:R, reject
   // the trade. No artificial SL widening or TP shrinking. In the calm branch
-  // the gate is measured against TP2 (the runner), not the fast TP1 partial.
-  const grossRR = (ladderActive ? ladderTp2Distance! : tp1Distance) / slDistance;
+  // (and the volatility-profile branch, which scales TP2 the same way) the
+  // gate is measured against TP2 (the runner), not the fast TP1 partial.
+  const effectiveTp2Distance = volatilityLadderActive
+    ? volatilityTp2Distance!
+    : (ladderActive ? ladderTp2Distance! : tp1Distance);
+  const grossRR = effectiveTp2Distance / slDistance;
   if (grossRR < params.minRewardRisk) {
     return rejected(`R:R נטו ${grossRR.toFixed(2)} מתחת לסף ${params.minRewardRisk} (SL=${slDistancePct.toFixed(2)}%, TP=${(tp1Distance/entry*100).toFixed(2)}%) — NO TRADE`);
   }
@@ -577,11 +614,11 @@ export function buildRiskPlan(input: RiskPlanInput): RiskPlan {
   if (input.tradeType === 'SPOT' || isLong) {
     stopLoss = Math.max(0.00000001, entry - slDistance);
     takeProfit1 = entry + tp1Distance;
-    takeProfit2 = entry + (ladderActive ? ladderTp2Distance! : tp1Distance * (params.tp2RewardRisk / params.tp1RewardRisk));
+    takeProfit2 = entry + effectiveTp2Distance;
   } else {
     stopLoss = entry + slDistance;
     takeProfit1 = Math.max(0.00000001, entry - tp1Distance);
-    takeProfit2 = Math.max(0.00000001, entry - (ladderActive ? ladderTp2Distance! : tp1Distance * (params.tp2RewardRisk / params.tp1RewardRisk)));
+    takeProfit2 = Math.max(0.00000001, entry - effectiveTp2Distance);
   }
 
   // Direction check (§3 step 3) — ONE authoritative validator for SL AND TP1

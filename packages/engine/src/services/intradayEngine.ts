@@ -41,6 +41,8 @@ import type { FundingSnapshot } from './fundingRate';
 import { evaluateFundingGate } from './fundingRate';
 import type { DerivativesSnapshot } from './derivativesRegime';
 import { evaluateDerivativesRegime, detectSellPressureFromH1 } from './derivativesRegime';
+import { resolveVolatilityLadder } from './volatilityProfile';
+import type { VolatilityMarket, VolatilityProfile } from '../types/volatilityProfile';
 
 export type TradeType = 'SPOT' | 'FUTURES';
 export type DecisionOutcome = 'SIGNAL' | 'NO_SIGNAL' | 'NO_DATA';
@@ -82,6 +84,13 @@ export interface IntradayDecisionInput {
    *  every caller for funding ACCRUAL — see fetchFundingRates — just not
    *  previously read for a trading decision). Optional, same abstain rule. */
   fundingSnapshot?: FundingSnapshot;
+  /** Deterministic Dynamic Volatility Profile store (sim only — the live
+   *  worker's own params never enable this, so passing it there is harmless
+   *  but currently unused). Absent/no entry for this symbol = the dynamic
+   *  ATR/structure ladder (or `calmRegimeScalp`, if on) runs exactly as
+   *  before — see `resolveVolatilityLadder`'s doc comment for the full
+   *  fallback contract. Keyed `${market}:${symbol}` — never mixed spot/linear. */
+  volatilityProfiles?: Map<string, VolatilityProfile>;
 }
 
 export interface IntradayDecision {
@@ -428,6 +437,30 @@ export function evaluateIntradayDecision(input: IntradayDecisionInput): Intraday
     : 1;
   const sizingMultiplier = adaptiveSizingMultiplier * fundingSizeMultiplier;
 
+  // Deterministic Dynamic Volatility Profile ladder — resolved here (this is
+  // where h1/tradeType/symbol/direction are all already known) and handed
+  // into buildRiskPlan as two plain numbers; intradayRisk.ts never touches
+  // candles or the profile store itself. Gated on both the opt-in param AND
+  // the caller having actually supplied a profile store — either one being
+  // absent is a clean no-op, never an error.
+  const volatilityMarket: VolatilityMarket = tradeType === 'SPOT' ? 'spot' : 'linear';
+  const lastClosedH1 = input.h1.length ? input.h1[input.h1.length - 1] : undefined;
+  const volatilityLadder = params.volatilityProfileLadder && input.volatilityProfiles
+    ? resolveVolatilityLadder({
+        profiles: input.volatilityProfiles,
+        market: volatilityMarket,
+        symbol,
+        side: isLongDirection ? 'LONG' : 'SHORT',
+        lastClosedH1
+      })
+    : null;
+  if (volatilityLadder) {
+    logs.push(
+      `[${symbol}] [volatility-profile] market=${volatilityMarket} regime=${volatilityLadder.regime} ` +
+      `stopPct=${volatilityLadder.stopPct.toFixed(4)} targetPct=${volatilityLadder.targetPct.toFixed(4)}`
+    );
+  }
+
   const risk = buildRiskPlan({
     symbol,
     direction: setup.direction as Exclude<Direction, 'NONE'>,
@@ -444,6 +477,7 @@ export function evaluateIntradayDecision(input: IntradayDecisionInput): Intraday
     // tape just got wider" both mean at the moment of entry, not on a slower frame.
     buyingSurge: isBuyingSurge(input.m5, SURGE_VOLUME_LOOKBACK, now),
     stopNoise: measureStopNoise(input.m5),
+    volatilityLadder: volatilityLadder ?? undefined,
     equity: p.portfolioValue,
     // SIM-ONLY (params.useFixedSizingBase, set in SIM_INTRADAY_PARAMS_OVERRIDE).
     // The live bot leaves it unset and keeps sizing against live equity.

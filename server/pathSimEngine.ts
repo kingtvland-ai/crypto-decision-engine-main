@@ -31,6 +31,7 @@ import {
   DEFAULT_PREV4H_RANGE_PARAMS,
   PREV4H_MIN_H1_CANDLES
 } from '@cde/engine/analysis';
+import { getVolatilityProfileStore } from './volatilityProfileStore';
 
 export type { SimPosition, SimTrade, SimPoint, PendingOrder, SimBotConfig } from '@cde/engine/execution';
 export type PathSimSnapshot = SimSnapshot;
@@ -75,7 +76,8 @@ const pathStrategy: SimEngineStrategy = {
         h1,
         currentPrice,
         priceChange24h: crypto.price_change_percentage_24h ?? 0,
-        params
+        params,
+        volatilityProfiles: getVolatilityProfileStore()
       });
       // Macro Layer sell-pressure (2026-09-16) — same check as Intraday's GATE
       // 6, extended to Path. Overrides a signal that already qualified;

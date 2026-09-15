@@ -29,6 +29,7 @@ import {
   evaluateTrendBreakout,
   DEFAULT_TREND_BREAKOUT_PARAMS
 } from '@cde/engine/analysis';
+import { getVolatilityProfileStore } from './volatilityProfileStore';
 
 export type { SimPosition, SimTrade, SimPoint, PendingOrder, SimBotConfig } from '@cde/engine/execution';
 export type BybitSimSnapshot = SimSnapshot;
@@ -81,7 +82,8 @@ const bybitStrategy: SimEngineStrategy = {
         m5,
         currentPrice,
         priceChange24h: crypto?.price_change_percentage_24h ?? 0,
-        params
+        params,
+        volatilityProfiles: getVolatilityProfileStore()
       });
       // Macro Layer sell-pressure (2026-09-16) — same check as Intraday's GATE
       // 6, extended to Bybit/TrendBreakout. Overrides a signal that already

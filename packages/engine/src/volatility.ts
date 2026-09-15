@@ -20,7 +20,7 @@ export type {
 } from './types/volatilityProfile';
 export { volatilityProfileKey, volatilityOk, volatilityErr, isVolatilityErr } from './types/volatilityProfile';
 
-export type { VolatilityInputCandle } from './services/volatilityProfile';
+export type { VolatilityInputCandle, VolatilityLadder } from './services/volatilityProfile';
 export {
   loadVolatilityProfiles,
   getVolatilityProfile,
@@ -34,6 +34,7 @@ export {
   calculateExpectedRewardRisk,
   buildVolatilityContext,
   buildDynamicRiskReference,
+  resolveVolatilityLadder,
   formatVolatilityProfileLog,
   formatVolatilityRiskLog,
   VOLATILITY_CONTRACTED_MAX,

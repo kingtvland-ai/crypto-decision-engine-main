@@ -38,7 +38,8 @@ import {
   formatVolatilityRiskLog,
   isVolatilityErr,
   type MonthlyExcursionRow,
-  type VolatilityMarket
+  type VolatilityMarket,
+  type VolatilityProfile
 } from '@cde/engine/volatility';
 
 /**
@@ -66,6 +67,36 @@ import type { TradeSide } from '@cde/engine';
 export interface VolatilityBacktestGuard {
   monthlyRows: MonthlyExcursionRow[];
   market: VolatilityMarket;
+  /** Default false: the guard only attaches [volatility-profile]/
+   *  [volatility-risk] log lines, exactly as before — trades, sizing and
+   *  gating are byte-for-byte unchanged. Set true to actually feed the
+   *  point-in-time-safe ladder into buildRiskPlan (via
+   *  `params.volatilityProfileLadder`, the same flag sim engines use), so a
+   *  backtest run measures what live/sim will really do before it's ever
+   *  proposed for LIVE. */
+  applyToRisk?: boolean;
+}
+
+/**
+ * Full look-ahead-safe profile MAP (every symbol/market in `monthlyRows`,
+ * not narrowed to one) for `applyToRisk` mode — `evaluateIntradayDecision`
+ * looks symbols up by its own resolved market (SPOT/FUTURES), which is
+ * decided per-signal and may differ from `guard.market`. Memoized by month
+ * within one `runPortfolioBacktest` call: this only changes at a calendar-
+ * month boundary, and rebuilding it per 5M bar over a multi-month backtest
+ * would be wasted work the log-only path never had to do.
+ */
+function makeVolatilityProfilesAsOfResolver(guard: VolatilityBacktestGuard) {
+  let cachedMonth: string | undefined;
+  let cachedProfiles: Map<string, VolatilityProfile> | undefined;
+  return (timestampMs: number): Map<string, VolatilityProfile> => {
+    const asOfMonth = monthOf(timestampMs);
+    if (cachedMonth !== asOfMonth || !cachedProfiles) {
+      cachedProfiles = buildVolatilityProfiles(guard.monthlyRows, asOfMonth);
+      cachedMonth = asOfMonth;
+    }
+    return cachedProfiles;
+  };
 }
 
 function monthOf(timestampMs: number): string {
@@ -269,7 +300,11 @@ function advanceCursor(series: Candle[], from: number, upTo: number): number {
 
 function intradayEvaluate(
   history: SymbolHistory, cursors: MtfCursors, now: number, currentPrice: number,
-  state: SimState, params?: IntradayParams
+  state: SimState, params?: IntradayParams,
+  /** Backtest "apply" mode only (VolatilityBacktestGuard.applyToRisk) — the
+   *  look-ahead-safe, point-in-time profile map for `now`'s month. Absent for
+   *  every other caller, which is the byte-for-byte-unchanged default. */
+  volatilityProfiles?: Map<string, VolatilityProfile>
 ): { decision: IntradayDecision | null; willExecute: boolean } {
   const m15 = history.m15, m5 = history.m5;
   if (!m15 || !m5) return { decision: null, willExecute: false };
@@ -283,7 +318,8 @@ function intradayEvaluate(
     m15: m15.slice(0, cursors.m15),
     m5: m5.slice(0, cursors.m5),
     livePrice: currentPrice,
-    params,
+    params: volatilityProfiles ? { ...(params ?? {}), volatilityProfileLadder: true } : params,
+    volatilityProfiles,
     now,
     portfolio: {
       portfolioValue: eq,
@@ -439,6 +475,11 @@ export async function runPortfolioBacktest(
     : DEFAULT_INTRADAY_PARAMS;
   const state = initState();
   const lossCooldownUntil = new Map<string, number>();
+  // Only built when applyToRisk is on — otherwise `undefined` flows straight
+  // through to intradayEvaluate, which is its own no-op check.
+  const volatilityProfilesAsOf = volatilityGuard?.applyToRisk
+    ? makeVolatilityProfilesAsOfResolver(volatilityGuard)
+    : undefined;
   const exitReasons: Record<string, number> = {};
   const tally = (reason: string) => { exitReasons[reason] = (exitReasons[reason] ?? 0) + 1; };
   const gateReasons: Record<string, number> = {};
@@ -545,7 +586,10 @@ export async function runPortfolioBacktest(
     if (ev.ts < (lossCooldownUntil.get(symbol) ?? 0)) { tallyGate('LOSS_COOLDOWN'); continue; }
     if (state.positions.length >= PORTFOLIO_MAX_POSITIONS) { tallyGate('PORTFOLIO_FULL'); continue; }
 
-    const { decision, willExecute } = intradayEvaluate(history, cursors, candle.timestamp, candle.close, state, intradayParams);
+    const { decision, willExecute } = intradayEvaluate(
+      history, cursors, candle.timestamp, candle.close, state, intradayParams,
+      volatilityProfilesAsOf?.(candle.timestamp)
+    );
     tallyGate(willExecute ? 'SIGNAL' : (decision?.gate ?? 'NO_DECISION'));
     if (!willExecute || !decision) continue;
     if (decision.tradeType === 'FUTURES' && state.positions.filter(p => p.type === 'FUTURES').length >= PORTFOLIO_MAX_FUTURES) { tallyGate('FUTURES_FULL'); continue; }

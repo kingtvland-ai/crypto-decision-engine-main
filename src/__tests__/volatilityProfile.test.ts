@@ -19,11 +19,13 @@ import {
   calculateVolatilityFactor,
   classifyVolatilityRegime,
   computeRegimeMultiplier,
+  REGIME_MULTIPLIER_MIN,
   calculateDynamicRiskPct,
   calculateDynamicOpportunityPct,
   calculateExpectedRewardRisk,
   buildVolatilityContext,
   buildDynamicRiskReference,
+  resolveVolatilityLadder,
   isVolatilityErr,
   buildVolatilityProfiles,
   buildProfileFromMonthlyValues,
@@ -295,6 +297,100 @@ describe('calculateCurrentVolatility', () => {
   it('guards against open <= 0 without dividing by zero', () => {
     const result = calculateCurrentVolatility({ open: 0, high: 10, low: -10 });
     expect(result).toEqual({ currentUp: 0, currentDown: 0, currentRange: 0 });
+  });
+});
+
+// ── resolveVolatilityLadder — the single "try it, else null" entry point ───
+// Every bot's SL/TP wiring calls only this. It must return the correct
+// ladder when everything lines up, and null (never throw, never fabricate)
+// on every failure mode a bot could hand it.
+
+describe('resolveVolatilityLadder', () => {
+  const profile = makeProfile();
+  const profiles = new Map<string, VolatilityProfile>([['spot:BTCUSDT', profile]]);
+  const candle = { open: 100, high: 103.5, low: 97 }; // volatilityFactor ~1.006, NORMAL
+
+  it('returns the dynamic risk/opportunity ladder for a valid LONG', () => {
+    const ladder = resolveVolatilityLadder({
+      profiles, market: 'spot', symbol: 'BTCUSDT', side: 'LONG', lastClosedH1: candle
+    });
+    expect(ladder).not.toBeNull();
+    expect(ladder!.regime).toBe('NORMAL');
+    expect(ladder!.stopPct).toBeCloseTo(profile.medianDown * computeRegimeMultiplier(1.006), 3);
+    expect(ladder!.targetPct).toBeCloseTo(profile.medianUp * computeRegimeMultiplier(1.006), 3);
+  });
+
+  it('SHORT reads the opposite side of the profile', () => {
+    const ladder = resolveVolatilityLadder({
+      profiles, market: 'spot', symbol: 'BTCUSDT', side: 'SHORT', lastClosedH1: candle
+    });
+    expect(ladder).not.toBeNull();
+    expect(ladder!.stopPct).toBeCloseTo(profile.medianUp * computeRegimeMultiplier(1.006), 3);
+    expect(ladder!.targetPct).toBeCloseTo(profile.medianDown * computeRegimeMultiplier(1.006), 3);
+  });
+
+  it('classifies all four regimes correctly through the full pipeline', () => {
+    // baselineRange = 6.4613. Build candles whose currentRange lands in each band.
+    const asCandle = (range: number) => ({ open: 100, high: 100 + range / 2, low: 100 - range / 2 });
+    const regimeFor = (range: number) => resolveVolatilityLadder({
+      profiles, market: 'spot', symbol: 'BTCUSDT', side: 'LONG', lastClosedH1: asCandle(range)
+    })?.regime;
+
+    expect(regimeFor(3)).toBe('CONTRACTED');   // factor ~0.46
+    expect(regimeFor(6.5)).toBe('NORMAL');     // factor ~1.006
+    expect(regimeFor(9)).toBe('EXPANDED');     // factor ~1.39
+    expect(regimeFor(12)).toBe('EXTREME');     // factor ~1.86
+  });
+
+  it('returns null (never throws) when no profile exists for the symbol', () => {
+    const ladder = resolveVolatilityLadder({
+      profiles, market: 'spot', symbol: 'NOSUCHUSDT', side: 'LONG', lastClosedH1: candle
+    });
+    expect(ladder).toBeNull();
+  });
+
+  it('returns null for the wrong market (spot profile, linear requested)', () => {
+    const ladder = resolveVolatilityLadder({
+      profiles, market: 'linear', symbol: 'BTCUSDT', side: 'LONG', lastClosedH1: candle
+    });
+    expect(ladder).toBeNull();
+  });
+
+  it('returns null when the profile has insufficient history', () => {
+    const shortProfiles = new Map<string, VolatilityProfile>([['spot:BTCUSDT', makeProfile({ months: 10 })]]);
+    const ladder = resolveVolatilityLadder({
+      profiles: shortProfiles, market: 'spot', symbol: 'BTCUSDT', side: 'LONG', lastClosedH1: candle
+    });
+    expect(ladder).toBeNull();
+  });
+
+  it('returns null when the profile is malformed', () => {
+    const badProfiles = new Map<string, VolatilityProfile>([
+      ['spot:BTCUSDT', { ...profile, medianDown: 0 }]
+    ]);
+    const ladder = resolveVolatilityLadder({
+      profiles: badProfiles, market: 'spot', symbol: 'BTCUSDT', side: 'LONG', lastClosedH1: candle
+    });
+    expect(ladder).toBeNull();
+  });
+
+  it('returns null when there is no closed H1 candle to measure from', () => {
+    const ladder = resolveVolatilityLadder({
+      profiles, market: 'spot', symbol: 'BTCUSDT', side: 'LONG', lastClosedH1: undefined
+    });
+    expect(ladder).toBeNull();
+  });
+
+  it('treats a degenerate candle (open <= 0) as flat (currentRange=0) rather than dividing by zero', () => {
+    // calculateCurrentVolatility guards open<=0 to {0,0,0}; a currentRange of 0
+    // against a positive baselineRange is a valid (CONTRACTED) factor of 0, not
+    // an error — so this still resolves a ladder, clamped to the regime floor.
+    const ladder = resolveVolatilityLadder({
+      profiles, market: 'spot', symbol: 'BTCUSDT', side: 'LONG', lastClosedH1: { open: 0, high: 10, low: -10 }
+    });
+    expect(ladder).not.toBeNull();
+    expect(ladder!.regime).toBe('CONTRACTED');
+    expect(ladder!.stopPct).toBeCloseTo(profile.medianDown * REGIME_MULTIPLIER_MIN, 3);
   });
 });
 
