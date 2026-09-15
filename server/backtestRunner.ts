@@ -29,6 +29,17 @@ import {
 } from '@cde/engine/analysis';
 // The params live in the root barrel, not the analysis one.
 import { DEFAULT_INTRADAY_PARAMS, withParams, type IntradayParams } from '@cde/engine';
+import {
+  buildVolatilityProfiles,
+  getVolatilityProfile,
+  buildVolatilityContext,
+  buildDynamicRiskReference,
+  formatVolatilityProfileLog,
+  formatVolatilityRiskLog,
+  isVolatilityErr,
+  type MonthlyExcursionRow,
+  type VolatilityMarket
+} from '@cde/engine/volatility';
 
 /**
  * Intraday parameter overrides for a single run. Undefined reproduces
@@ -37,6 +48,72 @@ import { DEFAULT_INTRADAY_PARAMS, withParams, type IntradayParams } from '@cde/e
  */
 export type IntradayOverrides = Partial<IntradayParams>;
 import type { TradeSide } from '@cde/engine';
+
+/**
+ * Optional, off-by-default volatility-profile CONTEXT for the backtest.
+ * ============================================================================
+ * Purely additive: when omitted (the default for every existing caller),
+ * the backtest's trades, sizing and gating are byte-for-byte unchanged —
+ * this only attaches [volatility-profile]/[volatility-risk] log lines
+ * (§28 of the spec) at each opened position.
+ *
+ * `monthlyRows` is the RAW monthly-results.csv content (not the compiled
+ * volatility-profiles.json, which is built from ALL 24 months and would be
+ * look-ahead for any backtest window inside that range). At each entry the
+ * profile is rebuilt from only the months that had CLOSED strictly before
+ * that entry's month — see buildVolatilityProfileAsOf below.
+ */
+export interface VolatilityBacktestGuard {
+  monthlyRows: MonthlyExcursionRow[];
+  market: VolatilityMarket;
+}
+
+function monthOf(timestampMs: number): string {
+  return new Date(timestampMs).toISOString().slice(0, 7);
+}
+
+/**
+ * Point-in-time (look-ahead-safe) profile: rebuilds the statistical profile
+ * using ONLY monthly rows whose month closed strictly before `asOfTimestamp`.
+ * Never touches volatility-profiles.json (which is calibrated from the full
+ * 24-month history and would leak future months into a backtest run inside
+ * that window).
+ */
+function buildVolatilityProfileAsOf(
+  guard: VolatilityBacktestGuard,
+  symbol: string,
+  asOfTimestamp: number
+) {
+  const asOfMonth = monthOf(asOfTimestamp);
+  const profiles = buildVolatilityProfiles(guard.monthlyRows, asOfMonth);
+  return getVolatilityProfile(profiles, guard.market, symbol);
+}
+
+/**
+ * Logs volatility context for one opened position, using only data that had
+ * closed strictly before `pos.openTimestamp`. Never throws, never influences
+ * sizing/gating — a missing or invalid profile (PROFILE_NOT_FOUND,
+ * PROFILE_INSUFFICIENT_HISTORY early in the window) just skips the log line.
+ */
+function logVolatilityContextForEntry(
+  guard: VolatilityBacktestGuard,
+  symbol: string,
+  side: TradeSide,
+  entryTimestamp: number,
+  lastClosedH1: Candle | undefined
+): void {
+  if (!lastClosedH1) return;
+  const profileResult = buildVolatilityProfileAsOf(guard, symbol, entryTimestamp);
+  if (isVolatilityErr(profileResult)) return;
+
+  const contextResult = buildVolatilityContext(guard.market, symbol, lastClosedH1, profileResult.value);
+  if (isVolatilityErr(contextResult)) return;
+  console.log(formatVolatilityProfileLog(contextResult.value, profileResult.value));
+
+  const riskSide = side === 'SHORT' || side === 'SELL' ? 'SHORT' : 'LONG';
+  const riskRefResult = buildDynamicRiskReference(riskSide, profileResult.value, contextResult.value.volatilityFactor);
+  if (!isVolatilityErr(riskRefResult)) console.log(formatVolatilityRiskLog(contextResult.value, riskRefResult.value));
+}
 
 export type EngineType = 'intraday';
 
@@ -350,7 +427,8 @@ const PORTFOLIO_MAX_FUTURES = 2;
 export async function runPortfolioBacktest(
   histories: SymbolHistory[],
   engine: EngineType,
-  intradayOverrides?: IntradayOverrides
+  intradayOverrides?: IntradayOverrides,
+  volatilityGuard?: VolatilityBacktestGuard
 ): Promise<BacktestResult> {
   void engine; // single valid value today; kept for API stability
   // Merged, never replaced. `input.params ?? DEFAULT_INTRADAY_PARAMS` only
@@ -475,6 +553,13 @@ export async function runPortfolioBacktest(
 
     if (!pos) tallyGate('RISK_REJECTED');
     if (pos) {
+      if (volatilityGuard) {
+        // history.candles.slice(0, cursors.h1) is the point-in-time-safe H1
+        // series already used by intradayEvaluate above — its last element
+        // is the most recent CLOSED 1H candle, never the one still forming.
+        const lastClosedH1 = cursors.h1 > 0 ? candles[cursors.h1 - 1] : undefined;
+        logVolatilityContextForEntry(volatilityGuard, symbol, pos.side, candle.timestamp, lastClosedH1);
+      }
       const entryNotional = pos.type === 'SPOT' ? pos.quantity * candle.close : pos.sizeUsd;
       const entryFee = calculateTradingFee(entryNotional, pos.type, true);
       const slippage = entryNotional * (SLIPPAGE_PERCENT / 100);

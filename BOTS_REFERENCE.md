@@ -2,7 +2,8 @@
 
 > קובץ זה נבנה ע"י קריאת הקוד עצמו (לא תיעוד קודם). כל שורה כאן מצוינת עם
 > הקובץ שבו היא באמת קורית. עדכן אותו כשהחישוב עצמו משתנה — לא לפני.
-> נכון לתאריך: 2026-09-07, מסביב לקומיטים עד `e1ca516` + תוספת בוט 4 (Bybit).
+> נכון לתאריך: 2026-09-07, מסביב לקומיטים עד `e1ca516` + תוספת בוט 4 (Bybit)
+> + תוספת מודול Volatility Profile ב-2026-09-16 (§5, לא מחובר לאף בוט).
 
 ארבעת הבוטים רצים כ-4 מופעים נפרדים לגמרי של אותה תשתית
 (`server/simEngineFactory.ts` → `createGenericSimEngine`) — לכל אחד `cash`,
@@ -624,6 +625,48 @@ SHORT מקבל. חלון הצבירה חסום ל-8 שעות כדי שהשבתת
 ה-futures של Intraday והשורטים של Bybit מרגישים את זה. זהו תיקון מודל-עלויות
 אחיד — לא שינוי באלגוריתם של אף מנוע.
 
+## 5. Volatility Profile — מודול נפרד, **לא מחובר לאף בוט** (2026-09-16)
+
+יכולת עצמאית שנוספה, **לא** שינוי בהתנהגות של אף אחד מ-4 הבוטים למעלה.
+מודל סטטיסטי-דטרמיניסטי (Median/P25/P75 על 24 חודשי excursion מקסימלי בנרות
+1H) — **לא** ML, **לא** LLM. שום מנוע סיגנל/סיכון קיים לא קורא לו.
+
+**קבצים:**
+```
+packages/engine/src/types/volatilityProfile.ts        ← טיפוסים
+packages/engine/src/services/volatilityCalibration.ts ← סטטיסטיקה טהורה (mean/median/percentile, buildVolatilityProfiles)
+packages/engine/src/services/volatilityProfile.ts      ← שירות runtime (loadVolatilityProfiles, getVolatilityProfile, calculateCurrentVolatility, calculateVolatilityFactor, classifyVolatilityRegime, calculateDynamicRiskPct/OpportunityPct, calculateExpectedRewardRisk, validateVolatilityProfile)
+packages/engine/src/volatility.ts                      ← ברזל ייצוא, @cde/engine/volatility
+scripts/generateVolatilityProfiles.ts                  ← כיול CSV→JSON, דטרמיניסטי
+data/volatility-profiles/monthly-results.csv           ← מקור (per category+symbol, 24 חודשים)
+data/volatility-profiles/volatility-profiles.json      ← קומפילציה; ה-runtime קורא רק אותו
+src/__tests__/volatilityProfile.test.ts                ← 36 טסטים (BTC Spot/Linear אמיתיים + כל מקרי הקצה)
+```
+ב-`data/` ולא ב-`ASSETS/` — `ASSETS/` מוחרג לגמרי מ-`.gitignore` (מיועד
+לדאמפים גולמיים, לא לקוד/קונפיג שנכנס לריפו).
+
+**נוסחאות מדויקות:** ראה `ALGO_MATH.md` §8 (זהה, לא כפול כאן).
+
+**חיבור ל-Backtest (`server/backtestRunner.ts`) — opt-in, לא ברירת מחדל:**
+`runPortfolioBacktest` קיבל פרמטר רביעי אופציונלי, `volatilityGuard?`.
+נבדק כל קורא קיים (`scripts/abBacktest.ts`, `intradayBacktestParity.test.ts`)
+— אף אחד לא מעביר אותו, אז ההתנהגות **זהה לחלוטין** למה שהייתה. כשמועבר:
+מדפיס `[volatility-profile]`/`[volatility-risk]` בכל פתיחת פוזיציה בלבד,
+בלי לגעת בגודל/כניסה/יציאה. הגנת look-ahead: הפרופיל **לא** נלקח מ-JSON
+המקומפל (שנבנה מכל 24 החודשים) אלא נבנה מחדש בכל כניסה, מוגבל לחודשים
+שנסגרו **לפני** חודש הכניסה (`buildVolatilityProfileAsOf`), על ה-H1 האחרון
+שכבר נסגר (`cursors.h1` — אותו מצביע שהמנוע עצמו כבר משתמש בו).
+
+**מה עדיין לא קיים:** שום חיבור חי ל-`intradayRisk.ts` / `proAlgEngine.ts` /
+`prev4hRangeExecution.ts` / `trendBreakoutExecution.ts` — הפונקציות מוכנות
+(טהורות, נבדקות) אך לא נצרכות. שילוב חי הוא עבודה עתידית נפרדת.
+
+**וידוא (2026-09-16):** אחרי ההוספה — 860 טסטים עברו (65 קבצים, 0 נכשלו),
+`typecheck` + `typecheck:worker` נקיים, `build` + `build:worker` עברו. השינוי
+היחיד לקוד סימולציה קיים הוא ה-4 שורות המותנות ב-`volatilityGuard` למעלה.
+
+---
+
 ## פערים ידועים, לא-קריטיים (לא תוקנו — לתעד בלבד)
 - **Pro `PRO_COVERAGE_FULL_WEIGHT=88`** מול סכום משקלות בפועל **105** —
   לא נבדק לעומק אם זה מקדים coverage=1 בתקופת חימום. (עונש הקורלציה לא נוגע
@@ -633,3 +676,7 @@ SHORT מקבל. חלון הצבירה חסום ל-8 שעות כדי שהשבתת
   **אף בוט לא סוחר לפיהם יותר** מאז שנתיב 4H עבר ל-Prev-4H Range.
 - **Prev-4H Range** — פילטר מגמת EMA20 בלבד; אין הוכחה לקצה אחרי עלויות
   (פריצות 4H מאובררות היטב). נוסף כ**עמית השוואה**, לא כהמלצה.
+- **`scripts/abBacktest.ts:335`** — קורא ל-`runPortfolioBacktest` בסדר
+  ארגומנטים שגוי (`FIXED_SL` איפה ש-`engine` מצופה). קיים מ-2026-09-06
+  לפי `git blame`, לא קשור לתוספת §5 — `scripts/` לא נכלל באף פרויקט
+  typecheck. לא תוקן, מתועד כדי שלא יתבלבל עם רגרסיה חדשה.

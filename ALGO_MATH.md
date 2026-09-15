@@ -3,7 +3,8 @@
 > תצוגת **מבנה + נוסחאות**. הגרסה עם הפניות-שורה מדויקות לקוד היא
 > `BOTS_REFERENCE.md` — עדכן אותה כשחישוב משתנה. כאן: איך הצינור בנוי ומה
 > המתמטיקה בכל שלב.
-> נכון ל-2026-09-10. סימולציה בלבד — אף בוט לא שולח פקודה אמיתית.
+> נכון ל-2026-09-10 (+תוספת Volatility Profile ב-2026-09-16, §8). סימולציה
+> בלבד — אף בוט לא שולח פקודה אמיתית.
 
 הבוטים בדף `/simulation-bot`:
 
@@ -581,3 +582,65 @@ TP1 הקבוע 1.8% הוא **הלב של האסטרטגיה**: יחס-סיכוי
   ל-Prev-4H Range.
 - **Prev-4H Range** — פילטר EMA20 בלבד; אין הוכחה לקצה אחרי עלויות (פריצות
   4H מאובררות היטב). נוסף כעמית השוואה, לא כהמלצה.
+- **`scripts/abBacktest.ts:335`** — קורא ל-`runPortfolioBacktest` עם סדר
+  ארגומנטים שגוי (`FIXED_SL` איפה ש-`engine: EngineType` מצופה, ולהפך).
+  קיים כך לפחות מ-2026-09-06 (`git blame`); `scripts/` לא נכלל באף אחד
+  מפרויקטי ה-typecheck (`tsconfig.app.json`/`tsconfig.worker.json`) ולכן
+  אף פעם לא נתפס. לא תוקן כחלק מעבודת §8 — תועד כדי שלא יבולבל עם רגרסיה
+  חדשה.
+
+---
+
+## 8. Volatility Profile — מודול נפרד, **לא מחובר לאף בוט** (2026-09-16)
+
+מודל סטטיסטי-דטרמיניסטי (**לא** ML, **לא** LLM) של "חתימת התנודתיות"
+ההיסטורית של סימבול, מבוסס Median/P25/P75 על 24 חודשי excursion מקסימלי
+(High/Low מול Open) בנרות 1H. נוסף כ**יכולת עצמאית** — אף אחד מ-4 בוטי
+הסימולציה (Intraday / Pro / Path / Bybit) לא קורא לו כרגע, ולכן שום מתמטיקה
+בסעיפים 1–5 למעלה לא השתנתה.
+
+### קבצים
+```
+packages/engine/src/types/volatilityProfile.ts        ← טיפוסים (VolatilityProfile, VolatilityRegime, ...)
+packages/engine/src/services/volatilityCalibration.ts  ← סטטיסטיקה טהורה (mean/median/percentile, buildVolatilityProfiles)
+packages/engine/src/services/volatilityProfile.ts      ← שירות runtime (load/get/classify/calculate...)
+packages/engine/src/volatility.ts                      ← ברזל ייצוא — @cde/engine/volatility
+scripts/generateVolatilityProfiles.ts                  ← סקריפט כיול (CSV → JSON), דטרמיניסטי
+data/volatility-profiles/monthly-results.csv           ← מקור (24 חודשים, per category+symbol)
+data/volatility-profiles/volatility-profiles.json      ← קומפילציה, ה-runtime קורא **רק** אותו
+src/__tests__/volatilityProfile.test.ts                ← 36 טסטים
+```
+`data/` (לא `ASSETS/`) כי `ASSETS/` מוחרג לגמרי מ-git (`.gitignore`) — נועד
+לדאמפים גולמיים לניתוח, לא לקוד/קונפיג שאמורים להיכנס לריפו.
+
+### נוסחאות
+```
+currentUp   = (High−Open)/Open·100     currentDown = (Open−Low)/Open·100
+volatilityFactor = currentRange / baselineRange     (baselineRange = medianUp+medianDown)
+regime: <0.75 CONTRACTED · 0.75–1.25 NORMAL · >1.25 EXPANDED · >1.75 EXTREME
+regimeMultiplier   = clamp(volatilityFactor, 0.75, 1.75)
+dynamicRiskPct     = (LONG→medianDown : SHORT→medianUp) · regimeMultiplier
+dynamicOpportunityPct = (LONG→medianUp : SHORT→medianDown) · regimeMultiplier
+```
+כל שגיאה (`PROFILE_NOT_FOUND` / `PROFILE_INSUFFICIENT_HISTORY` / `INVALID_PROFILE`)
+מוחזרת כערך מפורש (`VolatilityResult<T>`) — אין fallback מזויף, אין ניחוש.
+
+### חיבור ל-Backtest — opt-in בלבד, לא משפיע כברירת מחדל
+`runPortfolioBacktest` (`server/backtestRunner.ts`) קיבל פרמטר **רביעי,
+אופציונלי**, `volatilityGuard?: VolatilityBacktestGuard`. אף קורא קיים
+(לא `abBacktest.ts`, לא הטסטים) לא מעביר אותו → `undefined` בכל מקום →
+**אפס שינוי התנהגות**. כשכן מועבר: בכל פתיחת פוזיציה מודפס `[volatility-profile]`/
+`[volatility-risk]` (§28-style), ותו לא — לא נוגע בגודל/כניסה/סטופ/יציאה.
+
+**הגנת look-ahead:** הפרופיל **לא** נלקח מ-`volatility-profiles.json` המקומפל
+(שנבנה מכל 24 החודשים — היה look-ahead בתוך אותו חלון). הוא נבנה מחדש
+בכל כניסה מ-`monthlyRows` הגולמי, מוגבל לחודשים שנסגרו **לפני** חודש
+הכניסה בלבד (`buildVolatilityProfileAsOf`), ומחושב על ה-H1 האחרון שכבר
+נסגר — אותו מצביע `cursors.h1` שהמנוע עצמו כבר משתמש בו למניעת look-ahead.
+
+### מה עדיין לא קיים
+אף לא אחד מ-4 הבוטים קורא ל-`buildDynamicRiskReference`/`buildVolatilityContext`
+בזמן החלטה חיה — הפונקציות טהורות, בדוקות (36/36) ומוכנות לצריכה ע"י Risk
+Engine עתידי, אך אף מנוע סיגנל/סיכון קיים (`intradayRisk.ts`, `proAlgEngine.ts`,
+`prev4hRangeExecution.ts`, `trendBreakoutExecution.ts`) לא נוגע בהן. שילוב חי
+הוא עבודה עתידית נפרדת.

@@ -7,6 +7,7 @@
     ".": "./src/index.ts",
     "./market-data": "./src/market-data.ts",
     "./execution": "./src/execution.ts",
-    "./analysis": "./src/analysis.ts"
+    "./analysis": "./src/analysis.ts",
+    "./volatility": "./src/volatility.ts"
   }
 }

@@ -1,0 +1,808 @@
+{
+  "version": "1.0.0",
+  "timeframe": "1H",
+  "historyMonths": 24,
+  "generatedAt": "2026-09-15T21:01:13.270Z",
+  "profiles": {
+    "linear:1000PEPEUSDT": {
+      "months": 24,
+      "meanUp": 8.6592,
+      "medianUp": 6.9544,
+      "p25Up": 5.7367,
+      "p75Up": 8.1972,
+      "meanDown": 10.8907,
+      "medianDown": 8.2965,
+      "p25Down": 5.6144,
+      "p75Down": 10.3824,
+      "meanRatio": 0.7951,
+      "medianRatio": 0.8382,
+      "consistency": 0.7825,
+      "baselineRange": 15.2509,
+      "diagnostics": {
+        "maxUp": 35.4224,
+        "maxDown": 66.7612
+      },
+      "profileQualityScore": 0.9027
+    },
+    "linear:ADAUSDT": {
+      "months": 24,
+      "meanUp": 7.3526,
+      "medianUp": 5.358,
+      "p25Up": 4.2361,
+      "p75Up": 7.3502,
+      "meanDown": 10.3435,
+      "medianDown": 7.076,
+      "p25Down": 5.1885,
+      "p75Down": 9.335,
+      "meanRatio": 0.7108,
+      "medianRatio": 0.7572,
+      "consistency": 0.7064,
+      "baselineRange": 12.434,
+      "diagnostics": {
+        "maxUp": 38.7361,
+        "maxDown": 62.2188
+      },
+      "profileQualityScore": 0.8703
+    },
+    "linear:ARBUSDT": {
+      "months": 24,
+      "meanUp": 6.4893,
+      "medianUp": 6.0071,
+      "p25Up": 4.6082,
+      "p75Up": 7.7415,
+      "meanDown": 11.3109,
+      "medianDown": 7.6824,
+      "p25Down": 6.2424,
+      "p75Down": 10.781,
+      "meanRatio": 0.5737,
+      "medianRatio": 0.7819,
+      "consistency": 0.8025,
+      "baselineRange": 13.6896,
+      "diagnostics": {
+        "maxUp": 10.946,
+        "maxDown": 71.4955
+      },
+      "profileQualityScore": 0.8677
+    },
+    "linear:BNBUSDT": {
+      "months": 24,
+      "meanUp": 3.4916,
+      "medianUp": 3.1877,
+      "p25Up": 2.365,
+      "p75Up": 4.1647,
+      "meanDown": 5.4548,
+      "medianDown": 3.7245,
+      "p25Down": 2.788,
+      "p75Down": 5.0975,
+      "meanRatio": 0.6401,
+      "medianRatio": 0.8559,
+      "consistency": 0.7979,
+      "baselineRange": 6.9122,
+      "diagnostics": {
+        "maxUp": 6.8854,
+        "maxDown": 27.8149
+      },
+      "profileQualityScore": 0.8687
+    },
+    "linear:BTCUSDT": {
+      "months": 24,
+      "meanUp": 3.5158,
+      "medianUp": 3.105,
+      "p25Up": 2.4356,
+      "p75Up": 4.1023,
+      "meanDown": 4.0296,
+      "medianDown": 3.4329,
+      "p25Down": 2.5351,
+      "p75Down": 4.8448,
+      "meanRatio": 0.8725,
+      "medianRatio": 0.9045,
+      "consistency": 0.8675,
+      "baselineRange": 6.5379,
+      "diagnostics": {
+        "maxUp": 7.4447,
+        "maxDown": 11.5379
+      },
+      "profileQualityScore": 0.9399
+    },
+    "linear:DOGEUSDT": {
+      "months": 24,
+      "meanUp": 6.7639,
+      "medianUp": 6.0136,
+      "p25Up": 4.9948,
+      "p75Up": 7.4212,
+      "meanDown": 9.7957,
+      "medianDown": 6.8801,
+      "p25Down": 5.3847,
+      "p75Down": 9.6276,
+      "meanRatio": 0.6905,
+      "medianRatio": 0.8741,
+      "consistency": 0.7957,
+      "baselineRange": 12.8936,
+      "diagnostics": {
+        "maxUp": 16.1549,
+        "maxDown": 60.8658
+      },
+      "profileQualityScore": 0.8763
+    },
+    "linear:ENAUSDT": {
+      "months": 24,
+      "meanUp": 9.4383,
+      "medianUp": 9.3288,
+      "p25Up": 7.336,
+      "p75Up": 11.3385,
+      "meanDown": 11.4672,
+      "medianDown": 8.0194,
+      "p25Down": 6.7574,
+      "p75Down": 11.6693,
+      "meanRatio": 0.8231,
+      "medianRatio": 1.1633,
+      "consistency": 0.8439,
+      "baselineRange": 17.3482,
+      "diagnostics": {
+        "maxUp": 14.9027,
+        "maxDown": 73.3118
+      },
+      "profileQualityScore": 0.8791
+    },
+    "linear:ETHUSDT": {
+      "months": 24,
+      "meanUp": 5.5025,
+      "medianUp": 5.1817,
+      "p25Up": 4.1176,
+      "p75Up": 6.408,
+      "meanDown": 5.983,
+      "medianDown": 5.2456,
+      "p25Down": 4.1244,
+      "p75Down": 6.4758,
+      "meanRatio": 0.9197,
+      "medianRatio": 0.9878,
+      "consistency": 0.9092,
+      "baselineRange": 10.4273,
+      "diagnostics": {
+        "maxUp": 12.3305,
+        "maxDown": 16.4174
+      },
+      "profileQualityScore": 0.9499
+    },
+    "linear:LINKUSDT": {
+      "months": 24,
+      "meanUp": 5.9063,
+      "medianUp": 4.8107,
+      "p25Up": 3.8682,
+      "p75Up": 8.1816,
+      "meanDown": 9.5665,
+      "medianDown": 6.4597,
+      "p25Down": 5.1383,
+      "p75Down": 9.25,
+      "meanRatio": 0.6174,
+      "medianRatio": 0.7447,
+      "consistency": 0.7449,
+      "baselineRange": 11.2703,
+      "diagnostics": {
+        "maxUp": 10.8229,
+        "maxDown": 60.8883
+      },
+      "profileQualityScore": 0.8638
+    },
+    "linear:LSKUSDT": {
+      "months": 24,
+      "meanUp": 8.6181,
+      "medianUp": 6.0809,
+      "p25Up": 4.6508,
+      "p75Up": 10.0706,
+      "meanDown": 9.571,
+      "medianDown": 6.5265,
+      "p25Down": 5.2566,
+      "p75Down": 12.6553,
+      "meanRatio": 0.9004,
+      "medianRatio": 0.9317,
+      "consistency": 0.6937,
+      "baselineRange": 12.6074,
+      "diagnostics": {
+        "maxUp": 33.6488,
+        "maxDown": 35.9035
+      },
+      "profileQualityScore": 0.8708
+    },
+    "linear:NEARUSDT": {
+      "months": 24,
+      "meanUp": 6.119,
+      "medianUp": 6.0328,
+      "p25Up": 4.878,
+      "p75Up": 6.8278,
+      "meanDown": 9.973,
+      "medianDown": 6.4964,
+      "p25Down": 5.5863,
+      "p75Down": 10.1815,
+      "meanRatio": 0.6136,
+      "medianRatio": 0.9286,
+      "consistency": 0.8187,
+      "baselineRange": 12.5292,
+      "diagnostics": {
+        "maxUp": 10.2167,
+        "maxDown": 47.8261
+      },
+      "profileQualityScore": 0.8596
+    },
+    "linear:ONDOUSDT": {
+      "months": 24,
+      "meanUp": 8.337,
+      "medianUp": 8.1688,
+      "p25Up": 5.8578,
+      "p75Up": 9.8685,
+      "meanDown": 11.5719,
+      "medianDown": 7.0652,
+      "p25Down": 6.1293,
+      "p75Down": 10.429,
+      "meanRatio": 0.7205,
+      "medianRatio": 1.1562,
+      "consistency": 0.7952,
+      "baselineRange": 15.234,
+      "diagnostics": {
+        "maxUp": 15.6994,
+        "maxDown": 68.432
+      },
+      "profileQualityScore": 0.8427
+    },
+    "linear:SOLUSDT": {
+      "months": 24,
+      "meanUp": 5.6994,
+      "medianUp": 5.4753,
+      "p25Up": 3.7341,
+      "p75Up": 6.5922,
+      "meanDown": 7.2293,
+      "medianDown": 6.4474,
+      "p25Down": 4.5135,
+      "p75Down": 7.4904,
+      "meanRatio": 0.7884,
+      "medianRatio": 0.8492,
+      "consistency": 0.9263,
+      "baselineRange": 11.9226,
+      "diagnostics": {
+        "maxUp": 16.2959,
+        "maxDown": 25.4666
+      },
+      "profileQualityScore": 0.9562
+    },
+    "linear:SUIUSDT": {
+      "months": 24,
+      "meanUp": 7.6019,
+      "medianUp": 7.1482,
+      "p25Up": 5.6856,
+      "p75Up": 9.2978,
+      "meanDown": 11.4708,
+      "medianDown": 7.2525,
+      "p25Down": 5.85,
+      "p75Down": 10.7693,
+      "meanRatio": 0.6627,
+      "medianRatio": 0.9856,
+      "consistency": 0.7863,
+      "baselineRange": 14.4007,
+      "diagnostics": {
+        "maxUp": 13.6313,
+        "maxDown": 81.7567
+      },
+      "profileQualityScore": 0.849
+    },
+    "linear:TAOUSDT": {
+      "months": 24,
+      "meanUp": 7.4404,
+      "medianUp": 7.1211,
+      "p25Up": 5.9711,
+      "p75Up": 8.6156,
+      "meanDown": 11.4789,
+      "medianDown": 7.3652,
+      "p25Down": 6.5244,
+      "p75Down": 10.5959,
+      "meanRatio": 0.6482,
+      "medianRatio": 0.9669,
+      "consistency": 0.7994,
+      "baselineRange": 14.4862,
+      "diagnostics": {
+        "maxUp": 15.0479,
+        "maxDown": 65.3941
+      },
+      "profileQualityScore": 0.8538
+    },
+    "linear:UNIUSDT": {
+      "months": 24,
+      "meanUp": 9.5118,
+      "medianUp": 8.384,
+      "p25Up": 5.633,
+      "p75Up": 10.4946,
+      "meanDown": 10.9973,
+      "medianDown": 7.3015,
+      "p25Down": 6.7582,
+      "p75Down": 10.0061,
+      "meanRatio": 0.8649,
+      "medianRatio": 1.1483,
+      "consistency": 0.7727,
+      "baselineRange": 15.6855,
+      "diagnostics": {
+        "maxUp": 34.1586,
+        "maxDown": 70.3443
+      },
+      "profileQualityScore": 0.8597
+    },
+    "linear:XLMUSDT": {
+      "months": 24,
+      "meanUp": 6.9613,
+      "medianUp": 5.3171,
+      "p25Up": 3.796,
+      "p75Up": 8.7396,
+      "meanDown": 9.25,
+      "medianDown": 5.9091,
+      "p25Down": 4.1655,
+      "p75Down": 8.282,
+      "meanRatio": 0.7526,
+      "medianRatio": 0.8998,
+      "consistency": 0.7013,
+      "baselineRange": 11.2262,
+      "diagnostics": {
+        "maxUp": 20.6877,
+        "maxDown": 53.6537
+      },
+      "profileQualityScore": 0.8478
+    },
+    "linear:XRPUSDT": {
+      "months": 24,
+      "meanUp": 6.7183,
+      "medianUp": 5.8205,
+      "p25Up": 3.97,
+      "p75Up": 7.6814,
+      "meanDown": 9.2959,
+      "medianDown": 6.3171,
+      "p25Down": 4.4464,
+      "p75Down": 8.9725,
+      "meanRatio": 0.7227,
+      "medianRatio": 0.9214,
+      "consistency": 0.773,
+      "baselineRange": 12.1376,
+      "diagnostics": {
+        "maxUp": 21.7094,
+        "maxDown": 53.2105
+      },
+      "profileQualityScore": 0.8661
+    },
+    "linear:ZECUSDT": {
+      "months": 24,
+      "meanUp": 10.2819,
+      "medianUp": 8.356,
+      "p25Up": 6.9868,
+      "p75Up": 13.7046,
+      "meanDown": 10.823,
+      "medianDown": 6.7765,
+      "p25Down": 5.6318,
+      "p75Down": 15.3029,
+      "meanRatio": 0.95,
+      "medianRatio": 1.2331,
+      "consistency": 0.7194,
+      "baselineRange": 15.1325,
+      "diagnostics": {
+        "maxUp": 17.7061,
+        "maxDown": 34.1879
+      },
+      "profileQualityScore": 0.8418
+    },
+    "spot:AAVEUSDT": {
+      "months": 24,
+      "meanUp": 6.6393,
+      "medianUp": 6.2553,
+      "p25Up": 5.5325,
+      "p75Up": 7.7541,
+      "meanDown": 10.1086,
+      "medianDown": 6.8316,
+      "p25Down": 5.356,
+      "p75Down": 9.8478,
+      "meanRatio": 0.6568,
+      "medianRatio": 0.9156,
+      "consistency": 0.809,
+      "baselineRange": 13.0868,
+      "diagnostics": {
+        "maxUp": 11.5194,
+        "maxDown": 67.033
+      },
+      "profileQualityScore": 0.8671
+    },
+    "spot:ADAUSDT": {
+      "months": 24,
+      "meanUp": 7.3367,
+      "medianUp": 5.2763,
+      "p25Up": 4.2255,
+      "p75Up": 7.6494,
+      "meanDown": 10.2245,
+      "medianDown": 7.1253,
+      "p25Down": 5.0972,
+      "p75Down": 9.312,
+      "meanRatio": 0.7176,
+      "medianRatio": 0.7405,
+      "consistency": 0.708,
+      "baselineRange": 12.4016,
+      "diagnostics": {
+        "maxUp": 38.7456,
+        "maxDown": 61.0739
+      },
+      "profileQualityScore": 0.877
+    },
+    "spot:ARBUSDT": {
+      "months": 24,
+      "meanUp": 6.3743,
+      "medianUp": 5.6707,
+      "p25Up": 4.522,
+      "p75Up": 7.4385,
+      "meanDown": 11.2144,
+      "medianDown": 7.626,
+      "p25Down": 6.263,
+      "p75Down": 10.6696,
+      "meanRatio": 0.5684,
+      "medianRatio": 0.7436,
+      "consistency": 0.7848,
+      "baselineRange": 13.2967,
+      "diagnostics": {
+        "maxUp": 10.6412,
+        "maxDown": 71.35
+      },
+      "profileQualityScore": 0.8668
+    },
+    "spot:AVAXUSDT": {
+      "months": 24,
+      "meanUp": 5.8126,
+      "medianUp": 5.5485,
+      "p25Up": 4.5181,
+      "p75Up": 6.5082,
+      "meanDown": 9.5584,
+      "medianDown": 6.7433,
+      "p25Down": 5.0827,
+      "p75Down": 7.9138,
+      "meanRatio": 0.6081,
+      "medianRatio": 0.8228,
+      "consistency": 0.83,
+      "baselineRange": 12.2918,
+      "diagnostics": {
+        "maxUp": 9.2889,
+        "maxDown": 66.2
+      },
+      "profileQualityScore": 0.8798
+    },
+    "spot:BNBUSDT": {
+      "months": 24,
+      "meanUp": 3.4747,
+      "medianUp": 3.1975,
+      "p25Up": 2.3423,
+      "p75Up": 4.247,
+      "meanDown": 5.2993,
+      "medianDown": 3.6684,
+      "p25Down": 2.8957,
+      "p75Down": 5.1719,
+      "meanRatio": 0.6557,
+      "medianRatio": 0.8716,
+      "consistency": 0.8062,
+      "baselineRange": 6.8659,
+      "diagnostics": {
+        "maxUp": 6.8711,
+        "maxDown": 27.1089
+      },
+      "profileQualityScore": 0.8729
+    },
+    "spot:BTCUSDT": {
+      "months": 24,
+      "meanUp": 3.4548,
+      "medianUp": 3.0574,
+      "p25Up": 2.4351,
+      "p75Up": 4.0314,
+      "meanDown": 3.9469,
+      "medianDown": 3.4039,
+      "p25Down": 2.5179,
+      "p75Down": 4.8087,
+      "meanRatio": 0.8753,
+      "medianRatio": 0.8982,
+      "consistency": 0.8737,
+      "baselineRange": 6.4613,
+      "diagnostics": {
+        "maxUp": 7.3658,
+        "maxDown": 10.4602
+      },
+      "profileQualityScore": 0.9444
+    },
+    "spot:DOGEUSDT": {
+      "months": 24,
+      "meanUp": 6.7284,
+      "medianUp": 6.0011,
+      "p25Up": 4.9252,
+      "p75Up": 7.3656,
+      "meanDown": 9.6802,
+      "medianDown": 6.8605,
+      "p25Down": 5.3424,
+      "p75Down": 9.8034,
+      "meanRatio": 0.6951,
+      "medianRatio": 0.8747,
+      "consistency": 0.8003,
+      "baselineRange": 12.8616,
+      "diagnostics": {
+        "maxUp": 16.1368,
+        "maxDown": 57.7606
+      },
+      "profileQualityScore": 0.879
+    },
+    "spot:ENAUSDT": {
+      "months": 24,
+      "meanUp": 9.5011,
+      "medianUp": 9.2956,
+      "p25Up": 6.4909,
+      "p75Up": 11.3098,
+      "meanDown": 11.2388,
+      "medianDown": 8.0072,
+      "p25Down": 6.8882,
+      "p75Down": 11.4001,
+      "meanRatio": 0.8454,
+      "medianRatio": 1.1609,
+      "consistency": 0.8454,
+      "baselineRange": 17.3028,
+      "diagnostics": {
+        "maxUp": 18.2566,
+        "maxDown": 71.493
+      },
+      "profileQualityScore": 0.8838
+    },
+    "spot:ETHUSDT": {
+      "months": 24,
+      "meanUp": 5.4675,
+      "medianUp": 5.1488,
+      "p25Up": 4.0784,
+      "p75Up": 6.3709,
+      "meanDown": 5.7998,
+      "medianDown": 5.1828,
+      "p25Down": 4.0886,
+      "p75Down": 6.413,
+      "meanRatio": 0.9427,
+      "medianRatio": 0.9934,
+      "consistency": 0.9177,
+      "baselineRange": 10.3315,
+      "diagnostics": {
+        "maxUp": 12.2416,
+        "maxDown": 15.8265
+      },
+      "profileQualityScore": 0.9568
+    },
+    "spot:LINKUSDT": {
+      "months": 24,
+      "meanUp": 5.8692,
+      "medianUp": 4.7249,
+      "p25Up": 3.801,
+      "p75Up": 8.0532,
+      "meanDown": 9.3429,
+      "medianDown": 6.4985,
+      "p25Down": 5.1058,
+      "p75Down": 9.0799,
+      "meanRatio": 0.6282,
+      "medianRatio": 0.7271,
+      "consistency": 0.7503,
+      "baselineRange": 11.2233,
+      "diagnostics": {
+        "maxUp": 10.8388,
+        "maxDown": 59.4262
+      },
+      "profileQualityScore": 0.8729
+    },
+    "spot:LTCUSDT": {
+      "months": 24,
+      "meanUp": 5.9481,
+      "medianUp": 4.6617,
+      "p25Up": 3.2609,
+      "p75Up": 7.5795,
+      "meanDown": 8.6784,
+      "medianDown": 6.0872,
+      "p25Down": 4.4922,
+      "p75Down": 7.8232,
+      "meanRatio": 0.6854,
+      "medianRatio": 0.7658,
+      "consistency": 0.7426,
+      "baselineRange": 10.7489,
+      "diagnostics": {
+        "maxUp": 12.5828,
+        "maxDown": 57.3931
+      },
+      "profileQualityScore": 0.876
+    },
+    "spot:MNTUSDT": {
+      "months": 24,
+      "meanUp": 7.6953,
+      "medianUp": 6.1695,
+      "p25Up": 4.0228,
+      "p75Up": 9.5324,
+      "meanDown": 9.3919,
+      "medianDown": 5.9906,
+      "p25Down": 4.3435,
+      "p75Down": 13.2307,
+      "meanRatio": 0.8194,
+      "medianRatio": 1.0299,
+      "consistency": 0.7198,
+      "baselineRange": 12.1601,
+      "diagnostics": {
+        "maxUp": 28.2926,
+        "maxDown": 39.197
+      },
+      "profileQualityScore": 0.847
+    },
+    "spot:NEARUSDT": {
+      "months": 24,
+      "meanUp": 6.1203,
+      "medianUp": 6.1102,
+      "p25Up": 4.6997,
+      "p75Up": 6.9033,
+      "meanDown": 9.5528,
+      "medianDown": 6.4695,
+      "p25Down": 5.4526,
+      "p75Down": 9.8474,
+      "meanRatio": 0.6407,
+      "medianRatio": 0.9445,
+      "consistency": 0.8378,
+      "baselineRange": 12.5797,
+      "diagnostics": {
+        "maxUp": 10.1031,
+        "maxDown": 44.2253
+      },
+      "profileQualityScore": 0.8708
+    },
+    "spot:SOLUSDT": {
+      "months": 24,
+      "meanUp": 5.7063,
+      "medianUp": 5.25,
+      "p25Up": 3.7073,
+      "p75Up": 6.7275,
+      "meanDown": 6.9192,
+      "medianDown": 6.4223,
+      "p25Down": 4.4556,
+      "p75Down": 7.3618,
+      "meanRatio": 0.8247,
+      "medianRatio": 0.8175,
+      "consistency": 0.9241,
+      "baselineRange": 11.6722,
+      "diagnostics": {
+        "maxUp": 17.8769,
+        "maxDown": 20.2519
+      },
+      "profileQualityScore": 0.9679
+    },
+    "spot:SUIUSDT": {
+      "months": 24,
+      "meanUp": 7.5627,
+      "medianUp": 7.1236,
+      "p25Up": 5.6293,
+      "p75Up": 9.2294,
+      "meanDown": 11.3552,
+      "medianDown": 7.1966,
+      "p25Down": 5.7357,
+      "p75Down": 10.6235,
+      "meanRatio": 0.666,
+      "medianRatio": 0.9899,
+      "consistency": 0.7879,
+      "baselineRange": 14.3202,
+      "diagnostics": {
+        "maxUp": 13.6547,
+        "maxDown": 81.1443
+      },
+      "profileQualityScore": 0.8497
+    },
+    "spot:UNIUSDT": {
+      "months": 24,
+      "meanUp": 9.4607,
+      "medianUp": 8.3705,
+      "p25Up": 5.5396,
+      "p75Up": 10.657,
+      "meanDown": 10.8757,
+      "medianDown": 7.2348,
+      "p25Down": 6.6773,
+      "p75Down": 9.7774,
+      "meanRatio": 0.8699,
+      "medianRatio": 1.157,
+      "consistency": 0.775,
+      "baselineRange": 15.6053,
+      "diagnostics": {
+        "maxUp": 33.7161,
+        "maxDown": 67.3882
+      },
+      "profileQualityScore": 0.8604
+    },
+    "spot:USDCUSDT": {
+      "months": 24,
+      "meanUp": 0.2908,
+      "medianUp": 0.06,
+      "p25Up": 0.0375,
+      "p75Up": 0.4668,
+      "meanDown": 0.1596,
+      "medianDown": 0.04,
+      "p25Down": 0.03,
+      "p75Down": 0.1075,
+      "meanRatio": 1.8215,
+      "medianRatio": 1.5,
+      "consistency": 0.2285,
+      "baselineRange": 0.1,
+      "diagnostics": {
+        "maxUp": 1.9694,
+        "maxDown": 0.9505
+      },
+      "profileQualityScore": 0.6485
+    },
+    "spot:USDEUSDT": {
+      "months": 24,
+      "meanUp": 0.1581,
+      "medianUp": 0.0751,
+      "p25Up": 0.06,
+      "p75Up": 0.1201,
+      "meanDown": 0.7988,
+      "medianDown": 0.095,
+      "p25Down": 0.06,
+      "p75Down": 0.1276,
+      "meanRatio": 0.1979,
+      "medianRatio": 0.79,
+      "consistency": 0.2968,
+      "baselineRange": 0.1701,
+      "diagnostics": {
+        "maxUp": 1.2697,
+        "maxDown": 7.93
+      },
+      "profileQualityScore": 0.5688
+    },
+    "spot:WLDUSDT": {
+      "months": 24,
+      "meanUp": 10.5525,
+      "medianUp": 8.6033,
+      "p25Up": 7.3186,
+      "p75Up": 11.7377,
+      "meanDown": 13.4032,
+      "medianDown": 9.4385,
+      "p25Down": 7.671,
+      "p75Down": 12.451,
+      "meanRatio": 0.7873,
+      "medianRatio": 0.9115,
+      "consistency": 0.7597,
+      "baselineRange": 18.0419,
+      "diagnostics": {
+        "maxUp": 23.6111,
+        "maxDown": 74.5714
+      },
+      "profileQualityScore": 0.8766
+    },
+    "spot:XLMUSDT": {
+      "months": 24,
+      "meanUp": 6.9303,
+      "medianUp": 5.0534,
+      "p25Up": 3.7385,
+      "p75Up": 8.7395,
+      "meanDown": 9.0762,
+      "medianDown": 5.8956,
+      "p25Down": 4.1503,
+      "p75Down": 8.2368,
+      "meanRatio": 0.7636,
+      "medianRatio": 0.8571,
+      "consistency": 0.6894,
+      "baselineRange": 10.949,
+      "diagnostics": {
+        "maxUp": 20.7327,
+        "maxDown": 52.4677
+      },
+      "profileQualityScore": 0.8539
+    },
+    "spot:XRPUSDT": {
+      "months": 24,
+      "meanUp": 6.6657,
+      "medianUp": 5.4842,
+      "p25Up": 3.9501,
+      "p75Up": 7.6187,
+      "meanDown": 9.0987,
+      "medianDown": 6.1938,
+      "p25Down": 4.4396,
+      "p75Down": 8.8838,
+      "meanRatio": 0.7326,
+      "medianRatio": 0.8854,
+      "consistency": 0.7517,
+      "baselineRange": 11.678,
+      "diagnostics": {
+        "maxUp": 21.7395,
+        "maxDown": 50.0943
+      },
+      "profileQualityScore": 0.8662
+    }
+  }
+}
