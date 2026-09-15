@@ -195,7 +195,7 @@ export const SIM_BASE_DEFAULTS = {
   initialAmount: 10000,
   maxPositions: 5, // = riskLevelToMaxPositions('medium'); real value is per-config
   feePercent: 0.1,
-  slippagePercent: 0.05,
+  slippagePercent: 0.1,
   executionDelaySec: 3,
   positionPercent: 10
 };

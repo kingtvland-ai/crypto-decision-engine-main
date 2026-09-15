@@ -8,11 +8,12 @@
  *
  * `evaluatePrev4hRange`'s RISK_VS_COST gate used to run BEFORE the ladder
  * block, checking `stopDistancePct` from `structuralStop` (the prev-4H range
- * midpoint) against `costSafetyMultiplier × estimatedRoundTripCost` (≈0.5-0.6%
- * at this bot's defaults). The ladder's own floor is FIXED_SL_PCT = 2.3%
- * (never tighter — see calmRegime.ts), comfortably clearing that threshold —
- * but a narrow prev-4H range's OWN structural stop can sit well under 0.6%
- * without being narrow enough to also trip RANGE_TOO_TIGHT (whose floor,
+ * midpoint) against `costSafetyMultiplier × estimatedRoundTripCost` (≈0.8% at
+ * this bot's defaults — Bybit Spot VIP 0 fee+slippage, updated 2026-09-16).
+ * The ladder's own floor is FIXED_SL_PCT = 2.3% (never tighter — see
+ * calmRegime.ts), comfortably clearing that threshold — but a narrow
+ * prev-4H range's OWN structural stop can sit well under 0.8% without being
+ * narrow enough to also trip RANGE_TOO_TIGHT (whose floor,
  * minRangePct = 1.0%, sits at a different point in the same space — this
  * test's market genuinely clears it). Such a setup was rejected on a stop
  * that would never actually be traded once the ladder replaced it — exactly
@@ -47,7 +48,7 @@ function nowInNextWindow(n: number): number {
 }
 
 // Constructed so the prev-4H range's OWN structural stop (mid-based) sits at
-// ~0.5% of entry — under the ~0.55-0.6% cost-safety threshold, but well clear
+// ~0.5% of entry — under the ~0.8% cost-safety threshold, but well clear
 // of RANGE_TOO_TIGHT's own floor (rangePct = 2 × stopDistancePct here, so
 // ~1.0% vs. the 1.0% floor — this specific construction sits just above it;
 // see the stability sweep this file's history was built from). Same market

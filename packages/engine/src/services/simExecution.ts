@@ -578,7 +578,7 @@ export function shouldAllowReentryAfterLoss(opts: {
  * high, indicating market stress (flash crashes, liquidation cascades, etc).
  * When detected, reduce max open positions as a risk circuit-breaker.
  *
- * Normal slippage: 0.05-0.15% on SPOT, up to 0.30% on FUTURES.
+ * Normal slippage: 0.1-0.3% on SPOT (Bybit VIP 0 base), up to 0.30% on FUTURES.
  * Abnormal: > 0.50% indicates market distress.
  */
 export function detectMarketStress(opts: {

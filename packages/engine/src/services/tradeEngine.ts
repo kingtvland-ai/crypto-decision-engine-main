@@ -414,13 +414,13 @@ export function calculateTradingFee(
 }
 
 /** Floor of the simulated slippage band, in percent. The band runs from this
- *  value to three times it, which at the default 0.05 reproduces the 0.05%-
- *  0.15% range this function has always drawn from. */
-export const DEFAULT_SLIPPAGE_PERCENT = 0.05;
+ *  value to three times it, which at the default 0.1 (Bybit Spot, VIP 0)
+ *  reproduces the 0.1%-0.3% range this function has always drawn from. */
+export const DEFAULT_SLIPPAGE_PERCENT = 0.1;
 
 /**
  * Draws simulation slippage from a band running from `basePercent` to 3x it
- * — 0.05%-0.15% at the default, which is where this number has always come
+ * — 0.1%-0.3% at the default, which is where this number has always come
  * from. `basePercent` is SimBotConfig.slippagePercent: raising it widens and
  * shifts the whole band rather than adding a constant, so a market modelled as
  * twice as thin costs twice as much on both the good and the bad fills.

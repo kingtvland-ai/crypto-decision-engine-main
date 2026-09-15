@@ -335,8 +335,8 @@ export interface BacktestResult {
 
 // Fee and slippage — aligned with simExecution.ts / tradeEngine.ts.
 // Fee: calculateTradingFee uses Bybit's real schedule (spot taker 0.1%, futures taker 0.055%).
-// Slippage: deterministic backtest uses the base band (DEFAULT_SLIPPAGE_PERCENT = 0.05%)
-// instead of the random 0.05%-0.15% simulation draw, so results are reproducible.
+// Slippage: deterministic backtest uses the base band (DEFAULT_SLIPPAGE_PERCENT = 0.1%)
+// instead of the random 0.1%-0.3% simulation draw, so results are reproducible.
 const SLIPPAGE_PERCENT = DEFAULT_SLIPPAGE_PERCENT;
 
 // ── Portfolio backtest (cross-symbol) ──────────────────────────────────────

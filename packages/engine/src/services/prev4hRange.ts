@@ -360,8 +360,11 @@ export function evaluatePrev4hRange(input: Prev4hRangeInput): SignalEvaluation {
 
   // RISK_VS_COST gate — the stop actually being traded must clear the
   // modelled round trip by costSafetyMultiplier. Cost comes from the shared
-  // model, not a local literal; baseSlippagePercent 0.05 = the sim's actual
-  // per-leg market-fill slippage (this bot fills market).
+  // model, not a local literal; baseSlippagePercent 0.1 = the sim's actual
+  // per-leg market-fill slippage (this bot fills market) — kept equal to
+  // DEFAULT_SLIPPAGE_PERCENT/SIM_BASE_DEFAULTS.slippagePercent (Bybit Spot
+  // VIP 0, updated 2026-09-16) so the gate rejects on the SAME cost the sim
+  // will actually charge, not a stale assumption about it.
   //
   // Moved here 2026-09-14 (was evaluated on `structuralStop`/`mid`, BEFORE the
   // ladder above could override it): the fixed ladder's floor is 2.3%
@@ -375,7 +378,7 @@ export function evaluatePrev4hRange(input: Prev4hRangeInput): SignalEvaluation {
   // the same day (see BOTS_REFERENCE.md §1 "COST").
   const stopDistancePct = (riskPerUnit / entryRef) * 100;
   const estimatedRoundTripCost = estimatedRoundTripCostPct({
-    tradeType: isLong ? 'SPOT' : 'FUTURES', entryIsLimit: false, baseSlippagePercent: 0.05
+    tradeType: isLong ? 'SPOT' : 'FUTURES', entryIsLimit: false, baseSlippagePercent: 0.1
   });
   if (stopDistancePct < p.costSafetyMultiplier * estimatedRoundTripCost) {
     return base('ARMED', 'RISK_VS_COST', debug, { confidence: 0 });

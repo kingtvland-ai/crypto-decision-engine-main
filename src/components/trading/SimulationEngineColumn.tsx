@@ -453,12 +453,21 @@ export default function SimulationEngineColumn({
                 <Input type="number" value={botConfig.initialAmount} onChange={(e) => setBotConfig({ ...botConfig, initialAmount: Number(e.target.value) })} />
               </div>
               <div>
+                {/* Fixed, not operator-editable: this desk trades Bybit Spot only at
+                    VIP 0 (0.10% taker fee), so the input that let an operator drift
+                    this off the real fee schedule was removed 2026-09-16 — see
+                    SIM_BASE_DEFAULTS.feePercent. */}
                 <label className="text-sm text-muted-foreground mb-2 block">עמלת Spot Bybit (%)</label>
-                <Input type="number" step="0.01" value={botConfig.feePercent} onChange={(e) => setBotConfig({ ...botConfig, feePercent: Math.max(0, Number(e.target.value)) })} />
+                <div className="h-10 flex items-center px-3 rounded-md border border-border/40 bg-muted/30 text-sm font-mono text-muted-foreground">
+                  {botConfig.feePercent.toFixed(2)}% (Bybit Spot VIP 0 — קבוע)
+                </div>
               </div>
               <div>
+                {/* Fixed, not operator-editable — see SIM_BASE_DEFAULTS.slippagePercent. */}
                 <label className="text-sm text-muted-foreground mb-2 block">החלקה בסיסית / Slippage (%)</label>
-                <Input type="number" step="0.01" value={botConfig.slippagePercent} onChange={(e) => setBotConfig({ ...botConfig, slippagePercent: Math.max(0, Number(e.target.value)) })} />
+                <div className="h-10 flex items-center px-3 rounded-md border border-border/40 bg-muted/30 text-sm font-mono text-muted-foreground">
+                  {botConfig.slippagePercent.toFixed(2)}% (קבוע)
+                </div>
               </div>
               <div>
                 <label className="text-sm text-muted-foreground mb-2 block">

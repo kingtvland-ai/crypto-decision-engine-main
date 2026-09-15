@@ -80,12 +80,12 @@ describe('feePercent scales the cost model', () => {
 });
 
 describe('slippagePercent sets the fill band', () => {
-  it('reproduces the historical 0.05%-0.15% band at the shipped default', () => {
-    expect(DEFAULT_SLIPPAGE_PERCENT).toBeCloseTo(0.05, 10);
+  it('reproduces the Bybit Spot VIP 0 0.1%-0.3% band at the shipped default', () => {
+    expect(DEFAULT_SLIPPAGE_PERCENT).toBeCloseTo(0.1, 10);
     for (let i = 0; i < 200; i++) {
       const { slippagePercent } = simulateSlippage(100, 'BUY');
-      expect(slippagePercent).toBeGreaterThanOrEqual(0.05);
-      expect(slippagePercent).toBeLessThanOrEqual(0.15);
+      expect(slippagePercent).toBeGreaterThanOrEqual(0.1);
+      expect(slippagePercent).toBeLessThanOrEqual(0.3);
     }
   });
 
