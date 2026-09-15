@@ -21,7 +21,8 @@ import {
   FEAR_BAND_LOW,
   FEAR_BAND_HIGH,
   FEAR_BAND_SIZING_FLOOR,
-  type PendingOrder
+  type PendingOrder,
+  type ReentryCooldownState
 } from '@cde/engine/execution';
 import type { SignalEvaluation } from '@cde/engine';
 
@@ -63,7 +64,7 @@ const baseCtx = {
   weeklyDrawdownPercent: 0,
   cash: 1_000_000,
   equity: 100_000,   // 10% target = $10,000
-  exitCooldown: {} as Record<string, number>,
+  exitCooldown: {} as Record<string, ReentryCooldownState>,
   priceFor: () => 100,
   candlesBySymbol,
   buildCandlesForSymbol: (s: string) => candlesBySymbol[s] ?? [],

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { generateProOrders, generateNewOrders, fillDueOrders, applyProEntryGates, type ProGateContext } from '@cde/engine/execution';
 import { Candle, resolveTradeSide } from '@cde/engine';
-import type { SimPosition, PendingOrder } from '@cde/engine/execution';
+import type { SimPosition, PendingOrder, ReentryCooldownState } from '@cde/engine/execution';
 import type { SignalEvaluation } from '@cde/engine';
 
 // Regression tests for the incident where the Legacy bot opened FOUR positions
@@ -82,7 +82,7 @@ const baseCtx = {
   weeklyDrawdownPercent: 0,
   cash: 100_000,
   equity: 100_000,
-  exitCooldown: {} as Record<string, number>,
+  exitCooldown: {} as Record<string, ReentryCooldownState>,
   priceFor: () => 100,
   candlesBySymbol,
   maxPositions: 7,

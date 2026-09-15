@@ -46,6 +46,8 @@ import {
   adaptiveRiskPercentFromHistory,
   ClosedTradeRecord
 } from './adaptiveRisk';
+import { detectSellPressureFromH1 } from './derivativesRegime';
+import type { DerivativesSnapshot } from './derivativesRegime';
 
 // Re-exported so the existing call sites (hooks, server engines) keep a
 // single import surface; the implementation now lives in adaptiveRisk.ts
@@ -496,40 +498,58 @@ export function riskLevelSizingMultiplier(riskLevel?: 'low' | 'medium' | 'high')
   return 1;
 }
 
-/** Safety net against rapid re-entry churn: after a LOSING full exit, skip new
- *  entries on that symbol for this cooldown window even if the signal still
- *  fires. Raised 2 → 30 → 60 minutes (2026-09-14).
+/** Safety net against rapid re-entry churn. History (see git / [[entry-cooldown]]
+ *  memory): raised 2 → 30 → 60 minutes for LOSSES (2026-09-14); briefly widened
+ *  to fire on every exit win-or-loss the same day after B3 on Pro closed
+ *  +$12.23, was re-bought 11 minutes later, and stopped out −$20.59 20 minutes
+ *  after that — then reverted to losses-only on operator request, since a
+ *  winning exit means the setup worked and re-entering fresh isn't "chasing"
+ *  the way re-entering right after a stop-out is.
  *
- *  Briefly widened to fire on every exit, win or loss, the same day (see
- *  git history / [[entry-cooldown]] memory) after B3 on Pro closed +$12.23,
- *  was re-bought 11 minutes later, and stopped out −$20.59 20 minutes after
- *  that. Reverted back to losses-only on operator request: a winning exit
- *  means the setup worked, so re-entering a fresh signal on the same symbol
- *  is not "chasing" the way re-entering right after a stop-out is — the
- *  churn risk above lived specifically in the post-loss case.
- *
- *  Partial exits deliberately do NOT write a cooldown — the position is still
- *  open, and the ratchet's 30% legs are not re-entries. */
+ *  Reopened 2026-09-16: a WINNING ratchet exit on FLOCK (+1.8%) was followed
+ *  76 seconds later by a fresh entry on the SAME symbol, which then stopped
+ *  out — the zero-cooldown-on-win case above was exactly this shape, just
+ *  with the loss landing on the re-entry instead of the original trade. Every
+ *  full exit — win or loss — now gets AT LEAST SMART_COOLDOWN_FLOOR_MS before
+ *  a fresh entry is allowed, and `resolveReentryRecovery` (below) governs how
+ *  much longer than the floor, RECOMPUTED against the live price on every
+ *  check rather than a duration frozen once at exit time — a stale timer is
+ *  not a re-verified decision. */
 export const ENTRY_COOLDOWN_MS = 60 * 60 * 1000;
 
-export function isInEntryCooldown(cooldownAt: number | undefined, now: number = Date.now()): boolean {
-  return typeof cooldownAt === 'number' && now - cooldownAt < ENTRY_COOLDOWN_MS;
+/** Hard minimum: no re-entry on a symbol within this window of ANY full exit,
+ *  win or loss, no matter how strong an apparent recovery/continuation looks.
+ *  `resolveReentryRecovery` can extend this up to ENTRY_COOLDOWN_MS but never
+ *  shorten it. */
+export const SMART_COOLDOWN_FLOOR_MS = 5 * 60 * 1000;
+
+/** What a full exit leaves behind for the entry-cooldown check to recompute
+ *  against on every later tick — not a frozen duration, the inputs to
+ *  re-derive one from the CURRENT price each time. */
+export interface ReentryCooldownState {
+  /** Exit fill timestamp (Date.now() at the close). */
+  at: number;
+  /** The price this position closed at. */
+  exitPrice: number;
+  /** Position direction at exit — recovery is measured in this direction
+   *  (price continuing above exitPrice for a closed LONG, below for a closed
+   *  SHORT), matching pos.side === 'LONG' || pos.side === 'BUY'. */
+  isLong: boolean;
 }
 
 /**
- * Peak-based re-entry logic (2026-09-14): instead of fixed time cooldown,
- * check if price has recovered enough from the exit point to signal trend
- * reversal. This is mathematical, not emotional — "has the market proven
- * the trade would work NOW" rather than "wait 60 minutes and try again."
+ * Recovery-based re-entry gate, recomputed fresh on every check against the
+ * CURRENT price rather than a duration decided once at exit time — "has the
+ * market proven the trade would work NOW" rather than "a timer expired."
+ * Applies uniformly after a WIN or a LOSS (2026-09-16; previously loss-only
+ * and floored at 0 — see ENTRY_COOLDOWN_MS's doc comment for why both changed).
  *
- * Recovery thresholds:
- * - 0.5% above exit → trend reversed, enter immediately (cooldown = 0)
- * - 0.2-0.5% above exit → weak recovery, reduce cooldown to 15 min
- * - below 0.2% → trend unclear, keep full 60 min cooldown
- *
- * For shorts (isLong=false), invert the logic (price below exit).
+ * Recovery thresholds (in the direction of the closed position):
+ * - ≥0.5% beyond exit → strong continuation/reversal proven → floor only (5 min)
+ * - 0.2%-0.5% beyond exit → weak signal → 15 min
+ * - below 0.2% → unproven → full 60 min (ENTRY_COOLDOWN_MS)
  */
-export function shouldAllowReentryAfterLoss(opts: {
+export function resolveReentryRecovery(opts: {
   exitPrice: number;
   currentPrice: number;
   isLong: boolean;
@@ -545,31 +565,88 @@ export function shouldAllowReentryAfterLoss(opts: {
     ? ((currentPrice - exitPrice) / exitPrice) * 100
     : ((exitPrice - currentPrice) / exitPrice) * 100;
 
-  // Full recovery: +0.5% above exit point means trend truly reversed
   if (recoveryPercent >= 0.5) {
     return {
-      allowed: true,
-      reason: `Recovery ${recoveryPercent.toFixed(2)}% > 0.5% threshold`,
-      effectiveCooldown: 0
+      allowed: timeSinceExit >= SMART_COOLDOWN_FLOOR_MS,
+      reason: `Recovery ${recoveryPercent.toFixed(2)}% > 0.5% threshold (floor ${(SMART_COOLDOWN_FLOOR_MS / 60000).toFixed(0)}min)`,
+      effectiveCooldown: SMART_COOLDOWN_FLOOR_MS
     };
   }
 
-  // Partial recovery: +0.2-0.5% above exit, trend uncertain
   if (recoveryPercent >= 0.2) {
-    const reducedCooldown = 15 * 60 * 1000; // 15 minutes
-    const timeRemaining = Math.max(0, reducedCooldown - timeSinceExit);
+    const reducedCooldown = 15 * 60 * 1000;
     return {
-      allowed: timeRemaining === 0,
-      reason: `Weak recovery ${recoveryPercent.toFixed(2)}%, ${(timeRemaining / 60000).toFixed(0)}min left`,
+      allowed: timeSinceExit >= reducedCooldown,
+      reason: `Weak recovery ${recoveryPercent.toFixed(2)}%, ${Math.max(0, (reducedCooldown - timeSinceExit) / 60000).toFixed(0)}min left`,
       effectiveCooldown: reducedCooldown
     };
   }
 
-  // No recovery: price still below exit, stay in cooldown
   return {
-    allowed: false,
+    allowed: timeSinceExit >= ENTRY_COOLDOWN_MS,
     reason: `Below exit (${recoveryPercent.toFixed(2)}%), full cooldown`,
     effectiveCooldown: ENTRY_COOLDOWN_MS
+  };
+}
+
+/**
+ * True when a symbol is still in its post-exit cooldown. Recomputes recovery
+ * against `currentPrice` every call — not a value cached at exit — so a
+ * cooldown that looked justified at close can lift (or hold) as price action
+ * actually plays out. Falls back to the hard floor only when no live price is
+ * available to recompute against (never allows a bypass on missing data).
+ */
+export function isInEntryCooldown(
+  cooldown: ReentryCooldownState | number | undefined,
+  currentPrice?: number,
+  now: number = Date.now()
+): boolean {
+  if (cooldown === undefined) return false;
+  // Legacy shape (bare timestamp) — no exit price/direction to recompute
+  // recovery from, so fall back to the flat floor. Kept only so any stale
+  // in-memory state from before this change (a bot that hasn't ticked since
+  // the deploy) degrades safely instead of throwing.
+  if (typeof cooldown === 'number') {
+    return now - cooldown < SMART_COOLDOWN_FLOOR_MS;
+  }
+  const timeSinceExit = now - cooldown.at;
+  if (typeof currentPrice !== 'number' || !Number.isFinite(currentPrice)) {
+    return timeSinceExit < SMART_COOLDOWN_FLOOR_MS;
+  }
+  const { allowed } = resolveReentryRecovery({ exitPrice: cooldown.exitPrice, currentPrice, isLong: cooldown.isLong, timeSinceExit });
+  return !allowed;
+}
+
+/**
+ * Sell-pressure override, shared by Pro/Path/Bybit (2026-09-16) — mirrors
+ * Intraday's own GATE 6 (intradayEngine.ts) exactly via the same
+ * detectSellPressureFromH1 (derivativesRegime.ts): same relvol/price-drop
+ * computation, same detectSellPressure call, same direction-agnostic block
+ * (an asset under confirmed sell pressure should not be traded AT ALL right
+ * now, long or short). Applied here at the evaluation layer instead of
+ * inside prev4hRange.ts / proSetup / trendBreakout.ts, so this REPLACES an
+ * evaluation that already decided to trade without touching any of those
+ * strategies' own gates, thresholds, or gate order.
+ *
+ * No-op (returns the evaluation unchanged) when it was already a hold, or
+ * when H1/derivatives data is missing — same abstain-on-missing-data
+ * contract as detectSellPressure itself.
+ */
+export function applySellPressureOverride(
+  evaluation: SignalEvaluation,
+  h1: Candle[],
+  derivativesSnapshot: DerivativesSnapshot | undefined,
+  now: number = Date.now()
+): SignalEvaluation {
+  if (evaluation.action === 'hold' || !evaluation.willExecute) return evaluation;
+  const sellPressure = detectSellPressureFromH1(h1, derivativesSnapshot, now);
+  if (!sellPressure.blocked) return evaluation;
+  return {
+    ...evaluation,
+    action: 'hold',
+    willExecute: false,
+    status: 'NO_SIGNAL [MACRO]',
+    reasoning: `${sellPressure.reason}\n${evaluation.reasoning}`
   };
 }
 
@@ -715,8 +792,8 @@ export interface OrderGenContext {
   fearGreedIndex?: number;
   /** SimBotConfig.fearGreedSizeBoost — see that field. */
   fearGreedSizeBoost?: boolean;
-  /** Symbol (as stored on the position/order) → last-loss timestamp. Read-only here. */
-  exitCooldown: Record<string, number>;
+  /** Symbol (as stored on the position/order) → last-exit cooldown state. Read-only here. */
+  exitCooldown: Record<string, ReentryCooldownState>;
   priceFor: (symbol: string) => number | undefined;
   buildCandlesForSymbol: (symbol: string) => Candle[];
   computeAtr5: (candles: Candle[]) => number;
@@ -973,19 +1050,9 @@ export function generateNewOrders(ctx: OrderGenContext): PendingOrder[] {
     if (positions.some((p) => p.symbol === ev.symbol)) continue;
     if (newOrders.some((o) => o.symbol === ev.symbol) || pending.some((o) => o.symbol === ev.symbol)) continue;
 
-    // Peak-based re-entry: mathematical recovery thresholds, not time-only
-    const lastExitTime = exitCooldown[ev.symbol];
-    if (lastExitTime !== undefined) {
-      // ClosedTradeRecord lacks detail (side, price); rely on time-based check
-      // as a fallback. Ideally, this would track exit prices per symbol to enable
-      // peak-based recovery logic, but that requires schema changes. For now,
-      // use the existing time-based gate as a minimal safety check.
-      if (!isInEntryCooldown(lastExitTime)) {
-        // Time-based cooldown expired; allow re-entry
-      } else {
-        continue;
-      }
-    }
+    // Smart re-entry: recovery recomputed against ev.price (the fresh signal's
+    // own current price) on every check — see ReentryCooldownState's doc.
+    if (isInEntryCooldown(exitCooldown[ev.symbol], ev.price)) continue;
     // Post-losing-streak pause — per-symbol, and a book-level backstop for a
     // run of losses spread across different symbols (regime, not symbol).
     if (isInStreakCooldown(streakCooldownFromHistory(closedTrades ?? [], ctx.equity, ev.symbol))) continue;
@@ -1243,8 +1310,9 @@ export interface FillResult {
   newTrades: SimTrade[];
   feesAdded: number;
   slipAdded: number;
-  /** Symbols that closed with a loss this batch — merge into the caller's cooldown map. */
-  newCooldowns: Record<string, number>;
+  /** Symbols that fully closed this batch (win or loss) — merge into the
+   *  caller's cooldown map for isInEntryCooldown's recovery recomputation. */
+  newCooldowns: Record<string, ReentryCooldownState>;
   events: FillEvent[];
 }
 
@@ -1273,7 +1341,7 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
   let workingCash = cash;
   let workingPositions = [...positions];
   const newTrades: SimTrade[] = [];
-  const newCooldowns: Record<string, number> = {};
+  const newCooldowns: Record<string, ReentryCooldownState> = {};
   const events: FillEvent[] = [];
   let feesAdded = 0;
   let slipAdded = 0;
@@ -1550,11 +1618,12 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
         feesAdded += fee;
         slipAdded += Math.abs(market - exitPrice) * pos.quantity;
         workingPositions = workingPositions.filter((p) => p.id !== pos.id);
-        // Losers only — see ENTRY_COOLDOWN_MS. A winning exit re-arms the
-        // symbol for immediate re-entry on a fresh signal.
-        if (pnl < 0) {
-          newCooldowns[order.symbol] = Date.now();
-        }
+        // Every full exit — win or loss — now leaves cooldown state; see
+        // ENTRY_COOLDOWN_MS's doc comment for why the win-exempt version was
+        // reverted (2026-09-16, FLOCK). isInEntryCooldown recomputes recovery
+        // against the live price on each check rather than trusting a fixed
+        // duration decided here.
+        newCooldowns[order.symbol] = { at: Date.now(), exitPrice, isLong: posIsLong };
 
         const pnlPercent = pos.type === 'SPOT'
           ? (pnl / (pos.quantity * pos.avgPrice)) * 100

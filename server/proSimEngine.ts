@@ -23,7 +23,8 @@ import {
   DAILY_DRAWDOWN_BLOCK_PERCENT,
   WEEKLY_DRAWDOWN_LOCK_PERCENT,
   isInStreakCooldown,
-  portfolioStreakCooldownUntil
+  portfolioStreakCooldownUntil,
+  applySellPressureOverride
 } from '@cde/engine/execution';
 import { computeProSignal, proMinConfidence, type ProSignalResult, type ProRiskLevel } from '@cde/engine/analysis';
 import { SignalEvaluation } from '@cde/engine';
@@ -65,7 +66,11 @@ const proStrategy: SimEngineStrategy = {
       const candles = input.candlesBySymbol[symbol];
       if (!candles || candles.length < MIN_PRO_CANDLES) continue;
 
-      results.push(buildProEvaluation(symbol, candles, currentPrice, priceChange24h, riskLevel, minConfidenceOverride));
+      const evaluation = buildProEvaluation(symbol, candles, currentPrice, priceChange24h, riskLevel, minConfidenceOverride);
+      // Macro Layer sell-pressure (2026-09-16) — same check as Intraday's GATE
+      // 6, extended to Pro. Overrides a buy that already qualified; §4's own
+      // scoring/thresholds above are untouched.
+      results.push(applySellPressureOverride(evaluation, candles, input.derivativesBySymbol.get(symbol), Date.now()));
     }
 
     // §4 — the state gates (queued / held / slots / price / budget), evaluated

@@ -27,6 +27,7 @@ import type { ClosedTradeRecord } from '@cde/engine/execution';
 import { DecisionEngine, IntradayAdapter, resolveTradeSide } from '@cde/engine';
 import type { DecisionResult, DecisionContext } from '@cde/engine';
 import { SIM_MIN_CONFIDENCE } from '@cde/engine/execution';
+import type { ReentryCooldownState } from '@cde/engine/execution';
 
 export type { SignalEvaluation, DecisionFactor } from '@cde/engine';
 export type { SimPosition, SimTrade, SimPoint, PendingOrder, SimBotConfig } from '@cde/engine/execution';
@@ -205,7 +206,7 @@ export function useSimulationBot({ config, isRunning, cryptoData, recommendation
   // re-trigger seconds later in a fast-moving market; this stops the same
   // symbol from re-entering immediately and bleeding fees/slippage on repeat
   // near-instant round trips.
-  const exitCooldownRef = useRef<Record<string, number>>({});
+  const exitCooldownRef = useRef<Record<string, ReentryCooldownState>>({});
 
   cashRef.current = cash;
   positionsRef.current = positions;

@@ -20,7 +20,8 @@ import {
 import {
   SIM_MIN_CONFIDENCE,
   generateTrendBreakoutOrders,
-  TrendBreakoutCandleSet
+  TrendBreakoutCandleSet,
+  applySellPressureOverride
 } from '@cde/engine/execution';
 import { SignalEvaluation } from '@cde/engine';
 import {
@@ -72,7 +73,7 @@ const bybitStrategy: SimEngineStrategy = {
       const currentPrice = input.priceFor(baseAsset) ?? snap.livePrice ?? h1[h1.length - 1].close;
       const crypto = input.cryptoData.find((c) => input.toBase(c.symbol) === baseAsset);
 
-      results.push(evaluateTrendBreakout({
+      const evaluation = evaluateTrendBreakout({
         symbol: baseAsset,
         h1,
         m15,
@@ -80,7 +81,12 @@ const bybitStrategy: SimEngineStrategy = {
         currentPrice,
         priceChange24h: crypto?.price_change_percentage_24h ?? 0,
         params
-      }));
+      });
+      // Macro Layer sell-pressure (2026-09-16) — same check as Intraday's GATE
+      // 6, extended to Bybit/TrendBreakout. Overrides a signal that already
+      // qualified; evaluateTrendBreakout's own gates/thresholds are untouched.
+      const derivKey = crypto?.symbol?.toUpperCase();
+      results.push(applySellPressureOverride(evaluation, h1, derivKey ? input.derivativesBySymbol.get(derivKey) : undefined, Date.now()));
     }
 
     return results;

@@ -21,7 +21,7 @@ import { evaluateRatchet, ratchetReason } from './profitRatchet';
 import { aggregateToH4 } from './pathEngine';
 import { barOpenFor, BAR_MS } from './pathStudy';
 import type { SignalEvaluation } from './intradayBridge';
-import type { SimPosition, PendingOrder } from './simExecution';
+import type { SimPosition, PendingOrder, ReentryCooldownState } from './simExecution';
 import {
   isInEntryCooldown,
   MIN_SIM_ENTRY_USD,
@@ -80,7 +80,7 @@ export interface Prev4hRangeOrderGenContext {
    *  (previous behaviour). See resolveSizingBase. */
   initialAmount?: number;
   totalLeveragedExposureUsd: number;
-  exitCooldown: Record<string, number>;
+  exitCooldown: Record<string, ReentryCooldownState>;
   priceFor: (symbol: string) => number | undefined;
   /** Keyed by BASE asset — same keys the evaluations and positions use. */
   candlesBySymbol: Record<string, Prev4hRangeCandleSet | undefined>;
@@ -280,7 +280,7 @@ export function generatePrev4hRangeOrders(ctx: Prev4hRangeOrderGenContext): Pend
       continue;
     }
     if (openSymbols.has(ev.symbol) || pendingEntrySymbols.has(ev.symbol) || closingSymbols.has(ev.symbol)) continue;
-    if (isInEntryCooldown(ctx.exitCooldown[ev.symbol], now)) {
+    if (isInEntryCooldown(ctx.exitCooldown[ev.symbol], ev.price, now)) {
       blockEntry(ev, 'ENTRY_COOLDOWN', 'צינון אחרי יציאה קודמת בנכס הזה', '[path-sim]');
       continue;
     }

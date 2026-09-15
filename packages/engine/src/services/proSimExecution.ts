@@ -37,6 +37,7 @@ import type { Candle } from './tradeEngine';
 import type { SignalEvaluation, DecisionFactor } from './intradayBridge';
 import type { SimPosition, PendingOrder } from './simExecution';
 import { MIN_SIM_ENTRY_USD, MIN_ORDER_EXCEEDS_POSITION_TARGET, blockEntry, pickPreemptibleEntryOrder, isInEntryCooldown } from './simExecution';
+import type { ReentryCooldownState } from './simExecution';
 import { isLongSide, TP1_EXIT_FRACTION, TP1_PERCENT, TP2_PERCENT, MAX_LOSS_PERCENT } from './exitPolicy';
 
 export const uid = (p: string) => `pro-${p}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -332,7 +333,7 @@ export interface ProOrderGenContext {
    *  never received this map, so it re-bought a symbol minutes after closing
    *  it (B3: closed +$12.23 at 13:45, re-bought 13:56, stopped out at 14:05).
    *  See ENTRY_COOLDOWN_MS. */
-  exitCooldown?: Record<string, number>;
+  exitCooldown?: Record<string, ReentryCooldownState>;
   priceFor: (symbol: string) => number | undefined;
   /** §6 execution mode. When true, entries rest as LIMIT orders at the signal
    *  price — the bot waits until the market reaches it (or a better price) and
@@ -402,9 +403,10 @@ export function generateProOrders(ctx: ProOrderGenContext): PendingOrder[] {
   // heartbeat) — not a second gate.
   for (const ev of evaluations) {
     if (!ev.willExecute || ev.action !== 'buy' || !ev.price) continue;
-    // Re-entry cooldown (2026-09-14). Reported, not a bare `continue` — an
-    // operator looking at "why didn't it buy" needs to see this.
-    if (isInEntryCooldown(ctx.exitCooldown?.[ev.symbol])) {
+    // Smart re-entry cooldown (2026-09-14, recovery-recompute 2026-09-16).
+    // Reported, not a bare `continue` — an operator looking at "why didn't
+    // it buy" needs to see this.
+    if (isInEntryCooldown(ctx.exitCooldown?.[ev.symbol], ev.price)) {
       blockEntry(ev, 'ENTRY_COOLDOWN', 'צינון אחרי יציאה קודמת במטבע הזה', '[pro-sim]');
       continue;
     }

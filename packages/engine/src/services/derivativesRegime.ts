@@ -63,6 +63,8 @@
  * marketDataService.ts) so this module stays pure, synchronous and testable.
  */
 
+import { Candle, computeRelativeVolume } from './tradeEngine';
+
 /** One Open Interest reading, oldest-to-newest is NOT assumed — callers pass
  *  whatever order Bybit returned (newest-first) and this module sorts. */
 export interface OpenInterestPoint {
@@ -355,4 +357,32 @@ export function detectSellPressure(input: SellPressureInput): SellPressureVerdic
   }
 
   return { blocked: false, reason: '', oiTrend: oi.trend, confirmedBy: [] };
+}
+
+/**
+ * Convenience wrapper around detectSellPressure: derives relativeVolume and
+ * priceChangePercent from an H1 candle series the same way Intraday's own
+ * GATE 6 (intradayEngine.ts) always has, so every caller measures the same
+ * two numbers off the same 20-bar lookback instead of each re-deriving it
+ * slightly differently. Added 2026-09-16 when the sell-pressure check was
+ * extended from Intraday-only to all 4 sim bots (Pro/Path/Bybit read it via
+ * simExecution.ts's applySellPressureOverride; Intraday's GATE 6 calls this
+ * directly) — a shared source for the SAME computation, not a second one.
+ */
+export function detectSellPressureFromH1(
+  h1: Candle[],
+  derivativesSnapshot: DerivativesSnapshot | undefined,
+  now: number
+): SellPressureVerdict {
+  const relativeVolume = computeRelativeVolume(h1, 20, now);
+  const last = h1[h1.length - 1];
+  const prev = h1[h1.length - 2];
+  const priceChangePercent = last && prev && prev.close > 0 ? ((last.close - prev.close) / prev.close) * 100 : 0;
+  return detectSellPressure({
+    relativeVolume: relativeVolume ?? 0,
+    priceChangePercent,
+    openInterestHistory: derivativesSnapshot?.openInterestHistory,
+    spotRelativeVolume: derivativesSnapshot?.spotRelativeVolume,
+    crossExchangeRelativeVolume: derivativesSnapshot?.crossExchangeRelativeVolume
+  });
 }

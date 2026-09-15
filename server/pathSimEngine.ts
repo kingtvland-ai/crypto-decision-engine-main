@@ -21,7 +21,8 @@ import {
 import {
   SIM_MIN_CONFIDENCE,
   generatePrev4hRangeOrders,
-  Prev4hRangeCandleSet
+  Prev4hRangeCandleSet,
+  applySellPressureOverride
 } from '@cde/engine/execution';
 import type { SignalEvaluation } from '@cde/engine';
 import {
@@ -68,13 +69,17 @@ const pathStrategy: SimEngineStrategy = {
 
       const currentPrice = input.priceFor(baseAsset) ?? snap?.livePrice ?? crypto.current_price;
 
-      results.push(evaluatePrev4hRange({
+      const evaluation = evaluatePrev4hRange({
         symbol: baseAsset,
         h1,
         currentPrice,
         priceChange24h: crypto.price_change_percentage_24h ?? 0,
         params
-      }));
+      });
+      // Macro Layer sell-pressure (2026-09-16) — same check as Intraday's GATE
+      // 6, extended to Path. Overrides a signal that already qualified;
+      // evaluatePrev4hRange's own gates/thresholds above are untouched.
+      results.push(applySellPressureOverride(evaluation, h1, input.derivativesBySymbol.get(crypto.symbol.toUpperCase()), Date.now()));
     }
 
     return results;

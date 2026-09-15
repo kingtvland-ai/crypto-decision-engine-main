@@ -13,6 +13,7 @@
 // also the single place that can see every bot at once — see
 // crossBotExposure.ts for the one thing that actually needs that.
 import { formatDynamicPrice, validateExposureModel, POSITION_TARGET_PCT, MAX_TOTAL_EXPOSURE_PERCENT, SIM_BASE_DEFAULTS } from '@cde/engine/execution';
+import type { ReentryCooldownState } from '@cde/engine/execution';
 import type { Candle } from '@cde/engine';
 import { getAggregatedPrices } from '@cde/engine/market-data';
 import type { CryptoData } from '@cde/engine';
@@ -203,7 +204,7 @@ export interface StrategyTickInput {
    *  never-block-on-missing-data rule as fundingBySymbol. */
   derivativesBySymbol: Map<string, DerivativesSnapshot>;
   cash: number;
-  exitCooldown: Record<string, number>;
+  exitCooldown: Record<string, ReentryCooldownState>;
   priceFor: (symbol: string) => number | undefined;
   toBase: (symbol: string) => string;
   computeAtr5: typeof computeAtr5;
@@ -271,9 +272,11 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
   let lastFundingAppliedAt = 0;
   let lastEvaluation = '';
   let lastEvaluations: SignalEvaluation[] = [];
-  // Safety net against rapid re-entry churn: after a LOSING full exit, skip new
-  // entries on that symbol for a cooldown window even if the signal still fires.
-  const exitCooldown: Record<string, number> = {};
+  // Safety net against rapid re-entry churn: after any full exit (win or
+  // loss, 2026-09-16), skip new entries on that symbol until the smart
+  // cooldown (isInEntryCooldown/resolveReentryRecovery, simExecution.ts)
+  // clears — recomputed against live price on every check.
+  const exitCooldown: Record<string, ReentryCooldownState> = {};
 
   let liveCandles: Record<string, MultiTimeframeSnapshot> = {};
   let cryptoData: CryptoData[] = [];

@@ -28,7 +28,7 @@
  * the order.
  */
 
-import { Candle, PortfolioRiskStats, formatDynamicPrice, computeRelativeVolume } from './tradeEngine';
+import { Candle, PortfolioRiskStats, formatDynamicPrice } from './tradeEngine';
 import { detectRegime1H, Regime1H } from './intradayRegime';
 import { detectSetup15M, Setup15M } from './intradaySetup';
 import { confirmEntry5M, Entry5M } from './intradayEntry';
@@ -40,7 +40,7 @@ import { DEFAULT_INTRADAY_PARAMS, DecisionGate, Direction, IntradayParams, Setup
 import type { FundingSnapshot } from './fundingRate';
 import { evaluateFundingGate } from './fundingRate';
 import type { DerivativesSnapshot } from './derivativesRegime';
-import { evaluateDerivativesRegime, detectSellPressure } from './derivativesRegime';
+import { evaluateDerivativesRegime, detectSellPressureFromH1 } from './derivativesRegime';
 
 export type TradeType = 'SPOT' | 'FUTURES';
 export type DecisionOutcome = 'SIGNAL' | 'NO_SIGNAL' | 'NO_DATA';
@@ -260,22 +260,12 @@ export function evaluateIntradayDecision(input: IntradayDecisionInput): Intraday
   // BEFORE the setup/entry layers, direction-agnostic: this asset should not
   // be traded right now at all, regardless of what setup it would have
   // produced. Missing OI data abstains — see detectSellPressure's own doc.
-  const h1RelativeVolume = computeRelativeVolume(input.h1, 20, now);
-  const h1Last = input.h1[input.h1.length - 1];
-  const h1Prev = input.h1[input.h1.length - 2];
-  const h1PriceChangePercent =
-    h1Last && h1Prev && h1Prev.close > 0 ? ((h1Last.close - h1Prev.close) / h1Prev.close) * 100 : 0;
-  const sellPressure = detectSellPressure({
-    relativeVolume: h1RelativeVolume ?? 0,
-    priceChangePercent: h1PriceChangePercent,
-    openInterestHistory: input.derivativesSnapshot?.openInterestHistory,
-    // OTC blind-spot partial fix (2026-09-16) — an independent OR alongside
-    // falling OI. See DerivativesSnapshot.spotRelativeVolume's doc comment.
-    spotRelativeVolume: input.derivativesSnapshot?.spotRelativeVolume,
-    // OTC blind-spot fix, round 2 (2026-09-16) — Binance's deeper book as a
-    // third independent OR alongside OI and Bybit spot volume.
-    crossExchangeRelativeVolume: input.derivativesSnapshot?.crossExchangeRelativeVolume
-  });
+  // detectSellPressureFromH1 (derivativesRegime.ts) is the single shared
+  // definition of this computation — Pro/Path/Bybit call the same function
+  // (via simExecution.ts's applySellPressureOverride) since 2026-09-16, so
+  // all 4 bots measure sell pressure identically instead of each re-deriving
+  // relvol/price-drop slightly differently.
+  const sellPressure = detectSellPressureFromH1(input.h1, input.derivativesSnapshot, now);
   if (sellPressure.blocked) {
     logs.push(`[${symbol}] ${sellPressure.reason}`);
     return finalize(symbol, 'MACRO', 'NO_SIGNAL', regime, null, null, null, null, logs, params, now, mkFunnel('MACRO', 'NO_SIGNAL', null, null), null);

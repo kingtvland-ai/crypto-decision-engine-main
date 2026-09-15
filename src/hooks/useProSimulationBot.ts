@@ -38,6 +38,7 @@ import type {
 } from './useSimulationBot';
 import { computeProSignal, proMinConfidence, type ProSignalResult, type ProRiskLevel } from '@cde/engine/analysis';
 import { SIM_MIN_CONFIDENCE } from '@cde/engine/execution';
+import type { ReentryCooldownState } from '@cde/engine/execution';
 
 export type { SimPosition, SimTrade, SimPoint, PendingOrder, SimBotConfig } from './useSimulationBot';
 
@@ -106,7 +107,7 @@ export function useProSimulationBot({ config, isRunning, cryptoData, initialSnap
   const pendingRef = useRef(pending);
   const cryptoRef = useRef(cryptoData);
   const configRef = useRef(config);
-  const exitCooldownRef = useRef<Record<string, number>>({});
+  const exitCooldownRef = useRef<Record<string, ReentryCooldownState>>({});
   const tradesRef = useRef(trades);
 
   cashRef.current = cash;

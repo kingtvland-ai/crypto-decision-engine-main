@@ -77,7 +77,8 @@ export type {
   OrderGenContext,
   FillableOrdersResult,
   FillEvent,
-  FillResult
+  FillResult,
+  ReentryCooldownState
 } from './services/simExecution';
 export {
   SIM_INTRADAY_PARAMS_OVERRIDE,
@@ -87,8 +88,10 @@ export {
   FUTURES_POSITION_RATIO,
   riskLevelSizingMultiplier,
   ENTRY_COOLDOWN_MS,
+  SMART_COOLDOWN_FLOOR_MS,
   isInEntryCooldown,
-  shouldAllowReentryAfterLoss,
+  resolveReentryRecovery,
+  applySellPressureOverride,
   detectMarketStress,
   MIN_SIM_ENTRY_USD,
   blockEntry,

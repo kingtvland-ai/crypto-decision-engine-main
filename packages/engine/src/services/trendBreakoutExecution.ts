@@ -26,7 +26,7 @@
 
 import { Candle, calculateATR, calculateSupertrend } from './tradeEngine';
 import type { SignalEvaluation } from './intradayBridge';
-import type { SimPosition, PendingOrder } from './simExecution';
+import type { SimPosition, PendingOrder, ReentryCooldownState } from './simExecution';
 import {
   isInEntryCooldown,
   MIN_SIM_ENTRY_USD,
@@ -152,7 +152,7 @@ export interface TrendBreakoutOrderGenContext {
   initialAmount?: number;
   /** FUTURES notional already open (from the engine factory). */
   totalLeveragedExposureUsd: number;
-  exitCooldown: Record<string, number>;
+  exitCooldown: Record<string, ReentryCooldownState>;
   priceFor: (symbol: string) => number | undefined;
   /** Keyed by BASE asset — same keys the evaluations and positions use. */
   candlesBySymbol: Record<string, TrendBreakoutCandleSet | undefined>;
@@ -616,7 +616,7 @@ export function generateTrendBreakoutOrders(ctx: TrendBreakoutOrderGenContext): 
     const key = tradeKey(ev.symbol, side);
     if (openLogicalKeys.has(key) || pendingEntryKeys.has(key)) continue; // one logical trade per base+side; blocks double-entry on the same breakout
     if (closingBaseSides.has(key)) continue;
-    if (isInEntryCooldown(ctx.exitCooldown[ev.symbol], now)) {
+    if (isInEntryCooldown(ctx.exitCooldown[ev.symbol], ev.price, now)) {
       blockEntry(ev, 'ENTRY_COOLDOWN', 'צינון אחרי יציאה קודמת בנכס הזה');
       continue;
     }

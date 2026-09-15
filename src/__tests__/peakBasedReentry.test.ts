@@ -1,28 +1,45 @@
 /**
- * Peak-based re-entry and market stress detection (2026-09-14)
+ * Smart re-entry cooldown and market stress detection
  * ============================================================================
- * Mathematical re-entry logic (not time-based), and slippage monitoring
- * for circuit breaker when market conditions degrade.
+ * Recovery-based re-entry logic (not time-only), recomputed against the live
+ * price on every check — applies after BOTH a win and a loss (2026-09-16;
+ * previously loss-only with a 0-minute floor on strong recovery — see
+ * ENTRY_COOLDOWN_MS's doc comment in simExecution.ts for why: a WINNING
+ * ratchet exit on FLOCK was followed 76 seconds later by a fresh entry that
+ * then stopped out). Every tier now has a SMART_COOLDOWN_FLOOR_MS (5 min)
+ * floor, even on strong recovery. Plus slippage monitoring for the market-
+ * stress circuit breaker.
  */
 
 import { describe, it, expect } from 'vitest';
-import { shouldAllowReentryAfterLoss, detectMarketStress, ENTRY_COOLDOWN_MS } from '@cde/engine/execution';
+import { resolveReentryRecovery, detectMarketStress, ENTRY_COOLDOWN_MS, SMART_COOLDOWN_FLOOR_MS, isInEntryCooldown } from '@cde/engine/execution';
 
-describe('shouldAllowReentryAfterLoss', () => {
-  it('allows immediate re-entry when price recovers +0.5% (trend reversed)', () => {
-    const res = shouldAllowReentryAfterLoss({
+describe('resolveReentryRecovery', () => {
+  it('strong recovery (+0.5%) still respects the 5-minute floor', () => {
+    const res = resolveReentryRecovery({
       exitPrice: 100,
       currentPrice: 100.50,
       isLong: true,
-      timeSinceExit: 5000 // 5 seconds
+      timeSinceExit: 5000 // 5 seconds — well under the floor
+    });
+    expect(res.allowed).toBe(false);
+    expect(res.effectiveCooldown).toBe(SMART_COOLDOWN_FLOOR_MS);
+    expect(res.reason).toContain('Recovery');
+  });
+
+  it('strong recovery (+0.5%) is allowed once the 5-minute floor has passed', () => {
+    const res = resolveReentryRecovery({
+      exitPrice: 100,
+      currentPrice: 100.50,
+      isLong: true,
+      timeSinceExit: SMART_COOLDOWN_FLOOR_MS
     });
     expect(res.allowed).toBe(true);
-    expect(res.effectiveCooldown).toBe(0);
     expect(res.reason).toContain('Recovery');
   });
 
   it('disallows entry with weak recovery (+0.2-0.5%) until 15 min passes', () => {
-    const res = shouldAllowReentryAfterLoss({
+    const res = resolveReentryRecovery({
       exitPrice: 100,
       currentPrice: 100.30, // +0.3%
       isLong: true,
@@ -34,7 +51,7 @@ describe('shouldAllowReentryAfterLoss', () => {
   });
 
   it('allows re-entry after 15 min when weak recovery occurred', () => {
-    const res = shouldAllowReentryAfterLoss({
+    const res = resolveReentryRecovery({
       exitPrice: 100,
       currentPrice: 100.30, // +0.3%
       isLong: true,
@@ -45,7 +62,7 @@ describe('shouldAllowReentryAfterLoss', () => {
   });
 
   it('keeps full 60-min cooldown when price stays below exit', () => {
-    const res = shouldAllowReentryAfterLoss({
+    const res = resolveReentryRecovery({
       exitPrice: 100,
       currentPrice: 99.80, // -0.2% (below exit)
       isLong: true,
@@ -57,14 +74,40 @@ describe('shouldAllowReentryAfterLoss', () => {
   });
 
   it('handles SHORT positions (inverted logic)', () => {
-    const res = shouldAllowReentryAfterLoss({
+    const res = resolveReentryRecovery({
       exitPrice: 100,
       currentPrice: 99.50, // -0.5% (good recovery for SHORT)
       isLong: false,
-      timeSinceExit: 5000
+      timeSinceExit: SMART_COOLDOWN_FLOOR_MS
     });
     expect(res.allowed).toBe(true);
-    expect(res.effectiveCooldown).toBe(0);
+  });
+});
+
+describe('isInEntryCooldown — applies after a WIN, not just a loss', () => {
+  it('a WINNING exit still blocks re-entry inside the 5-minute floor', () => {
+    const now = Date.now();
+    const cooldown = { at: now - 60_000, exitPrice: 100, isLong: true }; // 1 min ago, "won" (no sign of pnl here — the state no longer carries it)
+    expect(isInEntryCooldown(cooldown, 100.01, now)).toBe(true);
+  });
+
+  it('clears once the floor passes and price has NOT meaningfully continued', () => {
+    const now = Date.now();
+    const cooldown = { at: now - SMART_COOLDOWN_FLOOR_MS - 1000, exitPrice: 100, isLong: true };
+    // recoveryPercent ~0 → below the 0.2% weak-recovery band → full ENTRY_COOLDOWN_MS applies
+    expect(isInEntryCooldown(cooldown, 100.0, now)).toBe(true);
+  });
+
+  it('a bare legacy timestamp (pre-migration in-memory state) degrades to the flat floor', () => {
+    const now = Date.now();
+    expect(isInEntryCooldown(now - 60_000, 100, now)).toBe(true);
+    expect(isInEntryCooldown(now - SMART_COOLDOWN_FLOOR_MS - 1, 100, now)).toBe(false);
+  });
+
+  it('missing currentPrice cannot bypass the floor', () => {
+    const now = Date.now();
+    const cooldown = { at: now - 60_000, exitPrice: 100, isLong: true };
+    expect(isInEntryCooldown(cooldown, undefined, now)).toBe(true);
   });
 });
 
