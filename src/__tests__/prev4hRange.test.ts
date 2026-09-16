@@ -136,21 +136,38 @@ describe('evaluatePrev4hRange — signal', () => {
 });
 
 describe('generatePrev4hRangeOrders — window-end time stop', () => {
-  it('closes a position once its 4H window has ended', () => {
+  function windowEndPos(tp1Hit: boolean): SimPosition {
     const openTs = Date.now() - 2 * BAR_MS; // opened two windows ago
-    const pos: SimPosition = {
+    return {
       id: 'p1', symbol: 'RNG', type: 'SPOT', side: 'BUY', quantity: 1, entryPrice: 100,
       avgPrice: 100, currentPrice: 101, leverage: 1, marginUsd: 100, notionalUsd: 100,
-      stopLoss: 98, takeProfit: 106, tp1Hit: false, openedAt: '', openTimestamp: openTs,
+      stopLoss: 98, takeProfit: 106, tp1Hit, openedAt: '', openTimestamp: openTs,
       reason: '', confidence: 60, entryFee: 0
     };
-    const ctx: Prev4hRangeOrderGenContext = {
+  }
+  function ctxFor(pos: SimPosition): Prev4hRangeOrderGenContext {
+    return {
       positions: [pos], pending: [], evaluations: [] as SignalEvaluation[],
       executionDelaySec: 0, dailyDrawdownPercent: 0, weeklyDrawdownPercent: 0,
       cash: 9900, equity: 10000, totalLeveragedExposureUsd: 0, exitCooldown: {},
       priceFor: () => 101, candlesBySymbol: {}, maxPositions: 5, maxFuturesPositions: 2
     };
-    const orders = generatePrev4hRangeOrders(ctx);
+  }
+
+  // 2026-09-16: a full close on the FIRST hit marks the entire position to
+  // market on one tick, the same shape fixed on Intraday's Time Stop — half
+  // closes instead, and the remainder keeps running.
+  it('half-closes (not a full close) the first time its 4H window has ended', () => {
+    const orders = generatePrev4hRangeOrders(ctxFor(windowEndPos(false)));
+    expect(orders).toHaveLength(1);
+    expect(orders[0].side).toBe('partial_tp1');
+    expect(orders[0].quantity).toBe(0.5);
+    expect(orders[0].positionId).toBe('p1');
+    expect(orders[0].reason).toContain('4 שעות');
+  });
+
+  it('closes what is left in full on a second window-end hit (tp1Hit already true)', () => {
+    const orders = generatePrev4hRangeOrders(ctxFor(windowEndPos(true)));
     expect(orders).toHaveLength(1);
     expect(orders[0].side).toBe('close_long');
     expect(orders[0].positionId).toBe('p1');

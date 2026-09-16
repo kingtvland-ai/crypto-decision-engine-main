@@ -159,6 +159,9 @@ describe("#3 (2026-09-14) — the profit ratchet is Path's only profit exit", ()
     const stale = pos({ openTimestamp: Date.now() - 5 * BAR_MS });
     const orders = generatePrev4hRangeOrders(ctx([stale], 100.5));
     const close = orders.find((o) => o.positionId === 'p1');
-    expect(close?.reason).toContain('time stop');
+    // 2026-09-16: first hit half-closes (side 'partial_tp1'), not a full
+    // close — same fix as Intraday's Time Stop. Reason text updated to match.
+    expect(close?.side).toBe('partial_tp1');
+    expect(close?.reason).toContain('Time Stop');
   });
 });

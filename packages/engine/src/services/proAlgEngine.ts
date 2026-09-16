@@ -106,17 +106,18 @@ export const PRO_INDICATOR_WEIGHTS = {
 } as const;
 
 /**
- * §2's coverage denominator, literally — 88.
+ * §2's coverage denominator — the sum of the eight weights above (105).
  *
- * The eight weights above sum to 105, not 88; alg.md gives 88 as the coverage
- * denominator without reconciling that gap, and this file does not resolve it
- * on the doc's behalf. The practical effect: once every indicator has enough
- * history to vote, totalWeight (105) exceeds 88 and coverage clamps to its
- * ceiling of 1 — so the discrepancy only matters during the indicator warm-up
- * window, where it makes coverage reach 1 slightly sooner than a
- * weights-sum-to-88 world would.
+ * alg.md's §2 text gives 88 here without reconciling it against its own
+ * weight table (which sums to 105); this was left at the doc's literal 88
+ * for a while (see BOTS_REFERENCE.md/ALGO_MATH.md "known, not fixed"). Fixed
+ * 2026-09-16: with 88, coverage clamped to 1 as soon as totalWeight passed
+ * 88 — i.e. before every indicator had voted — so the warm-up window
+ * reported "fully covered" while up to 17 points of weight were still
+ * missing. 105 makes coverage mean what it says: 1 only once every
+ * indicator has enough history to cast a vote.
  */
-export const PRO_COVERAGE_FULL_WEIGHT = 88;
+export const PRO_COVERAGE_FULL_WEIGHT = 105;
 
 /**
  * The four §2 indicators that all read ONE thing — how far price is stretched

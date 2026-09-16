@@ -190,7 +190,33 @@ export function generatePrev4hRangeOrders(ctx: Prev4hRangeOrderGenContext): Pend
       // Suspended once a rung is crossed (operator decision 2026-09-14): a
       // position already climbing the ladder runs to the ladder's own verdict
       // instead of being cut off by the 4H window.
-      reason = 'יציאה אחרי 4 שעות (time stop)';
+      //
+      // Half-close, not full, the first time (2026-09-16 — same fix as
+      // Intraday's Time Stop, same live-data shape: a full close marks the
+      // ENTIRE position to market on one tick while the ratchet above only
+      // ever realizes profit incrementally). `pos.tp1Hit` doubles as "already
+      // half-closed once" (set by the SAME partial_tp1 fill path the
+      // ratchet's own PARTIAL branch above already uses) — a second hit
+      // closes what's left, in full, so this cannot decay geometrically.
+      if (!pos.tp1Hit) {
+        closingSymbols.add(pos.symbol);
+        newOrders.push({
+          id: uid(`${pos.symbol}-timestop`),
+          symbol: pos.symbol,
+          positionId: pos.id,
+          type: pos.type,
+          side: 'partial_tp1',
+          exitFraction: 0.5,
+          signalPrice: live,
+          quantity: pos.quantity * 0.5,
+          reason: 'Time Stop (חלקי 50%, השאר ממשיך) — 4 שעות',
+          confidence: pos.confidence,
+          executeAt: now + delayMs,
+          createdAt: now
+        });
+        continue;
+      }
+      reason = 'יציאה אחרי 4 שעות (time stop) — סגירה מלאה (כבר מומש חלקית)';
     } else {
       const trend = h4EmaTrend(ctx.candlesBySymbol[pos.symbol]?.h1, p.emaPeriod);
       // A confirmed trend reversal still closes a laddered position — this bot

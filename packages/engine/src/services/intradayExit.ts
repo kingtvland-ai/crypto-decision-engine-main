@@ -350,11 +350,37 @@ export function evaluateIntradayExit(pos: IntradayPositionView, ctx: IntradayExi
     progressNaturalR < params.timeStopMinProgressR &&
     mfeNaturalR < params.timeStopStagnantMfeR
   ) {
+    // Half-close, not full, the first time this fires under the ratchet
+    // (2026-09-16 — live sim data: 14 Time-Stop/Max-Duration exits averaged
+    // -$8.05 against the ratchet's own average partial win of +$2.29, net
+    // -$69 on Intraday alone). A full close realizes the ENTIRE stagnant
+    // position at whatever this tick's price is; the ratchet already treats
+    // profit-taking as incremental (30% per rung) — a stagnant/losing
+    // position deserves the same "don't bet it all on one tick" treatment.
+    // The remainder still runs under the real SL / ratchet / MAX_DURATION —
+    // it is not given a free pass, only a second chance to recover instead of
+    // being marked to market as a full loss on a single stagnant tick.
+    // `pos.tp1Hit` doubles as "already time-stopped once" here (same shared
+    // partial_tp1 fill path the ratchet itself reuses for its partials) so
+    // this cannot decay geometrically like the pre-2026-09-16 profit ladder
+    // did: the SECOND time-stop hit always closes what is left, in full.
+    // Gated on `params.profitRatchet === true` (ratchet defined but not yet
+    // armed, or the live bot leaves it unset) — the live bot's `tp1Hit` still
+    // means exactly "TP1 price was touched" and nothing here changes for it.
+    if (params.profitRatchet === true && !pos.tp1Hit) {
+      return {
+        shouldExit: true,
+        exitType: 'PARTIAL_50',
+        reasonCode: 'TIME_STOP',
+        reason: `Time Stop (חלקי 50%, השאר ממשיך): אחרי ${heldMinutes} דק' התקדמות ${progressNaturalR.toFixed(2)}R < ${params.timeStopMinProgressR}R (MFE ${mfeNaturalR.toFixed(2)}R)`,
+        ...base
+      };
+    }
     return {
       shouldExit: true,
       exitType: 'FULL',
       reasonCode: 'TIME_STOP',
-      reason: `Time Stop: אחרי ${heldMinutes} דק' התקדמות ${progressNaturalR.toFixed(2)}R < ${params.timeStopMinProgressR}R (MFE ${mfeNaturalR.toFixed(2)}R)`,
+      reason: `Time Stop: אחרי ${heldMinutes} דק' התקדמות ${progressNaturalR.toFixed(2)}R < ${params.timeStopMinProgressR}R (MFE ${mfeNaturalR.toFixed(2)}R)${params.profitRatchet === true ? ' — סגירה מלאה (כבר מומש חלקית)' : ''}`,
       ...base
     };
   }

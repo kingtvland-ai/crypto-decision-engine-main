@@ -376,7 +376,34 @@ export function generateTrendBreakoutOrders(ctx: TrendBreakoutOrderGenContext): 
         // only exists while the trend holds.
         reason = `היפוך מגמה — H1 Supertrend התהפך ל-${stNow}`;
       } else if (!ratchet.armed && now - first.openTimestamp >= p.maxHoldHours * 60 * 60 * 1000) {
-        reason = `Time Stop — ${p.maxHoldHours} נרות H1 (${progressR.toFixed(2)}R)`;
+        // Half-close, not full, the first time (2026-09-16 — same fix as
+        // Intraday's Time Stop, same live-data shape: a full close marks the
+        // ENTIRE logical trade to market on one tick while the ratchet above
+        // only ever realizes profit incrementally). `first.tp1Hit` doubles as
+        // "already half-closed once" (set by the SAME partial_tp1 fill path
+        // the ratchet's own PARTIAL branch above already uses) — a second hit
+        // closes what's left, in full, so this cannot decay geometrically.
+        if (!first.tp1Hit) {
+          closingBaseSides.add(`${lt.base}|${lt.side}`);
+          for (const lot of openLots) {
+            newOrders.push({
+              id: uid(`${lt.base}-timestop`),
+              symbol: lt.base,
+              positionId: lot.id,
+              type: lot.type,
+              side: 'partial_tp1',
+              exitFraction: 0.5,
+              signalPrice: live,
+              quantity: lot.quantity * 0.5,
+              reason: `Time Stop (חלקי 50%, השאר ממשיך) — ${p.maxHoldHours} נרות H1 (${progressR.toFixed(2)}R)`,
+              confidence: lot.confidence,
+              executeAt: now + delayMs,
+              createdAt: now
+            });
+          }
+          continue;
+        }
+        reason = `Time Stop — ${p.maxHoldHours} נרות H1 (${progressR.toFixed(2)}R) — סגירה מלאה (כבר מומש חלקית)`;
       }
     }
 
