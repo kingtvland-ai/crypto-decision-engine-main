@@ -460,12 +460,20 @@ export function evaluatePositionExit(
   atr5: number,
   portfolio: ExitPortfolioInput,
   reversal?: { direction: Direction; setupScore: number; entryConfirmed: boolean },
-  params?: IntradayParams
+  params?: IntradayParams,
+  /** The engine's clock. Defaults to `Date.now()`, so every existing caller is
+   *  unchanged.
+   *
+   *  A replay MUST pass it: `evaluateIntradayExit` computes
+   *  `heldMs = now - pos.openTimestamp`, so a wall-clock `now` against a
+   *  replayed position's 2025 openTimestamp yields ~620 days held and
+   *  time-stops the position on its very first exit check. */
+  now?: number
 ): IntradayExitDecision {
   const view = buildExitView(pos);
   const ctx: IntradayExitContext = {
     price,
-    now: Date.now(),
+    now: now ?? Date.now(),
     atr5,
     params,
     portfolio: {

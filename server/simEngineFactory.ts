@@ -775,6 +775,9 @@ export function createGenericSimEngine(
         // sized against, or a fill-time recheck against shrinking equity would
         // reject orders the generator legitimately approved.
         initialAmount: config.initialAmount,
+        // The engine clock — stamps openTimestamp and every trade.at. A replay
+        // injects a synthetic one; live this is Date.now().
+        now: nowMs(),
         // Liquidity cap (2026-09-16): the quote volume of the most recent
         // CLOSED M5 bar. Real data, straight off the candle — an order asking
         // for more than a slice of it is trimmed rather than filled whole.

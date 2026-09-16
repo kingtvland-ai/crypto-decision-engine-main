@@ -2,7 +2,8 @@
  * Bybit (TrendBreakout) — Volatility Profile ladder wiring (2026-09-16)
  * ============================================================================
  * `evaluateTrendBreakout`'s new `input.volatilityProfiles`: when a valid
- * profile resolves (market is always 'linear' — this bot is FUTURES-only) it
+ * profile resolves (market follows this bot's OWN routing: a LONG is SPOT, a
+ * SHORT is a 1x FUTURES position because spot cannot short) it
  * replaces BOTH the ATR ladder and `calmRegimeScalp`'s fixed one, still
  * bounded by MAX_LOSS_PERCENT. Absent — every other test in the suite — is a
  * byte-for-byte no-op. The resulting stop is snapshotted onto the position at
@@ -70,8 +71,8 @@ describe('TrendBreakout (Bybit) — volatilityProfiles', () => {
     expect(ev.willExecute).toBe(true);
   });
 
-  it('resolves to the linear (futures) profile and replaces the ATR-derived stop/TP1', () => {
-    const profiles = new Map<string, VolatilityProfile>([['linear:CAP', makeProfile()]]);
+  it('resolves a LONG against the SPOT profile and replaces the ATR-derived stop/TP1', () => {
+    const profiles = new Map<string, VolatilityProfile>([['spot:CAP', makeProfile()]]);
     const ev = evaluateTrendBreakout({ symbol: 'CAP', h1, m15, m5, currentPrice: 205, volatilityProfiles: profiles });
     expect(ev.willExecute).toBe(true);
     const plan = readTrendBreakoutPlan(ev) as TrendBreakoutPlan;
@@ -83,15 +84,18 @@ describe('TrendBreakout (Bybit) — volatilityProfiles', () => {
     expect(stopPct).toBeLessThanOrEqual(MAX_LOSS_PERCENT + 1e-9);
   });
 
-  it('is a no-op when looked up under the wrong market (spot profile, this bot is linear-only)', () => {
-    const profiles = new Map<string, VolatilityProfile>([['spot:CAP', makeProfile()]]);
+  it('is a no-op under the WRONG market — this fixture is a LONG (spot), so a linear-only profile must not be used', () => {
+    // Regression for a real wiring bug: the market was hardcoded to 'linear'
+    // on the mistaken belief that this bot was futures-only, so every LONG
+    // looked up the wrong market's statistics.
+    const profiles = new Map<string, VolatilityProfile>([['linear:CAP', makeProfile()]]);
     const withProfiles = evaluateTrendBreakout({ symbol: 'CAP', h1, m15, m5, currentPrice: 205, volatilityProfiles: profiles });
     const withoutProfiles = evaluateTrendBreakout({ symbol: 'CAP', h1, m15, m5, currentPrice: 205 });
     expect(withProfiles).toEqual(withoutProfiles);
   });
 
   it('takes precedence over calmRegimeScalp when both are supplied', () => {
-    const profiles = new Map<string, VolatilityProfile>([['linear:CAP', makeProfile()]]);
+    const profiles = new Map<string, VolatilityProfile>([['spot:CAP', makeProfile()]]);
     const withVolatility = evaluateTrendBreakout({
       symbol: 'CAP', h1, m15, m5, currentPrice: 205,
       params: { calmRegimeScalp: true }, volatilityProfiles: profiles
@@ -101,7 +105,7 @@ describe('TrendBreakout (Bybit) — volatilityProfiles', () => {
   });
 
   it('the resolved stop is snapshotted onto the position — trailing derives rUnit from IT, not a re-derived ATR stop', () => {
-    const profiles = new Map<string, VolatilityProfile>([['linear:CAP', makeProfile()]]);
+    const profiles = new Map<string, VolatilityProfile>([['spot:CAP', makeProfile()]]);
     const ev = evaluateTrendBreakout({ symbol: 'CAP', h1, m15, m5, currentPrice: 205, volatilityProfiles: profiles });
     const plan = readTrendBreakoutPlan(ev) as TrendBreakoutPlan;
 
@@ -124,7 +128,7 @@ describe('TrendBreakout (Bybit) — volatilityProfiles', () => {
 
   it('still clamps to MAX_LOSS_PERCENT — a degenerate profile cannot escape the ceiling', () => {
     const profiles = new Map<string, VolatilityProfile>([
-      ['linear:CAP', makeProfile({ medianDown: 25, medianUp: 20 })]
+      ['spot:CAP', makeProfile({ medianDown: 25, medianUp: 20 })]
     ]);
     const ev = evaluateTrendBreakout({ symbol: 'CAP', h1, m15, m5, currentPrice: 205, volatilityProfiles: profiles });
     if (ev.willExecute) {

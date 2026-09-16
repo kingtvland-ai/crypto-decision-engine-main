@@ -445,12 +445,18 @@ export function evaluateTrendBreakout(input: TrendBreakoutInput): SignalEvaluati
   const dynSlPct = (cappedR / entryRef) * 100;
 
   // Deterministic Dynamic Volatility Profile ladder (2026-09-16, sim only,
-  // highest precedence of the three). FUTURES-only bot — market is always
-  // 'linear'. Resolved and applied ONCE here, at signal time — the position
-  // this opens into snapshots the resulting stop/TP distances, so the
-  // trailing-stop math later in the trade's life reuses this frozen ladder
-  // instead of recomputing a possibly-different one mid-trade.
-  const volatilityMarket: VolatilityMarket = 'linear';
+  // highest precedence of the three). Resolved and applied ONCE here, at
+  // signal time — the position this opens into snapshots the resulting
+  // stop/TP distances, so the trailing-stop math later in the trade's life
+  // reuses this frozen ladder instead of recomputing a possibly-different one
+  // mid-trade.
+  //
+  // Market follows THIS BOT'S OWN routing (see `tradeType` on the plan below,
+  // and `type:` in trendBreakoutExecution): a LONG is SPOT, a SHORT is a 1x
+  // FUTURES position because spot cannot short. An earlier version hardcoded
+  // 'linear' on the mistaken belief that this bot was futures-only, which sent
+  // every LONG to look up the wrong market's statistics.
+  const volatilityMarket: VolatilityMarket = isLong ? 'spot' : 'linear';
   const lastClosedH1 = h1.length ? h1[h1.length - 1] : undefined;
   const volatilityLadder = input.volatilityProfiles
     ? resolveVolatilityLadder({

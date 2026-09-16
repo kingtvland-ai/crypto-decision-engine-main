@@ -133,6 +133,32 @@ describe('liquidity — a fill cannot take more than a slice of the bar', () => 
     expect(res.positions[0].notionalUsd).toBeCloseTo(1000, 6);
   });
 
+  it('caps the NOTIONAL, not the margin — leverage does not multiply market impact', () => {
+    // 5x on a $1,000 margin is $5,000 hitting the book. The bar traded
+    // $10,000, so the 5% cap allows $500 of NOTIONAL — i.e. $100 of margin.
+    // Capping the margin instead would have allowed $500 of margin = $2,500
+    // of notional, five times the intended impact.
+    const leveraged = entryOrder({ type: 'FUTURES', leverage: 5, budgetUsd: 1000 });
+    const res = fillDueOrders([leveraged], 100_000, [], () => PRICE, String, {
+      ...baseCosts,
+      quoteVolumeFor: () => 10_000
+    });
+    expect(res.positions).toHaveLength(1);
+    const pos = res.positions[0];
+    expect(pos.notionalUsd).toBeCloseTo(10_000 * DEFAULT_LIQUIDITY_CAP_FRACTION, 6);
+    expect(pos.marginUsd).toBeCloseTo(100, 6);
+  });
+
+  it('skips a leveraged entry whose capped MARGIN falls under the floor', () => {
+    // Bar traded $5,000 → $250 of notional at 5x = $50 of margin, under $100.
+    const leveraged = entryOrder({ type: 'FUTURES', leverage: 5, budgetUsd: 1000 });
+    const res = fillDueOrders([leveraged], 100_000, [], () => PRICE, String, {
+      ...baseCosts,
+      quoteVolumeFor: () => 5_000
+    });
+    expect(res.positions).toHaveLength(0);
+  });
+
   it('honours a custom cap fraction', () => {
     const res = fillDueOrders([entryOrder()], 100_000, [], () => PRICE, String, {
       ...baseCosts,

@@ -16,7 +16,8 @@ import {
   PRO_TAKE_PROFIT_PERCENT,
   PRO_ALG_MIN_CANDLES,
   proStopTpLevels,
-  type ProSignalResult
+  type ProSignalResult,
+  type ProRiskLevel
 } from '@cde/engine/analysis';
 import type { Candle, SignalEvaluation } from '@cde/engine';
 import { TP2_PERCENT } from '@cde/engine/execution';
@@ -54,7 +55,7 @@ describe('§3 — minConfidence comes from the risk-level table, or an override'
   });
 
   it('an unknown riskLevel falls back to the default 70', () => {
-    expect(proMinConfidence('unknown' as any)).toBe(70);
+    expect(proMinConfidence('unknown' as ProRiskLevel)).toBe(70);
   });
 
   it('allocation is fixed at 10% of equity, regardless of confidence', () => {

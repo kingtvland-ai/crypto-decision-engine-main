@@ -24,7 +24,8 @@ import {
   TP1_EXIT_FRACTION,
   capStopLoss,
   weightedAverageExit,
-  type RiskPlanInput
+  type RiskPlanInput,
+  type IntradayPositionView
 } from '@cde/engine/analysis';
 import { DEFAULT_INTRADAY_PARAMS, withParams, POSITION_TARGET_PCT } from '@cde/engine';
 import { evaluateIntradayExit, evaluateIntradayDecision } from '@cde/engine/analysis';
@@ -218,11 +219,12 @@ describe('4. Immediate SL execution (no candle-close confirmation)', () => {
     const entry = 100;
     const stopLoss = 98.5;
     const atr5 = 1;
-    const position: any = {
+    const position: IntradayPositionView = {
       symbol: 'DOOD',
       type: 'SPOT',
       side: 'LONG',
       entryPrice: entry,
+      quantity: 1,
       stopLoss,
       takeProfit1: 103,
       takeProfit2: 104.5,

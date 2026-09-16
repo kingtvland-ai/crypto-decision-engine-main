@@ -177,6 +177,7 @@ export const intradayStrategy: SimEngineStrategy = {
     return generateNewOrders({
       positions: input.positions,
       pending: input.pending,
+      now: input.now,
       evaluations,
       executionDelaySec: input.config.executionDelaySec,
       dailyDrawdownPercent: input.dailyDrawdownPercent,

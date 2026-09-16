@@ -882,6 +882,15 @@ export interface OrderGenContext {
   correlationThreshold?: number;
   maxCorrelatedPositions?: number;
   correlationLookback?: number;
+  /** The engine's clock for this batch. Defaults to `Date.now()`, so every
+   *  existing caller is unchanged.
+   *
+   *  A historical replay MUST pass it. Orders carry `executeAt`/`createdAt`,
+   *  and `selectFillableOrders` compares them against the engine clock — so a
+   *  wall-clock `executeAt` against a 2025 replay clock is always in the future and
+   *  the order never becomes due. Measured 2026-09-16: Intraday produced ZERO
+   *  fills in a replay for exactly this reason. */
+  now?: number;
 }
 
 const ENTRY_ORDER_SIDES = new Set(['buy', 'sell', 'long', 'short']);
@@ -950,6 +959,7 @@ export function generateNewOrders(ctx: OrderGenContext): PendingOrder[] {
     maxCorrelatedPositions = DEFAULT_MAX_CORRELATED,
     correlationLookback = DEFAULT_CORRELATION_LOOKBACK
   } = ctx;
+  const nowMs = ctx.now ?? Date.now();
   const delayMs = Math.max(0, executionDelaySec) * 1000;
   const newOrders: PendingOrder[] = [];
 
@@ -1001,7 +1011,9 @@ export function generateNewOrders(ctx: OrderGenContext): PendingOrder[] {
       atr5,
       { dailyDrawdownPercent, weeklyDrawdownPercent },
       reversal,
-      { ...DEFAULT_INTRADAY_PARAMS, ...SIM_INTRADAY_PARAMS_OVERRIDE }
+      { ...DEFAULT_INTRADAY_PARAMS, ...SIM_INTRADAY_PARAMS_OVERRIDE },
+      // The engine clock — `heldMs` for the time stops is measured against it.
+      nowMs
     );
 
     if (!exitCheck.shouldExit) continue;
@@ -1019,8 +1031,8 @@ export function generateNewOrders(ctx: OrderGenContext): PendingOrder[] {
         quantity: pos.quantity * (exitCheck.ratchetFraction ?? 0),
         reason: exitCheck.reason,
         confidence: pos.confidence,
-        executeAt: Date.now() + delayMs,
-        createdAt: Date.now()
+        executeAt: nowMs + delayMs,
+        createdAt: nowMs
       });
     } else if (exitCheck.exitType === 'PARTIAL_50') {
       newOrders.push({
@@ -1033,8 +1045,8 @@ export function generateNewOrders(ctx: OrderGenContext): PendingOrder[] {
         quantity: pos.quantity * 0.5,
         reason: exitCheck.reason,
         confidence: pos.confidence,
-        executeAt: Date.now() + delayMs,
-        createdAt: Date.now()
+        executeAt: nowMs + delayMs,
+        createdAt: nowMs
       });
     } else {
       newOrders.push({
@@ -1047,8 +1059,8 @@ export function generateNewOrders(ctx: OrderGenContext): PendingOrder[] {
         quantity: pos.quantity,
         reason: exitCheck.reason,
         confidence: pos.confidence,
-        executeAt: Date.now() + delayMs,
-        createdAt: Date.now()
+        executeAt: nowMs + delayMs,
+        createdAt: nowMs
       });
     }
   }
@@ -1250,15 +1262,15 @@ export function generateNewOrders(ctx: OrderGenContext): PendingOrder[] {
       takeProfit: ev.takeProfit,
       reason: ev.reasoning,
       confidence: ev.confidence,
-      executeAt: Date.now() + delayMs,
-      createdAt: Date.now(),
+      executeAt: nowMs + delayMs,
+      createdAt: nowMs,
       // A resting entry may not outlive the trade it is trying to open. The 5M
       // entry confirmation behind this order decays on the same clock as the
       // hold budget, so half of that budget is the longest a stale confirmation
       // is worth acting on. Falls back to the flat TTL when the plan carried no
       // hold budget.
       expiresAt: typeof ev.decision?.risk?.maxHoldMs === 'number'
-        ? Date.now() + ev.decision.risk.maxHoldMs * ENTRY_TTL_HOLD_FRACTION
+        ? nowMs + ev.decision.risk.maxHoldMs * ENTRY_TTL_HOLD_FRACTION
         : undefined,
       // Carry the setup-type-correct hold budget from the entry-time RiskPlan
       // (see the SimPosition.maxHoldMs doc comment) — without this, every
@@ -1431,6 +1443,15 @@ export interface SimCostOverrides {
   /** Quote volume (USD) of the bar this fill happens on, per symbol. Real
    *  data — it is in every kline — unlike the spread above. */
   quoteVolumeFor?: (symbol: string) => number | undefined;
+  /** The engine's clock for this batch. Defaults to `Date.now()`, so every
+   *  existing caller is unchanged.
+   *
+   *  A historical replay MUST pass it: this is what stamps a new position's
+   *  `openTimestamp` and every trade's `at`. With the wall clock, a replayed
+   *  position opens "in 2026" while the engine reads 2025, so `heldMs` goes
+   *  NEGATIVE and no time stop can ever fire — and the closed-trade history
+   *  that Kelly sizing and the streak cooldowns order by `at` is nonsense. */
+  now?: number;
 }
 
 /** Modelled full spread, in percent of price. Bybit's majors sit near 0.01-0.02%
@@ -1449,17 +1470,25 @@ export const DEFAULT_LIQUIDITY_CAP_FRACTION = 0.05;
 
 export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimPosition[], priceFor: (symbol: string) => number | undefined, formatPrice: (n: number) => string, costs: SimCostOverrides = {}): FillResult {
   const equity = costs.equity;
+  // The engine clock. Live this is the wall clock; a replay injects its own —
+  // see SimCostOverrides.now for why a wall-clock stamp breaks a replay.
+  const atMs = costs.now ?? Date.now();
   // Explicit timeZone: this runs both in the browser (whatever local TZ) and
   // on the server (Render defaults to UTC) — without it, a trade's displayed
   // "last: HH:MM:SS" silently used the server's UTC clock instead of Israel
   // time, making a trade from moments ago look ~3 hours stale in the UI.
-  const now = new Date().toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem' });
+  const now = new Date(atMs).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem' });
   let workingCash = cash;
   let workingPositions = [...positions];
   const newTrades: SimTrade[] = [];
   const newCooldowns: Record<string, ReentryCooldownState> = {};
   const events: FillEvent[] = [];
   let feesAdded = 0;
+  // Holds slippage AND the modelled half-spread: both are "execution cost beyond
+  // fees", both are already inside fillPrice, and the UI reports one combined
+  // cost figure. Kept as one bucket deliberately — splitting it would add a
+  // parallel field through snapshot, archive and UI for a number nothing
+  // displays separately.
   let slipAdded = 0;
 
   for (const order of due) {
@@ -1488,7 +1517,7 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
       fillPrice: raw.fillPrice * spreadFactor,
       slippagePercent: raw.slippagePercent
     };
-    const delayMs = Date.now() - order.createdAt;
+    const delayMs = atMs - order.createdAt;
 
     if (isEntryOrder) {
       // Free cash is a CONSTRAINT at fill time, never a sizing input.
@@ -1531,29 +1560,37 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
       // absorb, and refusing outright would flatter the strategy by pretending
       // the trade never happened. Below the $100 floor after trimming it is
       // skipped, same as any undersized entry.
+      const isFutures = order.type === 'FUTURES';
+      const leverage = order.leverage || 1;
+
       const barQuoteVolume = costs.quoteVolumeFor?.(order.symbol);
       let budget = requested;
       if (typeof barQuoteVolume === 'number' && barQuoteVolume > 0) {
         const capFraction = costs.liquidityCapFraction ?? DEFAULT_LIQUIDITY_CAP_FRACTION;
-        const liquidityCap = barQuoteVolume * capFraction;
-        if (budget > liquidityCap) {
-          if (liquidityCap < MIN_SIM_ENTRY_USD) {
+        // The cap is on NOTIONAL, not on the cash put up. What hits the order
+        // book is the full position size — a $500 margin at 5x is $2,500 of
+        // market impact, and capping the margin would have let a leveraged
+        // entry take `leverage`x more of the bar than intended.
+        const notionalCap = barQuoteVolume * capFraction;
+        const requestedNotional = requested * leverage;
+        if (requestedNotional > notionalCap) {
+          const trimmedBudget = notionalCap / leverage;
+          if (trimmedBudget < MIN_SIM_ENTRY_USD) {
             console.warn(
               `[sim] ${order.symbol}: bar liquidity $${barQuoteVolume.toFixed(0)} allows only ` +
-              `$${liquidityCap.toFixed(2)} — below the $${MIN_SIM_ENTRY_USD} floor, skipped.`
+              `$${trimmedBudget.toFixed(2)} of margin — below the $${MIN_SIM_ENTRY_USD} floor, skipped.`
             );
             continue;
           }
           console.warn(
-            `[sim] ${order.symbol}: entry trimmed $${budget.toFixed(2)} → $${liquidityCap.toFixed(2)} ` +
-            `(${(capFraction * 100).toFixed(0)}% of the bar's $${barQuoteVolume.toFixed(0)} quote volume).`
+            `[sim] ${order.symbol}: entry trimmed $${budget.toFixed(2)} → $${trimmedBudget.toFixed(2)} ` +
+            `(notional capped at ${(capFraction * 100).toFixed(0)}% of the bar's ` +
+            `$${barQuoteVolume.toFixed(0)} quote volume).`
           );
-          budget = liquidityCap;
+          budget = trimmedBudget;
         }
       }
 
-      const isFutures = order.type === 'FUTURES';
-      const leverage = order.leverage || 1;
       const notional = budget * leverage;
 
         // §11 / N5: recheck exposure at fill time. Between queue and fill,
@@ -1611,7 +1648,7 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
         highestPrice: fillPrice,
         lowestPrice: fillPrice,
         openedAt: now,
-        openTimestamp: Date.now(),
+        openTimestamp: atMs,
         reason: order.reason,
         confidence: order.confidence,
         entryFee: fee,
@@ -1642,7 +1679,7 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
       newTrades.push({
         id: order.id, symbol: order.symbol, type: order.type, side: order.side,
         price: fillPrice, requestedPrice: order.signalPrice, slippagePercent, fee, delayMs,
-        quantity, usdValue: notional, leverage, timestamp: now, at: Date.now(),
+        quantity, usdValue: notional, leverage, timestamp: now, at: atMs,
         reason: order.reason, confidence: order.confidence
       });
 
@@ -1720,7 +1757,7 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
         newTrades.push({
           id: order.id, symbol: order.symbol, type: pos.type, side: 'partial_tp1',
           price: fillPrice, requestedPrice: order.signalPrice, slippagePercent, fee, delayMs,
-          quantity: closeQty, usdValue: notional, leverage: pos.leverage, timestamp: now, at: Date.now(),
+          quantity: closeQty, usdValue: notional, leverage: pos.leverage, timestamp: now, at: atMs,
           reason: order.reason, confidence: order.confidence, pnl, pnlPercent: partialPnlPercent,
           riskUsd: pos.initialRiskUsd !== undefined ? pos.initialRiskUsd * exitFraction : undefined
         });
@@ -1778,7 +1815,7 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
         // reverted (2026-09-16, FLOCK). isInEntryCooldown recomputes recovery
         // against the live price on each check rather than trusting a fixed
         // duration decided here.
-        newCooldowns[order.symbol] = { at: Date.now(), exitPrice, isLong: posIsLong };
+        newCooldowns[order.symbol] = { at: atMs, exitPrice, isLong: posIsLong };
 
         const pnlPercent = pos.type === 'SPOT'
           ? (pnl / (pos.quantity * pos.avgPrice)) * 100
@@ -1786,7 +1823,7 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
         newTrades.push({
           id: order.id, symbol: order.symbol, type: pos.type, side: order.side,
           price: exitPrice, requestedPrice: order.signalPrice, slippagePercent, fee, delayMs,
-          quantity: pos.quantity, usdValue: notional, leverage: pos.leverage, timestamp: now, at: Date.now(),
+          quantity: pos.quantity, usdValue: notional, leverage: pos.leverage, timestamp: now, at: atMs,
           reason: order.reason, confidence: order.confidence, pnl, pnlPercent,
           riskUsd: pos.initialRiskUsd
         });
