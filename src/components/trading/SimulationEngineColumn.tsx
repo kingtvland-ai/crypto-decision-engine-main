@@ -682,6 +682,16 @@ export default function SimulationEngineColumn({
                         remainingCostUsd={pos.type === 'SPOT'
                           ? pos.quantity * (pos.avgPrice || pos.entryPrice)
                           : pos.marginUsd}
+                        // Partial sales taken on THIS still-open position, for
+                        // the "S" markers on the chart. SimTrade carries no
+                        // positionId, but each bot holds at most one position
+                        // per symbol (the ALREADY_IN_SYMBOL gate), so symbol +
+                        // "after this position opened" identifies them exactly.
+                        saleTimestamps={trades
+                          .filter((t) => t.side === 'partial_tp1'
+                            && t.symbol === pos.symbol
+                            && t.at >= pos.openTimestamp)
+                          .map((t) => t.at)}
                         leverage={pos.leverage}
                         unrealizedPnl={pnl}
                         confidence={pos.confidence}

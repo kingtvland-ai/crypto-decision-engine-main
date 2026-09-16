@@ -32,9 +32,10 @@ const MAX_5M_BARS = 240;
 const UP = '#10b981';
 const DOWN = '#f43f5e';
 const ENTRY_HL = '#fbbf24';
+const SALE_HL = '#f59e0b';
 
 type Candle = { timestamp: number; open: number; high: number; low: number; close: number };
-type Row = {
+export type Row = {
   ts: number;
   open: number;
   high: number;
@@ -43,6 +44,10 @@ type Row = {
   /** [low, high] — the value recharts scales the bar by; the shape reads O/C off payload. */
   ohlc: [number, number];
   isEntry: boolean;
+  /** Partial sales (profit-ratchet exits) that happened inside this candle,
+   *  on a position that is STILL OPEN. Drawn as an "S" marker — without it the
+   *  chart showed a position quietly shrinking with no indication of when. */
+  sales?: number;
   forming?: boolean;
 };
 
@@ -78,12 +83,42 @@ export interface LivePositionChartProps {
    *  remaining margin for futures. Together with `investedUsd` this is what
    *  shows a 30% partial as "$1,000 in → $700 still in". */
   remainingCostUsd?: number;
+  /** Timestamps (ms) of PARTIAL sales taken on this still-open position — the
+   *  profit ratchet's 30% exits. Each is drawn as an "S" on the candle it
+   *  happened in. */
+  saleTimestamps?: number[];
   leverage?: number;
   unrealizedPnl?: number;
   /** Confidence (0-100) the engine entered this position with — shown as a
    *  holographic overlay on the chart. */
   confidence?: number;
   candles?: Candle[];
+}
+
+/**
+ * Marks each partial sale on the candle that CONTAINS it — the last bar
+ * opening at or before the sale. Mutates `rows` in place and returns it.
+ *
+ * A sale OLDER than the rendered window pins to the left edge rather than
+ * vanishing, for the same reason the entry marker does: "this happened before
+ * this view" is information, a missing marker is not.
+ *
+ * Exported for its own tests — the containing component's chart memo is not
+ * reachable from a unit test, and this mapping is the part with edge cases.
+ */
+export function attachSaleMarkers(rows: Row[], saleTimestamps?: number[]): Row[] {
+  if (!saleTimestamps?.length || !rows.length) return rows;
+  for (const saleAt of saleTimestamps) {
+    if (!Number.isFinite(saleAt)) continue;
+    let idx = -1;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].ts <= saleAt) idx = i;
+      else break;
+    }
+    const target = idx === -1 ? 0 : idx;
+    rows[target].sales = (rows[target].sales ?? 0) + 1;
+  }
+  return rows;
 }
 
 const fmtClock = (ts: number) =>
@@ -99,7 +134,7 @@ const CandleBar: React.FC<{
   payload?: Row;
 }> = ({ x = 0, y = 0, width = 0, height = 0, payload }) => {
   if (!payload) return null;
-  const { open, close, high, low, isEntry, forming } = payload;
+  const { open, close, high, low, isEntry, forming, sales } = payload;
   const cx = x + width / 2;
   const span = high - low;
   const priceToY = (p: number) => (span > 0 ? y + ((high - p) / span) * height : y + height / 2);
@@ -125,6 +160,30 @@ const CandleBar: React.FC<{
         stroke={isEntry ? ENTRY_HL : color}
         strokeWidth={isEntry ? 1.5 : 0}
       />
+      {/* Partial sale on a still-open position: an "S" above the candle it
+          happened on. Amber rather than red — the position is not closed, part
+          of it was taken off. A count rides along when several fired in the
+          same candle. */}
+      {!!sales && sales > 0 && (
+        <g>
+          <line x1={cx} x2={cx} y1={Math.max(2, y - 4)} y2={y} stroke={SALE_HL} strokeWidth={1} strokeOpacity={0.7} />
+          <circle cx={cx} cy={Math.max(2, y - 9)} r={5.5} fill={SALE_HL} fillOpacity={0.9} />
+          <text
+            x={cx} y={Math.max(2, y - 9)} textAnchor="middle" dominantBaseline="central"
+            fontSize={7} fontWeight={700} fill="#0b0f19"
+          >
+            S
+          </text>
+          {sales > 1 && (
+            <text
+              x={cx + 7} y={Math.max(2, y - 14)} textAnchor="start" dominantBaseline="central"
+              fontSize={7} fontWeight={700} fill={SALE_HL}
+            >
+              ×{sales}
+            </text>
+          )}
+        </g>
+      )}
     </g>
   );
 };
@@ -147,6 +206,7 @@ export const LivePositionChart: React.FC<LivePositionChartProps> = ({
   ratchetNextRungPrice,
   investedUsd,
   remainingCostUsd,
+  saleTimestamps,
   leverage = 1,
   unrealizedPnl,
   confidence,
@@ -300,8 +360,12 @@ export const LivePositionChart: React.FC<LivePositionChartProps> = ({
       }
     }
 
+    // Runs AFTER the forming bar is appended so a sale from moments ago lands
+    // on the bar that is actually still forming, not on the one before it.
+    attachSaleMarkers(out, saleTimestamps);
+
     return { chartData: out, entryCandleTs: eTs };
-  }, [activeCandles, entryTs, currentPrice, tfMs]);
+  }, [activeCandles, entryTs, currentPrice, tfMs, saleTimestamps]);
 
   const lastTs = chartData.length ? chartData[chartData.length - 1].ts : entryTs;
   // A category axis can hand the formatter a stringified ts — coerce before Date().
@@ -572,6 +636,23 @@ export const LivePositionChart: React.FC<LivePositionChartProps> = ({
                 <span>מרחק מ-SL: -{slDistancePercent.toFixed(1)}%</span>
                 <span>מרחק מ-TP: +{tpDistancePercent.toFixed(1)}%</span>
               </div>
+              {/* Only shown when there is something to explain — a legend for a
+                  marker that is not on the chart is noise. */}
+              {!!saleTimestamps?.length && (
+                <div className="flex items-center gap-1.5 text-[10px] font-mono text-amber-400">
+                  <span
+                    className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full text-[8px] font-bold"
+                    style={{ background: SALE_HL, color: '#0b0f19' }}
+                  >
+                    S
+                  </span>
+                  <span>
+                    {saleTimestamps.length === 1
+                      ? 'מכירה חלקית — הפוזיציה עדיין פתוחה'
+                      : `${saleTimestamps.length} מכירות חלקיות — הפוזיציה עדיין פתוחה`}
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         )}
