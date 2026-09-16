@@ -409,10 +409,16 @@ export interface ProOrderGenContext {
    *  (default, per alg.md §6) entries fire at executeAt as adverse-slippage
    *  MARKET fills. */
   limitEntries?: boolean;
+  /** The engine's clock for this batch. Defaults to `Date.now()`, so every
+   *  existing caller is unchanged. A historical replay injects a synthetic
+   *  clock instead, so order timestamps and TTLs advance with the replayed
+   *  bars rather than the wall clock. */
+  now?: number;
 }
 
 export function generateProOrders(ctx: ProOrderGenContext): PendingOrder[] {
   const { positions, pending, evaluations, signalsBySymbol, minConfidence, executionDelaySec, priceFor, limitEntries } = ctx;
+  const now = ctx.now ?? Date.now();
   const delayMs = Math.max(0, executionDelaySec) * 1000;
   const newOrders: PendingOrder[] = [];
 
@@ -437,7 +443,8 @@ export function generateProOrders(ctx: ProOrderGenContext): PendingOrder[] {
         entryPrice: pos.entryPrice, isLong, tp1Hit: pos.tp1Hit,
         stopLoss: pos.stopLoss, takeProfit1: pos.takeProfit1, takeProfit2: pos.takeProfit2,
         peakPrice: (isLong ? pos.highestPrice : pos.lowestPrice) ?? pos.entryPrice,
-        ratchetConsumed: pos.ratchetConsumed
+        ratchetPeakPct: pos.ratchetPeakPct,
+        remainingNotionalUsd: pos.quantity * livePrice
       },
       livePrice,
       effectiveSignal,
@@ -455,11 +462,11 @@ export function generateProOrders(ctx: ProOrderGenContext): PendingOrder[] {
       symbol: pos.symbol, positionId: pos.id, type: 'SPOT',
       side: partial ? 'partial_tp1' : 'close_long',
       exitFraction: partial ? fraction : undefined,
-      ratchetConsumed: exitCheck.ratchetConsumed,
+      ratchetPeakPct: exitCheck.ratchetPeakPct,
       signalPrice: livePrice,
       quantity: partial ? pos.quantity * fraction : pos.quantity,
       reason: exitCheck.reason,
-      confidence: pos.confidence ?? 0, executeAt: Date.now() + delayMs, createdAt: Date.now()
+      confidence: pos.confidence ?? 0, executeAt: now + delayMs, createdAt: now
     } as PendingOrder);
   }
 
@@ -512,7 +519,7 @@ export function generateProOrders(ctx: ProOrderGenContext): PendingOrder[] {
       // להיכנס, יגיע לשער וירכוש". Fills are Maker (lower fee) and carry no slippage.
       fill: limitEntries ? 'limit' : 'market',
       reason: ev.reasoning, confidence: ev.confidence,
-      executeAt: Date.now() + delayMs, createdAt: Date.now()
+      executeAt: now + delayMs, createdAt: now
     } as PendingOrder);
   }
 

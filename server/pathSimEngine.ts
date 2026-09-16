@@ -49,7 +49,9 @@ function overrideParams(input: StrategyTickInput) {
   return { calmRegimeScalp: true, noiseFloorStop: true, ...(override ? { minConfidence: override } : {}) };
 }
 
-const pathStrategy: SimEngineStrategy = {
+/** Exported so the replay driver (server/replayRunner.ts) can run this exact
+ *  bot over stored history through the same engine the live loop uses. */
+export const pathStrategy: SimEngineStrategy = {
   id: 'path',
   logPrefix: '[path-sim-engine]',
   telegramTag: 'path-sim',
@@ -76,13 +78,19 @@ const pathStrategy: SimEngineStrategy = {
         h1,
         currentPrice,
         priceChange24h: crypto.price_change_percentage_24h ?? 0,
+        // The engine's clock, not the wall clock. `evaluatePrev4hRange`
+        // compares `barOpenFor(now)` against the previous 4H bar's window and
+        // returns STALE_BAR when they disagree — so omitting this (as this
+        // call did until 2026-09-16) makes every bar of a historical replay
+        // look stale and the bot untestable. Live, `input.now` IS Date.now().
+        now: input.now,
         params,
         volatilityProfiles: getVolatilityProfileStore()
       });
       // Macro Layer sell-pressure (2026-09-16) — same check as Intraday's GATE
       // 6, extended to Path. Overrides a signal that already qualified;
       // evaluatePrev4hRange's own gates/thresholds above are untouched.
-      const now = Date.now();
+      const now = input.now;
       const symbolKey = crypto.symbol.toUpperCase();
       const afterSellPressure = applySellPressureOverride(
         evaluation, h1, input.derivativesBySymbol.get(symbolKey), now
@@ -122,6 +130,7 @@ const pathStrategy: SimEngineStrategy = {
       maxPositions: input.maxPositions,
       maxFuturesPositions: input.maxFuturesPositions,
       limitEntries: input.config.proLimitEntries === true,
+      now: input.now,
       params
     });
   }

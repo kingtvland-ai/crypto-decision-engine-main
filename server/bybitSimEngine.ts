@@ -47,7 +47,9 @@ function overrideParams(input: StrategyTickInput) {
   return { calmRegimeScalp: true, noiseFloorStop: true, ...(override ? { minConfidence: override } : {}) };
 }
 
-const bybitStrategy: SimEngineStrategy = {
+/** Exported so the replay driver (server/replayRunner.ts) can run this exact
+ *  bot over stored history through the same engine the live loop uses. */
+export const bybitStrategy: SimEngineStrategy = {
   id: 'bybit',
   logPrefix: '[bybit-sim-engine]',
   telegramTag: 'bybit-sim',
@@ -88,7 +90,7 @@ const bybitStrategy: SimEngineStrategy = {
       // Macro Layer sell-pressure (2026-09-16) — same check as Intraday's GATE
       // 6, extended to Bybit/TrendBreakout. Overrides a signal that already
       // qualified; evaluateTrendBreakout's own gates/thresholds are untouched.
-      const now = Date.now();
+      const now = input.now;
       const symbolKey = crypto?.symbol?.toUpperCase();
       const afterSellPressure = applySellPressureOverride(
         evaluation, h1, symbolKey ? input.derivativesBySymbol.get(symbolKey) : undefined, now
@@ -130,6 +132,7 @@ const bybitStrategy: SimEngineStrategy = {
       closedTradeMetrics: input.closedTradeMetrics,
       maxConcurrentTrades: input.maxPositions,
       limitEntries: input.config.proLimitEntries === true,
+      now: input.now,
       params
     });
   }

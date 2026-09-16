@@ -45,6 +45,31 @@ export {
   MIN_PROFILE_MONTHS
 } from './services/volatilityProfile';
 
+// ── Walk-forward validation (TRAIN → VALIDATION → OOS) ──────────────────────
+// Lives on this entry point rather than in the trading barrels because it is
+// a research/validation tool, not part of any bot's decision path.
+export {
+  splitWalkForward,
+  rollingWalkForward,
+  scoreRun,
+  nullExpectation,
+  judgeSurvivor,
+  assertOosUnspent,
+  hashConfig,
+  DEFAULT_TRAIN_FRACTION,
+  DEFAULT_VALIDATION_FRACTION,
+  DEFAULT_SURVIVOR_RULE
+} from './services/walkForward';
+export type {
+  WalkForwardWindow,
+  WalkForwardSplit,
+  ScorableTrade,
+  RunScore,
+  SurvivorRule,
+  SurvivorVerdict,
+  OosLedgerEntry
+} from './services/walkForward';
+
 export type { MonthlyExcursionRow } from './services/volatilityCalibration';
 export {
   buildVolatilityProfiles,

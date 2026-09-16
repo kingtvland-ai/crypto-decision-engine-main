@@ -738,8 +738,11 @@ export interface ProPositionView {
   /** Best price seen since entry (highest for a long, lowest for a short).
    *  Required by the profit ratchet; absent it falls back to the live price. */
   peakPrice?: number;
-  /** Profit-ratchet rungs already paid out — see profitRatchet.ts. */
-  ratchetConsumed?: number[];
+  /** Peak profit % as of the last ratchet partial — the "new high required"
+   *  re-arm state. See profitRatchet.ts. */
+  ratchetPeakPct?: number;
+  /** Remaining notional in USD, for the ratchet's dust rule. */
+  remainingNotionalUsd?: number;
 }
 
 export interface ProExitDecision {
@@ -750,7 +753,8 @@ export interface ProExitDecision {
   exitType?: 'FULL' | 'PARTIAL_50' | 'PARTIAL_RATCHET';
   reason: string;
   ratchetFraction?: number;
-  ratchetConsumed?: number[];
+  /** Peak-at-last-partial to persist onto the remainder (the re-arm rule). */
+  ratchetPeakPct?: number;
 }
 
 /**
@@ -797,17 +801,19 @@ export function evaluateProExit(
     : stopLoss;
 
   // Profit ratchet (2026-09-14, operator decision, sim only). When on it owns
-  // every profit exit: rungs at 1.8/3/4/5%… are marked on the way up and sell
-  // nothing, coming back down to one sells 30%, and the 1.8% floor closes the
-  // position. TP1/TP2 and the break-even runner stop below are bypassed — the
-  // stop loss and the SELL-signal flip still apply.
+  // every profit exit: once the peak clears +1.8% it sells 30% of what is left
+  // each time profit gives back 15% OF THE PEAK, re-arms only on a new high,
+  // and closes the position entirely at break-even. TP1/TP2 and the break-even
+  // runner stop below are bypassed — the stop loss and the SELL-signal flip
+  // still apply. See profitRatchet.ts.
   const ratchet = opts.profitRatchet === true
     ? evaluateRatchet({
         entryPrice: pos.entryPrice,
         peakPrice: pos.peakPrice ?? currentPrice,
         livePrice: currentPrice,
         isLong,
-        consumed: pos.ratchetConsumed
+        peakPctAtLastPartial: pos.ratchetPeakPct,
+        remainingNotionalUsd: pos.remainingNotionalUsd
       })
     : undefined;
 
@@ -817,7 +823,7 @@ export function evaluateProExit(
       exitType: ratchet.action === 'FULL' ? 'FULL' : 'PARTIAL_RATCHET',
       reason: ratchetReason(ratchet),
       ratchetFraction: ratchet.fraction,
-      ratchetConsumed: ratchet.consumed
+      ratchetPeakPct: ratchet.peakPctAtLastPartial
     };
   }
 

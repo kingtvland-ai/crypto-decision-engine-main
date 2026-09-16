@@ -43,7 +43,9 @@ export type ProSimSnapshot = SimSnapshot;
  */
 const PRO_MIN_CONFIDENCE = SIM_MIN_CONFIDENCE.pro;
 
-const proStrategy: SimEngineStrategy = {
+/** Exported so the replay driver (server/replayRunner.ts) can run this exact
+ *  bot over stored history through the same engine the live loop uses. */
+export const proStrategy: SimEngineStrategy = {
   id: 'pro',
   logPrefix: '[pro-sim-engine]',
   telegramTag: 'pro-sim',
@@ -73,7 +75,7 @@ const proStrategy: SimEngineStrategy = {
       // Macro Layer sell-pressure (2026-09-16) — same check as Intraday's GATE
       // 6, extended to Pro. Overrides a buy that already qualified; §4's own
       // scoring/thresholds above are untouched.
-      results.push(applySellPressureOverride(evaluation, candles, input.derivativesBySymbol.get(symbol), Date.now()));
+      results.push(applySellPressureOverride(evaluation, candles, input.derivativesBySymbol.get(symbol), input.now));
     }
 
     // §4 — the state gates (queued / held / slots / price / budget), evaluated
@@ -142,7 +144,8 @@ const proStrategy: SimEngineStrategy = {
       // cooldown at all (2026-09-14).
       exitCooldown: input.exitCooldown,
       priceFor: input.priceFor,
-      limitEntries: input.config.proLimitEntries === true
+      limitEntries: input.config.proLimitEntries === true,
+      now: input.now
     });
   }
 };

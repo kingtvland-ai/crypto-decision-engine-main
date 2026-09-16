@@ -88,6 +88,12 @@ export interface Prev4hRangeOrderGenContext {
   /** SHORTs are simulated as 1x FUTURES; this caps how many can be open at
    *  once (SIM_MAX_FUTURES_POSITIONS.path). LONGs are SPOT and unaffected. */
   maxFuturesPositions: number;
+  /** The engine's clock for this batch. Defaults to `Date.now()`, so every
+   *  existing caller is unchanged. A historical replay injects a synthetic
+   *  clock instead, so order timestamps, TTLs, cooldowns and the 4H window
+   *  time-stop all advance with the replayed bars rather than the wall clock —
+   *  without it this bot cannot be backtested at all. */
+  now?: number;
   /** SimBotConfig.proLimitEntries. true → the breakout entry rests as a LIMIT
    *  at the signal price (fills on a pullback back to it, else expires); false
    *  → fires as a delayed MARKET order with adverse slippage (the default —
@@ -120,7 +126,7 @@ function h4EmaTrend(h1: Candle[] | undefined, emaPeriod: number): 'UP' | 'DOWN' 
 
 export function generatePrev4hRangeOrders(ctx: Prev4hRangeOrderGenContext): PendingOrder[] {
   const p: Prev4hRangeParams = { ...DEFAULT_PREV4H_RANGE_PARAMS, ...(ctx.params ?? {}) };
-  const now = Date.now();
+  const now = ctx.now ?? Date.now();
   const delayMs = Math.max(0, ctx.executionDelaySec) * 1000;
   const newOrders: PendingOrder[] = [];
   const claimed = new Set(ctx.pending.filter((o) => o.positionId).map((o) => o.positionId as string));
@@ -140,19 +146,19 @@ export function generatePrev4hRangeOrders(ctx: Prev4hRangeOrderGenContext): Pend
     // past 4.2%) has its effective stop pulled in here — never loosened.
     const effectiveStopLoss = capStopLoss(pos.entryPrice, pos.stopLoss, isLong);
 
-    // Profit ratchet (2026-09-14) — the ONLY profit exit, replacing TP1's 50%
-    // partial + the break-even-after-TP1 runner stop + TP2 outright. Rungs at
-    // 1.8/3/4/5%… are marked on the way up and sell nothing; coming back down
-    // to one sells 30% of the remainder, and the 1.8% floor closes the whole
-    // position. See profitRatchet.ts. Below the first rung the ORIGINAL stop
-    // (not a break-even one — the ratchet owns "protect the profit" now) still
-    // applies, unchanged.
+    // Profit ratchet (2026-09-14, reworked 2026-09-16) — the ONLY profit exit,
+    // replacing TP1's 50% partial + the break-even-after-TP1 runner stop + TP2
+    // outright. Once the peak clears +1.8% it sells 30% of the remainder each
+    // time profit gives back 15% OF THE PEAK, re-arms only on a new high, and
+    // closes the position entirely at break-even. See profitRatchet.ts. Before
+    // it arms, the ORIGINAL stop still applies, unchanged.
     const ratchet = evaluateRatchet({
       entryPrice: pos.entryPrice,
       peakPrice: (isLong ? pos.highestPrice : pos.lowestPrice) ?? pos.entryPrice,
       livePrice: live,
       isLong,
-      consumed: pos.ratchetConsumed
+      peakPctAtLastPartial: pos.ratchetPeakPct,
+      remainingNotionalUsd: pos.quantity * live
     });
 
     if (ratchet.action === 'PARTIAL') {
@@ -164,7 +170,7 @@ export function generatePrev4hRangeOrders(ctx: Prev4hRangeOrderGenContext): Pend
         type: pos.type,
         side: 'partial_tp1',
         exitFraction: ratchet.fraction,
-        ratchetConsumed: ratchet.consumed,
+        ratchetPeakPct: ratchet.peakPctAtLastPartial,
         signalPrice: live,
         quantity: pos.quantity * (ratchet.fraction ?? 0),
         reason: ratchetReason(ratchet),
@@ -180,7 +186,7 @@ export function generatePrev4hRangeOrders(ctx: Prev4hRangeOrderGenContext): Pend
       reason = `Stop Loss ב-${effectiveStopLoss} (${pnlPct.toFixed(2)}%, תקרה ${MAX_LOSS_PERCENT}%)`;
     } else if (ratchet.action === 'FULL') {
       reason = ratchetReason(ratchet);
-    } else if (ratchet.peakRung === undefined && now >= pos.openTimestamp + BAR_MS) {
+    } else if (!ratchet.armed && now >= pos.openTimestamp + BAR_MS) {
       // Suspended once a rung is crossed (operator decision 2026-09-14): a
       // position already climbing the ladder runs to the ladder's own verdict
       // instead of being cut off by the 4H window.

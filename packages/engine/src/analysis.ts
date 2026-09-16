@@ -108,11 +108,13 @@ export {
 export type { LadderPercents, VolatilityExpansion, StopNoise } from './services/calmRegime';
 
 export {
-  RATCHET_FIRST_RUNG_PCT, RATCHET_SECOND_RUNG_PCT, RATCHET_STEP_PCT,
-  RATCHET_PARTIAL_FRACTION,
-  rungsCrossed, evaluateRatchet, ratchetReason, ratchetLevels
+  RATCHET_ARM_PCT, RATCHET_GIVEBACK_FRACTION,
+  RATCHET_PARTIAL_FRACTION, RATCHET_DUST_NOTIONAL_USD,
+  evaluateRatchet, ratchetReason, ratchetLevels
 } from './services/profitRatchet';
-export type { RatchetInput, RatchetDecision, RatchetAction, RatchetLevels } from './services/profitRatchet';
+export type {
+  RatchetInput, RatchetDecision, RatchetAction, RatchetFullReason, RatchetLevels
+} from './services/profitRatchet';
 
 
 export type { ScoreContext } from './services/intradaySetupScores';

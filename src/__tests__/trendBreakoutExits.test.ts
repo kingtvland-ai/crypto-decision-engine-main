@@ -203,19 +203,20 @@ describe('stop exits trigger immediately on touch — no M15 close confirmation'
     expect(orders[0].reason).toContain('4.2%');
   });
 
-  it('a given-back winner exits immediately on touch — now via the ratchet floor', () => {
-    // highestPrice 104 = +4%, so rungs 1.8 and 3 are crossed. Since 2026-09-14
-    // the profit ratchet owns every exit above +1.8%, which makes the old
-    // break-even/ATR-trail branch unreachable here: any peak high enough to
-    // move the stop to break-even is also high enough to arm the ladder. What
-    // this test still pins is the ORIGINAL point — the exit fires the moment
-    // price touches the level, with no M15 close confirmation.
+  it('a given-back winner exits immediately on touch — now via the ratchet break-even close', () => {
+    // highestPrice 104 = +4%, which arms the ratchet (peak > +1.8%). Since
+    // 2026-09-14 the profit ratchet owns every exit above the arm point, which
+    // makes the old break-even/ATR-trail branch unreachable here. Price at
+    // 99.5 is BELOW the entry, so the ratchet's break-even close fires — the
+    // rule that replaced the old 1.8% floor on 2026-09-16. What this test
+    // still pins is the ORIGINAL point: the exit fires the moment price
+    // touches the level, with no M15 close confirmation.
     const up = [lot({ highestPrice: 104 })];
     const orders = generateTrendBreakoutOrders(ctx({ positions: up, price: 99.5 }));
     expect(orders).toHaveLength(1);
     expect(orders[0].side).toBe('close_long');
     expect(orders[0].reason).toContain('סולם רווח');
-    expect(orders[0].reason).toContain('1.8%');
+    expect(orders[0].reason).toContain('ברייק-אבן');
     expect(orders[0].reason).not.toContain('סגירת נר M15');
   });
 

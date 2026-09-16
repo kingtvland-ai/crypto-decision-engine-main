@@ -1,258 +1,234 @@
 /**
- * Profit ratchet (2026-09-14)
+ * Profit ratchet — giveback-of-peak model (rewritten 2026-09-16)
  * ============================================================================
- * Rungs 1.8% → 3% → 4% → 5% → … Crossing one marks it and sells nothing;
- * coming back down to one sells 30% (or closes everything at the 1.8% floor)
- * and consumes it permanently.
+ * The original fixed-rung ladder (1.8/3/4/5%… +1% forever, 30% of the
+ * remainder per rung) was replaced after a live failure on BR: on a +69% move
+ * it sold 83% of the position below +12%, at a weighted-average exit of
+ * +8.82%, then kept emitting sub-cent "+$0.00" orders no exchange would
+ * accept. Three defects: geometric decay made the WORST prices sell the most,
+ * a gradual pullback was charged once per tick while a fast one was charged
+ * once, and there was no minimum order size.
+ *
+ * The replacement is pinned here:
+ *   · arm at +1.8% peak
+ *   · sell 30% of the remainder on a giveback of 15% OF THE PEAK
+ *   · re-arm only on a NEW peak (one pullback = one sale)
+ *   · full close at BREAK-EVEN (replaces the old 1.8% floor)
+ *   · full close when the remainder is dust
  */
-
 import { describe, it, expect } from 'vitest';
 import {
-  RATCHET_FIRST_RUNG_PCT, RATCHET_PARTIAL_FRACTION,
-  rungsCrossed, evaluateRatchet, ratchetReason
+  RATCHET_ARM_PCT,
+  RATCHET_GIVEBACK_FRACTION,
+  RATCHET_PARTIAL_FRACTION,
+  RATCHET_DUST_NOTIONAL_USD,
+  evaluateRatchet,
+  ratchetReason,
+  ratchetLevels,
+  type RatchetInput
 } from '@cde/engine/analysis';
 
-const ENTRY = 100;
-/** Price for a given profit % on a long. */
-const at = (pnlPct: number) => ENTRY * (1 + pnlPct / 100);
-
-function longAt(peakPct: number, livePct: number, consumed: number[] = []) {
-  return evaluateRatchet({
-    entryPrice: ENTRY, peakPrice: at(peakPct), livePrice: at(livePct),
-    isLong: true, consumed
-  });
+/** A long from 100. `peak`/`live` are given as PROFIT PERCENTAGES. */
+function longAt(peakPct: number, livePct: number, over: Partial<RatchetInput> = {}): RatchetInput {
+  return {
+    entryPrice: 100,
+    peakPrice: 100 * (1 + peakPct / 100),
+    livePrice: 100 * (1 + livePct / 100),
+    isLong: true,
+    ...over
+  };
 }
 
-describe('rungsCrossed', () => {
-  it('arms nothing below the first rung', () => {
-    expect(rungsCrossed(0)).toEqual([]);
-    expect(rungsCrossed(1.79)).toEqual([]);
-    expect(rungsCrossed(-5)).toEqual([]);
+describe('arming', () => {
+  it('does nothing below the arm threshold — the stop loss owns the position', () => {
+    const d = evaluateRatchet(longAt(1.5, 1.2));
+    expect(d.action).toBe('HOLD');
+    expect(d.armed).toBe(false);
   });
 
-  it('steps 1.8 → 3 → 4 → 5, +1% thereafter', () => {
-    expect(rungsCrossed(1.8)).toEqual([1.8]);
-    expect(rungsCrossed(2.9)).toEqual([1.8]);
-    expect(rungsCrossed(3)).toEqual([1.8, 3]);
-    expect(rungsCrossed(4.2)).toEqual([1.8, 3, 4]);
-    expect(rungsCrossed(7.9)).toEqual([1.8, 3, 4, 5, 6, 7]);
+  it('arms exactly at +1.8% peak', () => {
+    expect(evaluateRatchet(longAt(RATCHET_ARM_PCT, RATCHET_ARM_PCT)).armed).toBe(true);
   });
 
-  it('survives a nonsense peak without hanging', () => {
-    expect(rungsCrossed(Number.NaN)).toEqual([]);
-    expect(rungsCrossed(1e9).length).toBeLessThan(500);
+  it('a peak below the live price (restored position) still arms off the live price', () => {
+    const d = evaluateRatchet({ entryPrice: 100, peakPrice: 0, livePrice: 105, isLong: true });
+    expect(d.armed).toBe(true);
+    expect(d.peakPnlPct).toBeCloseTo(5, 6);
   });
 });
 
-describe('evaluateRatchet — climbing', () => {
-  it('holds all the way up: crossing a rung never sells', () => {
-    for (const pct of [0.5, 1.8, 2.5, 3, 4, 4.2, 9]) {
-      expect(longAt(pct, pct).action).toBe('HOLD');
-    }
+describe('the giveback trigger — a percentage of the move, not a fixed rung', () => {
+  it('holds while profit is above the giveback line', () => {
+    // peak 69 → trigger at 69 * 0.85 = 58.65
+    expect(evaluateRatchet(longAt(69, 60)).action).toBe('HOLD');
   });
 
-  it('reports the highest rung the peak has crossed', () => {
-    expect(longAt(4.2, 4.2).peakRung).toBe(4);
-    expect(longAt(2.5, 2.5).peakRung).toBe(1.8);
-    expect(longAt(1.0, 1.0).peakRung).toBeUndefined();
-  });
-
-  it('does nothing below +1.8% — the stop loss still owns that range', () => {
-    expect(longAt(1.5, -2).action).toBe('HOLD');
-    expect(longAt(1.79, 0).action).toBe('HOLD');
-  });
-});
-
-describe('evaluateRatchet — the operator\'s worked example', () => {
-  // "הגיע לרווח של 4.2" — peak +4.2%, rungs 1.8/3/4 crossed.
-  it('peak 4.2%: holding at 4.1 does nothing, falling to 4.0 sells 30%', () => {
-    expect(longAt(4.2, 4.1).action).toBe('HOLD');
-
-    const hit = longAt(4.2, 4.0);
-    expect(hit.action).toBe('PARTIAL');
-    expect(hit.rung).toBe(4);
-    expect(hit.fraction).toBeCloseTo(RATCHET_PARTIAL_FRACTION, 6);
-    expect(hit.consumed).toContain(4);
-  });
-
-  it('the full retrace sequence pays out 30% / 30% / everything', () => {
-    let consumed: number[] = [];
-
-    const r4 = longAt(4.2, 4.0, consumed);
-    expect([r4.action, r4.rung]).toEqual(['PARTIAL', 4]);
-    consumed = r4.consumed;
-
-    const r3 = longAt(4.2, 3.0, consumed);
-    expect([r3.action, r3.rung]).toEqual(['PARTIAL', 3]);
-    consumed = r3.consumed;
-
-    const r18 = longAt(4.2, 1.8, consumed);
-    expect([r18.action, r18.rung, r18.fraction]).toEqual(['FULL', 1.8, 1]);
-  });
-});
-
-describe('evaluateRatchet — a consumed rung never fires twice', () => {
-  it('oscillating around a consumed rung sells nothing more', () => {
-    const consumed = longAt(4.2, 4.0).consumed;
-    for (const live of [4.02, 3.97, 4.0, 3.99]) {
-      expect(longAt(4.2, live, consumed).action).toBe('HOLD');
-    }
-  });
-
-  it('but a fresh high arms a NEW rung above the consumed one', () => {
-    const consumed = longAt(4.2, 4.0).consumed; // 4 consumed
-    expect(longAt(5.4, 5.3, consumed).action).toBe('HOLD');
-    const r5 = longAt(5.4, 5.0, consumed);
-    expect([r5.action, r5.rung]).toEqual(['PARTIAL', 5]);
-  });
-
-  it('consuming 4 does not retire the 3 rung beneath it', () => {
-    const consumed = longAt(4.2, 4.0).consumed;
-    expect(longAt(4.2, 3.0, consumed).rung).toBe(3);
-  });
-});
-
-describe('evaluateRatchet — the 1.8% floor', () => {
-  it('closes everything, never 30%', () => {
-    const d = longAt(2.5, 1.8);
-    expect(d.action).toBe('FULL');
-    expect(d.fraction).toBe(1);
-  });
-
-  it('a position that once touched +1.8% is not allowed to turn red', () => {
-    // Gapped straight through the floor: still a full exit, at the live price.
-    const d = longAt(2.5, -1.0);
-    expect(d.action).toBe('FULL');
-    expect(d.rung).toBe(RATCHET_FIRST_RUNG_PCT);
-  });
-
-  it('a gap through several rungs pays out ONCE and consumes them all', () => {
-    const d = longAt(5.5, 3.4); // breaches 5 and 4, but not 3
+  it('sells 30% once profit gives back 15% of the peak', () => {
+    const d = evaluateRatchet(longAt(69, 58));
     expect(d.action).toBe('PARTIAL');
-    expect(d.rung).toBe(4);
-    expect(d.consumed).toEqual(expect.arrayContaining([4, 5]));
-    expect(d.consumed).not.toContain(3);
+    expect(d.fraction).toBe(RATCHET_PARTIAL_FRACTION);
   });
 
-  it('a gap that reaches the floor is a full exit, whatever else it breached', () => {
-    const d = longAt(6.5, 1.0);
+  it('scales with the size of the move — a small peak has a small giveback', () => {
+    // peak 10 → trigger at 8.5
+    expect(evaluateRatchet(longAt(10, 9)).action).toBe('HOLD');
+    expect(evaluateRatchet(longAt(10, 8.4)).action).toBe('PARTIAL');
+  });
+
+  it('the BR case: one +10% peak pulling back to +8% is ONE sale, not three', () => {
+    // The live log showed rungs 10, 9 and 8 firing at 12:06:37/:45/:53.
+    const first = evaluateRatchet(longAt(10.02, 9.79));
+    expect(first.action).toBe('HOLD'); // 9.79 is above the 8.52 trigger
+
+    const atTrigger = evaluateRatchet(longAt(10.02, 8.5));
+    expect(atTrigger.action).toBe('PARTIAL');
+
+    // …and the next two ticks of the SAME pullback sell nothing, because no
+    // new high was made.
+    const carried = { peakPctAtLastPartial: atTrigger.peakPctAtLastPartial };
+    expect(evaluateRatchet(longAt(10.02, 8.68, carried)).action).toBe('HOLD');
+    expect(evaluateRatchet(longAt(10.02, 7.99, carried)).action).toBe('HOLD');
+  });
+});
+
+describe('re-arm requires a new peak', () => {
+  it('will not sell twice on the same peak', () => {
+    const first = evaluateRatchet(longAt(20, 17));
+    expect(first.action).toBe('PARTIAL');
+    expect(first.peakPctAtLastPartial).toBeCloseTo(20, 6);
+
+    const again = evaluateRatchet(longAt(20, 16, { peakPctAtLastPartial: first.peakPctAtLastPartial }));
+    expect(again.action).toBe('HOLD');
+  });
+
+  it('sells again once a genuinely new high is made and given back', () => {
+    const d = evaluateRatchet(longAt(30, 25, { peakPctAtLastPartial: 20 }));
+    expect(d.action).toBe('PARTIAL');
+    expect(d.peakPctAtLastPartial).toBeCloseTo(30, 6);
+  });
+
+  it('a new high that has NOT been given back yet still holds', () => {
+    expect(evaluateRatchet(longAt(30, 29, { peakPctAtLastPartial: 20 })).action).toBe('HOLD');
+  });
+});
+
+describe('the full close is break-even, not a rung', () => {
+  it('closes everything when price returns to the entry', () => {
+    const d = evaluateRatchet(longAt(45, 0));
     expect(d.action).toBe('FULL');
     expect(d.fraction).toBe(1);
+    expect(d.fullReason).toBe('break-even');
+  });
+
+  it('closes on a gap BELOW the entry too', () => {
+    expect(evaluateRatchet(longAt(45, -3)).fullReason).toBe('break-even');
+  });
+
+  it('does not close at +1.8% any more — the old floor is gone', () => {
+    // Peak 45, live 1.8: under the old ladder this was a FULL close at the
+    // 1.8% floor. Now it is a partial (45 × 0.85 = 38.25 giveback line).
+    const d = evaluateRatchet(longAt(45, 1.8));
+    expect(d.action).toBe('PARTIAL');
+  });
+
+  it('never fires before arming — an unarmed position at break-even is the stop loss\'s business', () => {
+    expect(evaluateRatchet(longAt(1.0, 0)).action).toBe('HOLD');
   });
 });
 
-describe('evaluateRatchet — shorts', () => {
-  const shortAt = (peakPct: number, livePct: number, consumed: number[] = []) =>
-    evaluateRatchet({
-      entryPrice: ENTRY,
-      peakPrice: ENTRY * (1 - peakPct / 100),
-      livePrice: ENTRY * (1 - livePct / 100),
-      isLong: false,
-      consumed
-    });
+describe('dust', () => {
+  it('closes the remainder outright once it is below the exchange minimum', () => {
+    const d = evaluateRatchet(longAt(50, 45, { remainingNotionalUsd: RATCHET_DUST_NOTIONAL_USD - 0.01 }));
+    expect(d.action).toBe('FULL');
+    expect(d.fullReason).toBe('dust');
+  });
 
-  it('measures profit downward and fires the same way', () => {
-    expect(shortAt(4.2, 4.1).action).toBe('HOLD');
-    const d = shortAt(4.2, 4.0);
-    expect([d.action, d.rung]).toEqual(['PARTIAL', 4]);
-    expect(shortAt(2.5, 1.8).action).toBe('FULL');
+  it('leaves a healthy remainder alone', () => {
+    const d = evaluateRatchet(longAt(50, 45, { remainingNotionalUsd: 500 }));
+    expect(d.action).not.toBe('FULL');
+  });
+
+  it('skips the rule entirely when no notional is supplied', () => {
+    expect(evaluateRatchet(longAt(50, 49)).action).toBe('HOLD');
   });
 });
 
-describe('evaluateRatchet — defensive', () => {
-  it('a stale peak below the live price still arms from the live price', () => {
-    const d = evaluateRatchet({
-      entryPrice: ENTRY, peakPrice: ENTRY, livePrice: at(4.2), isLong: true
-    });
-    expect(d.peakRung).toBe(4);
-    expect(d.action).toBe('HOLD');
+describe('shorts mirror longs', () => {
+  const shortAt = (peakPct: number, livePct: number, over: Partial<RatchetInput> = {}): RatchetInput => ({
+    entryPrice: 100,
+    peakPrice: 100 * (1 - peakPct / 100),
+    livePrice: 100 * (1 - livePct / 100),
+    isLong: false,
+    ...over
   });
 
-  it('a broken entry price holds rather than throwing', () => {
-    const d = evaluateRatchet({ entryPrice: 0, peakPrice: 1, livePrice: 1, isLong: true });
-    expect(d.action).toBe('HOLD');
+  it('sells 30% on the same giveback', () => {
+    expect(evaluateRatchet(shortAt(20, 19)).action).toBe('HOLD');
+    expect(evaluateRatchet(shortAt(20, 16)).action).toBe('PARTIAL');
   });
 
-  it('tolerates a consumed list carrying float noise', () => {
-    expect(longAt(4.2, 4.0, [4.000000001]).action).toBe('HOLD');
+  it('closes at break-even', () => {
+    expect(evaluateRatchet(shortAt(20, 0)).fullReason).toBe('break-even');
   });
 });
 
 describe('ratchetReason', () => {
-  it('names the rung, the peak and the current profit', () => {
-    const full = ratchetReason(longAt(2.5, 1.8));
-    expect(full).toContain('1.8%');
-    expect(full).toContain('סגירה מלאה');
+  it('names the giveback on a partial', () => {
+    const text = ratchetReason(evaluateRatchet(longAt(69, 58)));
+    expect(text).toContain('15%');
+    expect(text).toContain('30%');
+  });
 
-    const partial = ratchetReason(longAt(4.2, 4.0));
-    expect(partial).toContain('4%');
-    expect(partial).toContain('30%');
+  it('distinguishes a break-even close from a dust close', () => {
+    expect(ratchetReason(evaluateRatchet(longAt(45, 0)))).toContain('ברייק-אבן');
+    expect(
+      ratchetReason(evaluateRatchet(longAt(45, 40, { remainingNotionalUsd: 1 })))
+    ).toContain('מינימום');
   });
 });
 
-// ── ratchetLevels — price-space view for the position chart (2026-09-14) ────
-
-import { ratchetLevels } from '@cde/engine/analysis';
-
-describe('ratchetLevels — replaces the misleading static "TP" chart line', () => {
-  it('below the first rung: nothing armed, next rung is the 1.8% floor', () => {
-    const lv = ratchetLevels({ entryPrice: ENTRY, peakPrice: at(1.0), livePrice: at(1.0), isLong: true });
-    expect(lv.armedSellPrice).toBeNull();
-    expect(lv.nextRungPct).toBe(RATCHET_FIRST_RUNG_PCT);
-    expect(lv.nextRungPrice).toBeCloseTo(at(RATCHET_FIRST_RUNG_PCT), 6);
+describe('ratchetLevels — the price-space view the UI draws', () => {
+  it('reports nothing armed below the arm threshold, and the arming price above', () => {
+    const l = ratchetLevels(longAt(1.0, 1.0));
+    expect(l.armedSellPrice).toBeNull();
+    expect(l.breakEvenPrice).toBeNull();
+    expect(l.nextRungPct).toBe(RATCHET_ARM_PCT);
   });
 
-  it('peak just touched a rung (not yet retraced): armed is still null', () => {
-    // Mirrors evaluateRatchet: touching a rung on the way up is not "armed"
-    // for a sell — only a peak STRICTLY above it is.
-    const lv = ratchetLevels({ entryPrice: ENTRY, peakPrice: at(1.8), livePrice: at(1.8), isLong: true });
-    expect(lv.armedSellPrice).toBeNull();
+  it('reports the giveback price and the break-even price once armed', () => {
+    const l = ratchetLevels(longAt(20, 19));
+    // 20 × 0.85 = 17 → price 117
+    expect(l.armedSellPrice).toBeCloseTo(117, 6);
+    expect(l.breakEvenPrice).toBe(100);
+    expect(l.nextRungPct).toBeCloseTo(20, 6);
   });
 
-  it('peak +2.5%: the 1.8% floor is armed (a full close), next rung is 3%', () => {
-    const lv = ratchetLevels({ entryPrice: ENTRY, peakPrice: at(2.5), livePrice: at(2.5), isLong: true });
-    expect(lv.armedSellPrice).toBeCloseTo(at(1.8), 6);
-    expect(lv.armedIsFullClose).toBe(true);
-    expect(lv.nextRungPct).toBe(3);
-    expect(lv.nextRungPrice).toBeCloseTo(at(3), 6);
+  it('after a partial with no new high, only the break-even line is live', () => {
+    const l = ratchetLevels(longAt(20, 18, { peakPctAtLastPartial: 20 }));
+    expect(l.armedSellPrice).toBeNull();
+    expect(l.armedIsFullClose).toBe(true);
+    expect(l.breakEvenPrice).toBe(100);
   });
+});
 
-  it('peak +4.2%: the lowest ARMED rung is 4% (a partial), next rung is 5%', () => {
-    const lv = ratchetLevels({ entryPrice: ENTRY, peakPrice: at(4.2), livePrice: at(4.0), isLong: true });
-    expect(lv.armedSellPrice).toBeCloseTo(at(4), 6);
-    expect(lv.armedIsFullClose).toBe(false);
-    expect(lv.nextRungPct).toBe(5);
-  });
-
-  it('a consumed rung is skipped — the NEXT lower armed rung becomes the trigger', () => {
-    const lv = ratchetLevels({ entryPrice: ENTRY, peakPrice: at(4.2), livePrice: at(3.5), isLong: true, consumed: [4] });
-    expect(lv.armedSellPrice).toBeCloseTo(at(3), 6);
-    expect(lv.armedIsFullClose).toBe(false);
-  });
-
-  it('every rung consumed: nothing left armed, even with a high peak', () => {
-    const lv = ratchetLevels({ entryPrice: ENTRY, peakPrice: at(4.2), livePrice: at(4.0), isLong: true, consumed: [1.8, 3, 4] });
-    expect(lv.armedSellPrice).toBeNull();
-  });
-
-  it('mirrors evaluateRatchet\'s own armed set on the operator\'s worked example', () => {
-    const input = { entryPrice: ENTRY, peakPrice: at(4.2), livePrice: at(4.0), isLong: true };
-    const decision = evaluateRatchet(input);
-    const lv = ratchetLevels(input);
-    expect(decision.action).toBe('PARTIAL');
-    expect(lv.armedSellPrice).toBeCloseTo(at(decision.rung!), 6);
-  });
-
-  it('shorts: measures the same way, downward', () => {
-    const lv = ratchetLevels({
-      entryPrice: ENTRY, peakPrice: ENTRY * (1 - 4.2 / 100), livePrice: ENTRY * (1 - 4.0 / 100), isLong: false
-    });
-    expect(lv.armedSellPrice).toBeCloseTo(ENTRY * (1 - 4 / 100), 6);
-  });
-
-  it('a broken entry price does not throw', () => {
-    const lv = ratchetLevels({ entryPrice: 0, peakPrice: 1, livePrice: 1, isLong: true });
-    expect(lv.armedSellPrice).toBeNull();
-    expect(Number.isFinite(lv.nextRungPrice)).toBe(true);
+describe('the scale-out curve is no longer inverted', () => {
+  it('a +69% move that only retraces in steps sells far less than the old ladder did', () => {
+    // Simulate the BR shape: price climbs, giving back just under the trigger
+    // repeatedly, then one real pullback at the end.
+    let peakPctAtLastPartial = 0;
+    let remaining = 1;
+    let sales = 0;
+    for (let peak = 2; peak <= 69; peak += 1) {
+      // A 5% retrace of the peak on the way up — below the 15% trigger.
+      const d = evaluateRatchet(longAt(peak, peak * 0.95, { peakPctAtLastPartial }));
+      if (d.action === 'PARTIAL') {
+        sales++;
+        remaining *= 1 - RATCHET_PARTIAL_FRACTION;
+        peakPctAtLastPartial = d.peakPctAtLastPartial;
+      }
+    }
+    // The old ladder fired 38 times on this move and ended with 0.0001% left.
+    expect(sales).toBe(0);
+    expect(remaining).toBe(1);
   });
 });

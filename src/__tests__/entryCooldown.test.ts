@@ -23,6 +23,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   ENTRY_COOLDOWN_MS, SMART_COOLDOWN_FLOOR_MS, isInEntryCooldown, fillDueOrders,
+  DEFAULT_SPREAD_PERCENT,
   type PendingOrder, type SimPosition, type ReentryCooldownState
 } from '@cde/engine/execution';
 
@@ -81,7 +82,11 @@ describe('the fill core writes cooldown state on every full exit, win or loss', 
     const res = fill(closeOrder(), position(), 1.05);
     expect(res.newTrades[0].pnl!).toBeGreaterThan(0);
     expect(res.newCooldowns.B3).toBeDefined();
-    expect(res.newCooldowns.B3.exitPrice).toBe(1.05);
+    // The exit is a MARKET leg, so it crosses half the modelled spread
+    // (DEFAULT_SPREAD_PERCENT / 2 = 0.02%) against the bot: a SELL fills just
+    // BELOW the mid. 1.05 × (1 − 0.0002) = 1.04979.
+    expect(res.newCooldowns.B3.exitPrice).toBeCloseTo(1.05 * (1 - DEFAULT_SPREAD_PERCENT / 200), 8);
+    expect(res.newCooldowns.B3.exitPrice).toBeLessThan(1.05);
     expect(res.newCooldowns.B3.isLong).toBe(true);
   });
 

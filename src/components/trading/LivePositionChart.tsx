@@ -70,6 +70,14 @@ export interface LivePositionChartProps {
   ratchetArmedPrice?: number | null;
   ratchetArmedIsFullClose?: boolean;
   ratchetNextRungPrice?: number;
+  /** Cash that went in at ENTRY (SimPosition.initialCostUsd). Never scaled by
+   *  a partial exit, so it stays the answer to "how much did this trade cost
+   *  to open" after the ratchet has sold part of it. */
+  investedUsd?: number;
+  /** Cost basis of what is STILL open — `quantity × avgPrice` for spot, the
+   *  remaining margin for futures. Together with `investedUsd` this is what
+   *  shows a 30% partial as "$1,000 in → $700 still in". */
+  remainingCostUsd?: number;
   leverage?: number;
   unrealizedPnl?: number;
   /** Confidence (0-100) the engine entered this position with — shown as a
@@ -137,6 +145,8 @@ export const LivePositionChart: React.FC<LivePositionChartProps> = ({
   ratchetArmedPrice,
   ratchetArmedIsFullClose,
   ratchetNextRungPrice,
+  investedUsd,
+  remainingCostUsd,
   leverage = 1,
   unrealizedPnl,
   confidence,
@@ -594,6 +604,38 @@ export const LivePositionChart: React.FC<LivePositionChartProps> = ({
             </div>
           )}
         </div>
+
+        {/* How much money is actually in this trade. The profit ratchet sells
+            30% at a time, so "invested" and "still in" diverge the moment the
+            first partial fills — and the position card was the one place that
+            never said so. `remainingPercent` is the share of the ORIGINAL
+            stake still open. */}
+        {investedUsd !== undefined && investedUsd > 0 && (
+          <div className="grid grid-cols-3 gap-2 mt-2 pt-2 border-t border-border/30 text-xs font-mono">
+            <div className="flex items-center gap-1 text-muted-foreground">
+              <span>נכנס: </span>
+              <span className="text-foreground font-semibold">${investedUsd.toFixed(2)}</span>
+            </div>
+            <div className="flex items-center gap-1 text-muted-foreground">
+              <span>בפוזיציה: </span>
+              <span className="text-foreground font-semibold">
+                ${(remainingCostUsd ?? investedUsd).toFixed(2)}
+              </span>
+            </div>
+            <div className="flex items-center gap-1 text-muted-foreground justify-end">
+              {(() => {
+                const remaining = remainingCostUsd ?? investedUsd;
+                const pct = (remaining / investedUsd) * 100;
+                const partiallyClosed = pct < 99.5;
+                return (
+                  <span className={partiallyClosed ? 'text-amber-400 font-semibold' : 'text-muted-foreground'}>
+                    {partiallyClosed ? `נותרו ${pct.toFixed(0)}%` : 'מלאה'}
+                  </span>
+                );
+              })()}
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

@@ -652,7 +652,8 @@ export default function SimulationEngineColumn({
                       peakPrice: (isLong ? pos.highestPrice : pos.lowestPrice) ?? pos.entryPrice,
                       livePrice,
                       isLong,
-                      consumed: pos.ratchetConsumed
+                      peakPctAtLastPartial: pos.ratchetPeakPct,
+                      remainingNotionalUsd: pos.quantity * livePrice
                     });
                     return (
                       <LivePositionChart
@@ -669,6 +670,18 @@ export default function SimulationEngineColumn({
                         ratchetArmedPrice={ratchet.armedSellPrice}
                         ratchetArmedIsFullClose={ratchet.armedIsFullClose}
                         ratchetNextRungPrice={ratchet.nextRungPrice}
+                        // What went in vs what is still in. `initialCostUsd` is
+                        // frozen at entry; the remaining cost basis is
+                        // quantity × avgPrice for spot and the (already scaled)
+                        // margin for futures. Positions persisted before
+                        // initialCostUsd existed fall back to the current
+                        // figures, which simply reads as "full".
+                        investedUsd={pos.initialCostUsd ?? (pos.type === 'SPOT'
+                          ? pos.quantity * (pos.avgPrice || pos.entryPrice)
+                          : pos.marginUsd)}
+                        remainingCostUsd={pos.type === 'SPOT'
+                          ? pos.quantity * (pos.avgPrice || pos.entryPrice)
+                          : pos.marginUsd}
                         leverage={pos.leverage}
                         unrealizedPnl={pnl}
                         confidence={pos.confidence}

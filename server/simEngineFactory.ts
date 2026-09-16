@@ -28,6 +28,7 @@ import {
   selectFillableOrders,
   applyFundingAccrual,
   applySlotPreemptions,
+  updateMarketValuations,
   SimPosition,
   SimTrade,
   SimPoint,
@@ -183,6 +184,12 @@ export interface StrategyTickInput {
   positions: SimPosition[];
   pending: PendingOrder[];
   config: SimBotConfig;
+  /** The engine's clock for this tick. Live this is `Date.now()`; a replay
+   *  injects a synthetic one (see SimEngineDeps.now). Bots must read THIS
+   *  rather than calling `Date.now()` themselves, or a historical replay
+   *  compares candle timestamps against the wall clock and every bar looks
+   *  stale. */
+  now: number;
   equity: number;
   initialAmount: number;
   dailyDrawdownPercent: number;
@@ -259,7 +266,48 @@ async function sendSimTelegramMessage(tag: string, message: string): Promise<voi
   }
 }
 
-export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?: () => string[]) {
+/**
+ * Everything this loop reaches outside itself: the wall clock and the four
+ * market-data feeds. Injectable so the SAME loop can be driven over stored
+ * history — a replay supplies a synthetic clock that steps bar by bar and
+ * feeds built from the snapshot, and every bot registered here becomes
+ * backtestable through its real execution path rather than a second,
+ * thinner implementation of it.
+ *
+ * Every field is optional and defaults to the live implementation, so an
+ * omitted `deps` is byte-for-byte today's behaviour.
+ */
+export interface SimEngineDeps {
+  now: () => number;
+  getPrices: (symbols?: string[]) => Promise<CryptoData[]>;
+  getCandles: (
+    symbols: string[],
+    opts: { log: boolean }
+  ) => Promise<{ snapshots: Map<string, MultiTimeframeSnapshot> }>;
+  getFunding: () => Promise<Map<string, FundingSnapshot>>;
+  getDerivatives: (symbols: string[]) => Promise<Map<string, DerivativesSnapshot>>;
+  /** Per-tick telemetry. True (the live default) keeps the one-line-per-tick
+   *  log the operator reads. A replay steps hundreds of thousands of ticks and
+   *  would bury its own report under them, so it turns this off. */
+  verbose: boolean;
+}
+
+const LIVE_DEPS: SimEngineDeps = {
+  now: () => Date.now(),
+  getPrices: (symbols) => getAggregatedPrices(symbols),
+  getCandles: (symbols, opts) => getUniverseMarketData(symbols, opts),
+  getFunding: () => fetchFundingRates(),
+  getDerivatives: (symbols) => fetchDerivativesSnapshots(symbols),
+  verbose: true
+};
+
+export function createGenericSimEngine(
+  strategy: SimEngineStrategy,
+  getSymbols?: () => string[],
+  depsOverride: Partial<SimEngineDeps> = {}
+) {
+  const deps: SimEngineDeps = { ...LIVE_DEPS, ...depsOverride };
+  const nowMs = () => deps.now();
   let cash = 10000;
   let positions: SimPosition[] = [];
   let trades: SimTrade[] = [];
@@ -270,6 +318,13 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
   let totalSlippageCost = 0;
   let totalFunding = 0;
   let lastFundingAppliedAt = 0;
+  // Cursor for the inter-tick valuation sync (marketValuations.ts). Bars at or
+  // before this were already reconciled. Deliberately NOT persisted in the
+  // snapshot: on a restart it comes back as 0, and the per-entity floor inside
+  // updateMarketValuations (a position never reads bars older than its own
+  // open) makes that the correct starting point rather than a replay of the
+  // whole M5 window.
+  let lastValuationAt = 0;
   let lastEvaluation = '';
   let lastEvaluations: SignalEvaluation[] = [];
   // Safety net against rapid re-entry churn: after any full exit (win or
@@ -350,7 +405,7 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
   }
 
   function drawdowns(eq: number): { dailyDrawdownPercent: number; weeklyDrawdownPercent: number } {
-    const now = Date.now();
+    const now = nowMs();
     const oneDay = now - 24 * 60 * 60 * 1000;
     const oneWeek = now - 7 * 24 * 60 * 60 * 1000;
     // Start from initialAmount, not current equity — drawdown against starting
@@ -403,7 +458,7 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
   // exchange request across all four bots regardless of how often any one of
   // them asks.
   async function refreshCryptoPrices(force = false): Promise<void> {
-    const now = Date.now();
+    const now = nowMs();
     if (!force && now - cryptoRefreshAt <= CRYPTO_REFRESH_MS && cryptoData.length > 0) return;
     try {
       // Use multi-source aggregator: Bybit → Binance → CoinGecko (rate-gated).
@@ -413,10 +468,10 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
       // klines for all of them every cycle. That starves the pipeline under
       // rate limits so only a handful of symbols ever reach READY status,
       // meaning most SIGNAL evaluations never get a chance to actually fill.
-      const data = await getAggregatedPrices(getSymbols?.());
+      const data = await deps.getPrices(getSymbols?.());
       if (data && data.length) {
         cryptoData = data;
-        cryptoRefreshAt = Date.now();
+        cryptoRefreshAt = nowMs();
         for (const c of data) lastPrices[toBaseAsset(c.symbol)] = c.current_price;
       }
     } catch {
@@ -425,7 +480,7 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
   }
 
   async function refreshMarketData() {
-    const now = Date.now();
+    const now = nowMs();
     await refreshCryptoPrices();
     // Candle refresh is NON-BLOCKING: the tick must return a snapshot immediately
     // (so the bot shows as running and history grows) even before candles load.
@@ -436,7 +491,7 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
         .catch(() => {})
         .finally(() => {
           candleRefreshing = false;
-          candleRefreshAt = Date.now();
+          candleRefreshAt = nowMs();
         });
     }
     // Macro Layer derivatives — same non-blocking shape as candles above, for
@@ -450,7 +505,7 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
         .catch(() => {})
         .finally(() => {
           derivativesRefreshing = false;
-          derivativesRefreshAt = Date.now();
+          derivativesRefreshAt = nowMs();
         });
     }
   }
@@ -459,7 +514,7 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
     if (!cryptoData.length) return;
     const symbols = cryptoData.map((c) => c.symbol.toUpperCase());
     try {
-      const { snapshots } = await getUniverseMarketData(symbols, { log: strategy.logCandleFetch });
+      const { snapshots } = await deps.getCandles(symbols, { log: strategy.logCandleFetch });
       const next: Record<string, MultiTimeframeSnapshot> = {};
       // getUniverseMarketData keys its Map by the SUFFIXED symbol (snap.symbol,
       // e.g. "LITUSDT"); liveCandles is looked up elsewhere with the bare ticker
@@ -475,7 +530,7 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
   async function refreshDerivatives() {
     if (!cryptoData.length) return;
     try {
-      derivativesBySymbol = await fetchDerivativesSnapshots(cryptoData.map((c) => c.symbol.toUpperCase()));
+      derivativesBySymbol = await deps.getDerivatives(cryptoData.map((c) => c.symbol.toUpperCase()));
     } catch {
       /* keep last-known-good derivatives data on failure */
     }
@@ -508,7 +563,7 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
   async function tick(config: SimBotConfig, fearGreed = 50) {
     lastConfig = config;
     validateConfig(config);
-    const tickStartedAt = Date.now();
+    const tickStartedAt = nowMs();
     activeMinConfidence = typeof config.minConfidenceOverride === 'number' && config.minConfidenceOverride > 0
       ? config.minConfidenceOverride
       : strategy.minConfidence;
@@ -535,13 +590,13 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
     // forced call here bypasses CRYPTO_REFRESH_MS entirely and blocks this
     // tick's exit evaluation on a genuinely fresh bulk fetch rather than
     // computing SL/ratchet against however old `lastPrices` happens to be.
-    if (needsForcedPriceRefresh(cryptoRefreshAt, Date.now(), positions.length > 0)) {
+    if (needsForcedPriceRefresh(cryptoRefreshAt, nowMs(), positions.length > 0)) {
       await refreshCryptoPrices(true);
     }
 
     // Perpetual funding — one request for the whole universe, cached 30 min.
     // Never throws: returns an empty map on any failure.
-    const fundingBySymbol = await fetchFundingRates();
+    const fundingBySymbol = await deps.getFunding();
 
     // Macro Layer (2026-09-16): Open Interest + Long/Short ratio + spot/
     // cross-exchange volume, per symbol. Refreshed in the BACKGROUND by
@@ -565,12 +620,55 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
       };
     });
 
+    // Inter-tick valuation sync (2026-09-16) — the mark-to-market loop above
+    // sees ONE price per tick, sampled every few seconds against a 300-second
+    // bar, so every wick between two samples was invisible to it. This
+    // reconciles the same positions against the real M5 bar RANGES the market
+    // data layer already holds, which is what makes the profit ratchet's peak
+    // tracking honest (a rung crossed inside a bar used to go unmarked). See
+    // marketValuations.ts.
+    //
+    // Degraded, never fatal: a failure here leaves the point-price valuation
+    // from the loop above exactly as it was and the tick carries on — this is
+    // an accuracy improvement on top of a working path, not a dependency of it.
+    let intrabarLimitTouches: Map<string, number> | undefined;
+    try {
+      const valuation = updateMarketValuations({
+        positions,
+        pending,
+        barsFor: (symbol) => liveCandles[toBaseAsset(symbol)]?.m5 ?? [],
+        lastReconciledAt: lastValuationAt
+      });
+      positions = valuation.positions;
+      lastValuationAt = valuation.reconciledAt;
+      // Resting entries the tape reached between two samples — handed to
+      // selectFillableOrders below so they actually fill instead of merely
+      // being reported. Orders generated LATER in this same tick cannot be in
+      // here, which is correct: they were not resting while those bars printed.
+      intrabarLimitTouches = new Map(
+        valuation.touches
+          .filter((t) => t.kind === 'limit' && t.orderId)
+          .map((t) => [t.orderId as string, t.price])
+      );
+      for (const touch of valuation.touches) {
+        console.log(
+          `${strategy.logPrefix} [valuations] intrabar ${touch.kind} ${touch.symbol} ` +
+          `level=${formatDynamicPrice(touch.level)} fill=${formatDynamicPrice(touch.price)}`
+        );
+      }
+    } catch (e) {
+      console.warn(
+        `${strategy.logPrefix} [valuations] degraded — keeping point-price valuation:`,
+        e instanceof Error ? e.message : String(e)
+      );
+    }
+
     // Perpetual funding on open FUTURES positions — applied before equity is
     // read so drawdown / circuit-breaker see the funding-adjusted balance. The
     // same helper runs for every bot; spot-only bots have no futures leg and
     // stay at totalFunding = 0.
-    if (!lastFundingAppliedAt) lastFundingAppliedAt = Date.now();
-    const funding = applyFundingAccrual(positions, cash, fundingBySymbol, lastFundingAppliedAt, Date.now());
+    if (!lastFundingAppliedAt) lastFundingAppliedAt = nowMs();
+    const funding = applyFundingAccrual(positions, cash, fundingBySymbol, lastFundingAppliedAt, nowMs());
     if (funding.fundingPaid !== 0) {
       cash = funding.cash;
       totalFunding += funding.fundingPaid;
@@ -606,6 +704,7 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
       positions,
       pending,
       config,
+      now: nowMs(),
       equity: eq,
       initialAmount,
       dailyDrawdownPercent,
@@ -628,7 +727,7 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
     const evaluations = strategy.buildEvaluations(input);
     lastEvaluations = evaluations;
     const we = evaluations.filter((r) => r.willExecute).length;
-    console.log(`${strategy.logPrefix} evals=${evaluations.length} willExecute=${we} pending=${pending.length} pos=${positions.length} cash=${cash.toFixed(2)}`);
+    if (deps.verbose) console.log(`${strategy.logPrefix} evals=${evaluations.length} willExecute=${we} pending=${pending.length} pos=${positions.length} cash=${cash.toFixed(2)}`);
 
     // Publish this bot's currently open symbols BEFORE asking it for new
     // entries, so the cross-bot check below sees this tick's true starting
@@ -661,7 +760,7 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
     }
     if (newOrders.length) pending = [...pending, ...newOrders];
 
-    const { due, expired } = selectFillableOrders(pending, Date.now(), priceFor);
+    const { due, expired } = selectFillableOrders(pending, nowMs(), priceFor, intrabarLimitTouches);
     if (expired.length) {
       const expiredIds = new Set(expired.map((o) => o.id));
       pending = pending.filter((o) => !expiredIds.has(o.id));
@@ -675,7 +774,17 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
         // The fill-time exposure caps must read the same base the order was
         // sized against, or a fill-time recheck against shrinking equity would
         // reject orders the generator legitimately approved.
-        initialAmount: config.initialAmount
+        initialAmount: config.initialAmount,
+        // Liquidity cap (2026-09-16): the quote volume of the most recent
+        // CLOSED M5 bar. Real data, straight off the candle — an order asking
+        // for more than a slice of it is trimmed rather than filled whole.
+        // Missing candles → undefined → the cap is skipped, never guessed.
+        quoteVolumeFor: (symbol) => {
+          const bars = liveCandles[toBaseAsset(symbol)]?.m5;
+          if (!bars?.length) return undefined;
+          const last = bars[bars.length - 1];
+          return (last.volume || 0) * last.close;
+        }
       });
       const dueIds = new Set(due.map((o) => o.id));
       pending = pending.filter((o) => !dueIds.has(o.id));
@@ -709,7 +818,7 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
       }
     }
 
-    const now = Date.now();
+    const now = nowMs();
     // Explicit timeZone: this runs on the server (Render defaults to UTC),
     // not in the user's browser — see the same fix in simExecution.ts.
     const timeStr = new Date(now).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem' });
@@ -722,7 +831,7 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
     }
 
     lastEvaluation = new Date().toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem' });
-    lastTickDurationMs = Date.now() - tickStartedAt;
+    lastTickDurationMs = nowMs() - tickStartedAt;
     return getSnapshot();
   }
 
@@ -733,7 +842,7 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
     const wins = closedTrades.filter((t) => (t.pnl ?? 0) > 0).length;
     const winRate = closedTrades.length ? (wins / closedTrades.length) * 100 : 0;
     return {
-      runId: runId ?? `run-${Date.now()}`,
+      runId: runId ?? `run-${nowMs()}`,
       cash,
       initialAmount,
       positions,
@@ -778,7 +887,7 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
       hasSavedSession: trades.length > 0 || positions.length > 0,
       // The next snapshot lands at most one poll interval from now, plus however
       // long the tick itself takes — measured, not assumed. See lastTickDurationMs.
-      nextTickAt: Date.now() + TICK_MS + lastTickDurationMs,
+      nextTickAt: nowMs() + TICK_MS + lastTickDurationMs,
       totalLeveragedExposureUsd: leveragedExposure(),
       dailyDrawdownPercent,
       weeklyDrawdownPercent,
@@ -819,7 +928,7 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
     if (positions.length > 0 || trades.length > 0) {
       const finalEquity = equity();
       archived = {
-        runId: runId ?? `run-${Date.now()}`,
+        runId: runId ?? `run-${nowMs()}`,
         initialAmount,
         finalEquity,
         totalPnl: finalEquity - initialAmount,
@@ -845,7 +954,7 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
         slippageTotal: totalSlippageCost,
         fundingTotal: totalFunding,
         startedAt: history[0]?.at,
-        archivedAt: Date.now()
+        archivedAt: nowMs()
       };
       console.log(`[archive] run ${archived.runId} | equity $${archived.finalEquity.toFixed(2)} | P&L ${archived.totalPnl >= 0 ? '+' : ''}${archived.totalPnl.toFixed(2)} (${archived.totalPnlPercent >= 0 ? '+' : ''}${archived.totalPnlPercent.toFixed(2)}%) | ${archived.tradeCount} trades`);
     }
@@ -853,7 +962,7 @@ export function createGenericSimEngine(strategy: SimEngineStrategy, getSymbols?:
     cash = config.initialAmount;
     initialAmount = config.initialAmount;
     // Start a fresh run — new runId so the snapshot marks this as a different session.
-    runId = `run-${Date.now()}`;
+    runId = `run-${nowMs()}`;
     positions = [];
     trades = [];
     history = [];

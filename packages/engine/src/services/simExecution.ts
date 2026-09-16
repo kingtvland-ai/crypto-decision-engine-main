@@ -227,11 +227,20 @@ export interface SimPosition {
   trailingStopActive?: boolean;
   trailingStopPrice?: number;
   tp1Hit: boolean;
-  /** Profit-ratchet rungs already paid out for this position (profitRatchet.ts).
-   *  Persisted so a rung fires once and only once across ticks — without it a
-   *  price oscillating around a rung would sell 30% on every tick. Positions
-   *  restored from state written before the ratchet existed have none. */
-  ratchetConsumed?: number[];
+  /** Cash that actually went into this position AT ENTRY — spot: the filled
+   *  notional plus the entry fee; futures: the margin posted. Unlike
+   *  `notionalUsd`/`marginUsd`, it is NEVER scaled down by a partial exit, so
+   *  a position card can show "went in $1,000 / $700 still in" after a 30%
+   *  sale. Absent on positions restored from state written before this field
+   *  existed — the UI falls back to the current figures there. */
+  initialCostUsd?: number;
+  /** Peak profit % as it stood when this position last took a ratchet partial
+   *  (profitRatchet.ts). The next partial requires the peak to EXCEED it —
+   *  that is the "new high required" rule, and it is what stops one slow
+   *  pullback from being charged once per tick. Positions restored from state
+   *  written before this field existed simply have their first partial under
+   *  the new rules available immediately. */
+  ratchetPeakPct?: number;
   highestPriceSinceTP1?: number;
   lowestPriceSinceTP1?: number;
   highestPrice?: number;
@@ -316,7 +325,7 @@ export interface PendingOrder {
    *  ratchet still mean "half". Ignored on full closes and entries. */
   exitFraction?: number;
   /** Ratchet state to write onto the REMAINDER when this partial fills. */
-  ratchetConsumed?: number[];
+  ratchetPeakPct?: number;
   signalPrice: number;
   quantity: number;
   budgetUsd?: number;
@@ -986,7 +995,7 @@ export function generateNewOrders(ctx: OrderGenContext): PendingOrder[] {
         timeStopMs: pos.timeStopMs,
         naturalStopPct: pos.naturalStopPct,
         setupType: pos.setupType,
-        ratchetConsumed: pos.ratchetConsumed
+        ratchetPeakPct: pos.ratchetPeakPct
       },
       livePrice,
       atr5,
@@ -1005,7 +1014,7 @@ export function generateNewOrders(ctx: OrderGenContext): PendingOrder[] {
         type: pos.type,
         side: 'partial_tp1',
         exitFraction: exitCheck.ratchetFraction,
-        ratchetConsumed: exitCheck.ratchetConsumed,
+        ratchetPeakPct: exitCheck.ratchetPeakPct,
         signalPrice: livePrice,
         quantity: pos.quantity * (exitCheck.ratchetFraction ?? 0),
         reason: exitCheck.reason,
@@ -1315,7 +1324,18 @@ export interface FillableOrdersResult {
  * on the wrong side of their own stated limit (observed live: "Limit BUY @
  * $1.3680" filled at $1.3756).
  */
-export function selectFillableOrders(pending: PendingOrder[], now: number, priceFor: (symbol: string) => number | undefined): FillableOrdersResult {
+export function selectFillableOrders(
+  pending: PendingOrder[],
+  now: number,
+  priceFor: (symbol: string) => number | undefined,
+  /** Resting entries the tape reached BETWEEN two price samples, orderId →
+   *  the price at which it was touched (marketValuations.ts's `touches`).
+   *  Without this the crossing test only ever sees one sampled price per
+   *  tick — a 300-second bar checked ~every 3 seconds — so a wick that
+   *  touched the limit and reversed never filled. Absent = the old
+   *  point-price-only behaviour, unchanged. */
+  crossedSinceLastTick?: Map<string, number>
+): FillableOrdersResult {
   const due: PendingOrder[] = [];
   const expired: PendingOrder[] = [];
   for (const o of pending) {
@@ -1329,7 +1349,16 @@ export function selectFillableOrders(pending: PendingOrder[], now: number, price
     }
     const live = priceFor(o.symbol) ?? o.signalPrice;
     const isLongSide = o.side === 'buy' || o.side === 'long';
-    const crossed = isLongSide ? live <= o.signalPrice : live >= o.signalPrice;
+    // The price the crossing test and the adverse-selection guard below both
+    // read: the sampled price, or the intrabar extreme when the tape reached
+    // further than the sample did. Taking the tighter of the two keeps this a
+    // strict superset of the old behaviour — it can only ever add fills the
+    // sampler missed, never remove one it already made.
+    const touched = crossedSinceLastTick?.get(o.id);
+    const effective = typeof touched === 'number'
+      ? (isLongSide ? Math.min(live, touched) : Math.max(live, touched))
+      : live;
+    const crossed = isLongSide ? effective <= o.signalPrice : effective >= o.signalPrice;
     if (crossed) {
       // Do not let a resting entry-limit fill into a move that has already
       // blown through the position's own stop level: the price that crossed
@@ -1339,8 +1368,8 @@ export function selectFillableOrders(pending: PendingOrder[], now: number, price
       // stacking a losing entry precisely where the entry was supposed to be
       // defended (adverse-selection guard).
       if (
-        (isLongSide && typeof o.stopLoss === 'number' && live < o.stopLoss) ||
-        (!isLongSide && typeof o.stopLoss === 'number' && live > o.stopLoss)
+        (isLongSide && typeof o.stopLoss === 'number' && effective < o.stopLoss) ||
+        (!isLongSide && typeof o.stopLoss === 'number' && effective > o.stopLoss)
       ) {
         expired.push(o);
         continue;
@@ -1384,7 +1413,39 @@ export interface SimCostOverrides {
    *  the shrinking cap the fixed base exists to avoid, and reject at fill time
    *  an order that passed at generation time. */
   initialAmount?: number;
+  /** Full bid/ask spread as a percent of price. Every MARKET leg crosses HALF
+   *  of it, on top of slippage. Defaults to DEFAULT_SPREAD_PERCENT.
+   *
+   *  THIS IS A MODEL, NOT A MEASUREMENT: no historical bid/ask series exists
+   *  in this project (only a live ticker), so a backtest cannot measure it.
+   *  Modelling it at a documented constant is strictly more honest than the
+   *  zero that was there before — zero is also an assumption, just a worse
+   *  one, and it flatters exactly the symbols (thin micro-caps) where the
+   *  real spread hurts most. */
+  spreadPercent?: number;
+  /** The most of one bar's quote volume a single fill may consume, as a
+   *  fraction. An order asking for more is filled PARTIALLY, up to the cap.
+   *  Requires `quoteVolumeFor`; without it the cap cannot be evaluated and is
+   *  skipped. Defaults to DEFAULT_LIQUIDITY_CAP_FRACTION. */
+  liquidityCapFraction?: number;
+  /** Quote volume (USD) of the bar this fill happens on, per symbol. Real
+   *  data — it is in every kline — unlike the spread above. */
+  quoteVolumeFor?: (symbol: string) => number | undefined;
 }
+
+/** Modelled full spread, in percent of price. Bybit's majors sit near 0.01-0.02%
+ *  and thin alts far wider; this is a single conservative-but-not-punitive
+ *  number applied uniformly, because a per-symbol figure would imply a
+ *  precision the data does not support. Documented as an assumption wherever
+ *  results derived from it are reported. */
+export const DEFAULT_SPREAD_PERCENT = 0.04;
+
+/** A single fill may take at most this share of one bar's quote volume. A
+ *  market order for more than a few percent of the volume printing in a
+ *  five-minute bar does not fill at one price in reality — it walks the book.
+ *  Rather than model the walk, the fill is capped and the rest simply does not
+ *  happen, which is the conservative direction. */
+export const DEFAULT_LIQUIDITY_CAP_FRACTION = 0.05;
 
 export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimPosition[], priceFor: (symbol: string) => number | undefined, formatPrice: (n: number) => string, costs: SimCostOverrides = {}): FillResult {
   const equity = costs.equity;
@@ -1415,9 +1476,18 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
     const entryIsLimit = isEntryOrder && order.fill !== 'market';
     const sideForSlippage = order.side === 'buy' || order.side === 'long' ? 'BUY' : 'SELL';
     const isLongSide = order.side === 'buy' || order.side === 'long';
-    const { fillPrice, slippagePercent } = entryIsLimit
+    const raw = entryIsLimit
       ? { fillPrice: isLongSide ? Math.min(market, order.signalPrice) : Math.max(market, order.signalPrice), slippagePercent: 0 }
       : simulateSlippage(market, sideForSlippage, costs.slippagePercent);
+    // Half the spread, crossed on every MARKET leg and always against the bot.
+    // A resting LIMIT does not cross it — that is what resting IS: the order
+    // sits on the passive side and waits to be hit.
+    const halfSpreadPct = entryIsLimit ? 0 : (costs.spreadPercent ?? DEFAULT_SPREAD_PERCENT) / 2;
+    const spreadFactor = 1 + (sideForSlippage === 'BUY' ? 1 : -1) * (halfSpreadPct / 100);
+    const { fillPrice, slippagePercent } = {
+      fillPrice: raw.fillPrice * spreadFactor,
+      slippagePercent: raw.slippagePercent
+    };
     const delayMs = Date.now() - order.createdAt;
 
     if (isEntryOrder) {
@@ -1454,7 +1524,33 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
         continue;
       }
 
-      const budget = requested;
+      // Liquidity: a market order cannot take more than a slice of what is
+      // actually trading. Unlike the spread above this is measured, not
+      // modelled — quote volume is in every kline. The order is TRIMMED to the
+      // cap rather than refused: an exchange would fill the part the book can
+      // absorb, and refusing outright would flatter the strategy by pretending
+      // the trade never happened. Below the $100 floor after trimming it is
+      // skipped, same as any undersized entry.
+      const barQuoteVolume = costs.quoteVolumeFor?.(order.symbol);
+      let budget = requested;
+      if (typeof barQuoteVolume === 'number' && barQuoteVolume > 0) {
+        const capFraction = costs.liquidityCapFraction ?? DEFAULT_LIQUIDITY_CAP_FRACTION;
+        const liquidityCap = barQuoteVolume * capFraction;
+        if (budget > liquidityCap) {
+          if (liquidityCap < MIN_SIM_ENTRY_USD) {
+            console.warn(
+              `[sim] ${order.symbol}: bar liquidity $${barQuoteVolume.toFixed(0)} allows only ` +
+              `$${liquidityCap.toFixed(2)} — below the $${MIN_SIM_ENTRY_USD} floor, skipped.`
+            );
+            continue;
+          }
+          console.warn(
+            `[sim] ${order.symbol}: entry trimmed $${budget.toFixed(2)} → $${liquidityCap.toFixed(2)} ` +
+            `(${(capFraction * 100).toFixed(0)}% of the bar's $${barQuoteVolume.toFixed(0)} quote volume).`
+          );
+          budget = liquidityCap;
+        }
+      }
 
       const isFutures = order.type === 'FUTURES';
       const leverage = order.leverage || 1;
@@ -1528,6 +1624,10 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
       // stopLoss actually stored on the position, not order.stopLoss, which was
       // computed against the signal price rather than the fill price.
       newPos.initialRiskUsd = Math.abs(fillPrice - newPos.stopLoss) * quantity;
+      // What this trade actually cost to open, frozen here. `notionalUsd` is
+      // rewritten to the remainder's market value on every partial and
+      // `marginUsd` is scaled down, so neither can answer "how much went in".
+      newPos.initialCostUsd = order.type === 'SPOT' ? notional + fee : budget;
 
       // §10/§11: post-fill R:R computed from the re-anchored levels + actual fill price.
       // The evaluation-time actualRR (in prev4hRange/trendBreakout plans) used
@@ -1605,7 +1705,7 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
           // the remainder closes.
           entryFee: pos.entryFee * remainingFraction,
           tp1Hit: true,
-          ratchetConsumed: order.ratchetConsumed ?? pos.ratchetConsumed,
+          ratchetPeakPct: order.ratchetPeakPct ?? pos.ratchetPeakPct,
           highestPriceSinceTP1: fillPrice,
           lowestPriceSinceTP1: fillPrice,
           // The remainder was opened against a proportional share of the

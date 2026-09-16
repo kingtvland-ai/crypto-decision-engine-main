@@ -164,6 +164,11 @@ export interface TrendBreakoutOrderGenContext {
    *  breakout normally wants the fill now). */
   limitEntries?: boolean;
   params?: Partial<TrendBreakoutParams>;
+  /** The engine's clock for this batch. Defaults to `Date.now()`, so every
+   *  existing caller is unchanged. A historical replay injects a synthetic
+   *  clock instead, so order timestamps, TTLs and the max-hold time stop
+   *  advance with the replayed bars rather than the wall clock. */
+  now?: number;
 }
 
 interface LogicalTrade {
@@ -266,7 +271,7 @@ export function effectiveStop(
 
 export function generateTrendBreakoutOrders(ctx: TrendBreakoutOrderGenContext): PendingOrder[] {
   const p: TrendBreakoutParams = { ...DEFAULT_TREND_BREAKOUT_PARAMS, ...(ctx.params ?? {}) };
-  const now = Date.now();
+  const now = ctx.now ?? Date.now();
   const delayMs = Math.max(0, ctx.executionDelaySec) * 1000;
   const newOrders: PendingOrder[] = [];
 
@@ -320,7 +325,8 @@ export function generateTrendBreakoutOrders(ctx: TrendBreakoutOrderGenContext): 
       peakPrice: isLong ? Math.max(...peaks) : Math.min(...peaks),
       livePrice: live,
       isLong,
-      consumed: first.ratchetConsumed
+      peakPctAtLastPartial: first.ratchetPeakPct,
+      remainingNotionalUsd: lt.lots.reduce((s, l) => s + l.quantity * live, 0)
     });
 
     const openLots = lt.lots.filter((l) => !claimedPositionIds.has(l.id));
@@ -334,7 +340,7 @@ export function generateTrendBreakoutOrders(ctx: TrendBreakoutOrderGenContext): 
           type: lot.type,
           side: 'partial_tp1',
           exitFraction: ratchet.fraction,
-          ratchetConsumed: ratchet.consumed,
+          ratchetPeakPct: ratchet.peakPctAtLastPartial,
           signalPrice: live,
           quantity: lot.quantity * (ratchet.fraction ?? 0),
           reason: ratchetReason(ratchet),
@@ -351,7 +357,7 @@ export function generateTrendBreakoutOrders(ctx: TrendBreakoutOrderGenContext): 
       reason = `חריגת תקרת הפסד ${MAX_LOSS_PERCENT}% בתוך נר — יציאת חירום (${pnlPct.toFixed(2)}%)`;
     } else if (ratchet.action === 'FULL') {
       reason = ratchetReason(ratchet);
-    } else if (ratchet.peakRung === undefined && reachedStop(live, stop, isLong)) {
+    } else if (!ratchet.armed && reachedStop(live, stop, isLong)) {
       // The ATR trail governs only BELOW the first rung. Once +1.8% has been
       // crossed the ladder owns the exit (operator decision 2026-09-14) — the
       // trail used to close these positions long before a rung was given back,
@@ -369,7 +375,7 @@ export function generateTrendBreakoutOrders(ctx: TrendBreakoutOrderGenContext): 
         // A confirmed trend reversal still closes a laddered position: this bot
         // only exists while the trend holds.
         reason = `היפוך מגמה — H1 Supertrend התהפך ל-${stNow}`;
-      } else if (ratchet.peakRung === undefined && now - first.openTimestamp >= p.maxHoldHours * 60 * 60 * 1000) {
+      } else if (!ratchet.armed && now - first.openTimestamp >= p.maxHoldHours * 60 * 60 * 1000) {
         reason = `Time Stop — ${p.maxHoldHours} נרות H1 (${progressR.toFixed(2)}R)`;
       }
     }

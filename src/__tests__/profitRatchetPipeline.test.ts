@@ -1,11 +1,12 @@
 /**
- * Profit ratchet — end to end through the real fill core (2026-09-14)
+ * Profit ratchet — end to end through the real fill core (2026-09-14,
+ * reworked 2026-09-16 for the giveback-of-peak model)
  * ============================================================================
  * profitRatchet.test.ts pins the pure decision. This file pins the part that
  * actually moves money: that a PARTIAL order built from a ratchet verdict sells
- * exactly 30% (not the legacy 50%), that the remainder keeps its consumed-rung
- * set so the same rung cannot fire twice, and that the ladder walks a position
- * down 30% / 30% / everything the way the operator described it.
+ * exactly 30% (not the legacy 50%), that the remainder carries the
+ * peak-at-last-partial forward so the SAME peak cannot sell twice, and that a
+ * position walks down the way the operator described it.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -35,14 +36,15 @@ function ratchetOrder(pos: SimPosition, live: number): PendingOrder | null {
     peakPrice: pos.highestPrice ?? pos.entryPrice,
     livePrice: live,
     isLong: true,
-    consumed: pos.ratchetConsumed
+    peakPctAtLastPartial: pos.ratchetPeakPct,
+    remainingNotionalUsd: pos.quantity * live
   });
   if (d.action === 'HOLD') return null;
   return {
     id: `o-${live}`, symbol: pos.symbol, positionId: pos.id, type: pos.type,
     side: d.action === 'FULL' ? 'close_long' : 'partial_tp1',
     exitFraction: d.fraction,
-    ratchetConsumed: d.consumed,
+    ratchetPeakPct: d.peakPctAtLastPartial,
     signalPrice: live,
     quantity: pos.quantity * (d.fraction ?? 1),
     reason: ratchetReason(d),
@@ -55,57 +57,83 @@ const fill = (order: PendingOrder, pos: SimPosition, live: number) =>
     { feePercent: 0.1, slippagePercent: 0 });
 
 describe('ratchet partial through the fill core', () => {
+  // Peak +20%, live +16% → past the 15%-of-peak giveback line (17%).
+  const PEAK = ENTRY * 1.20;
+  const GIVEBACK_PRICE = ENTRY * 1.16;
+
   it('sells 30% of the position, not the legacy 50%', () => {
-    const pos = position({ highestPrice: ENTRY * 1.042 });
-    const order = ratchetOrder(pos, ENTRY * 1.04)!;
+    const pos = position({ highestPrice: PEAK });
+    const order = ratchetOrder(pos, GIVEBACK_PRICE)!;
     expect(order.side).toBe('partial_tp1');
     expect(order.exitFraction).toBeCloseTo(RATCHET_PARTIAL_FRACTION, 6);
 
-    const res = fill(order, pos, ENTRY * 1.04);
+    const res = fill(order, pos, GIVEBACK_PRICE);
     expect(res.positions).toHaveLength(1);
     expect(res.positions[0].quantity).toBeCloseTo(QTY * 0.7, 6);
     expect(res.newTrades[0].quantity).toBeCloseTo(QTY * 0.3, 6);
     expect(res.newTrades[0].pnl!).toBeGreaterThan(0);
   });
 
-  it('writes the consumed rung onto the remainder, so it cannot fire twice', () => {
-    const pos = position({ highestPrice: ENTRY * 1.042 });
-    const res = fill(ratchetOrder(pos, ENTRY * 1.04)!, pos, ENTRY * 1.04);
-    const after = res.positions[0];
-    expect(after.ratchetConsumed).toContain(4);
-    // Same price again → the ladder now says HOLD.
-    expect(ratchetOrder(after, ENTRY * 1.04)).toBeNull();
-    expect(ratchetOrder(after, ENTRY * 1.039)).toBeNull();
+  it('carries the peak forward onto the remainder, so the same peak cannot sell twice', () => {
+    const pos = position({ highestPrice: PEAK });
+    const res = fill(ratchetOrder(pos, GIVEBACK_PRICE)!, pos, GIVEBACK_PRICE);
+    const after = { ...res.positions[0], highestPrice: PEAK };
+    expect(after.ratchetPeakPct).toBeCloseTo(20, 6);
+
+    // Same peak, deeper pullback → still nothing, because no NEW high was made.
+    expect(ratchetOrder(after, GIVEBACK_PRICE)).toBeNull();
+    expect(ratchetOrder(after, ENTRY * 1.10)).toBeNull();
+    expect(ratchetOrder(after, ENTRY * 1.02)).toBeNull();
   });
 
-  it('walks the operator\'s example down: 30% at 4%, 30% at 3%, the rest at 1.8%', () => {
-    let pos = position({ highestPrice: ENTRY * 1.042 });
+  it('a genuinely new high re-arms it, and each leg books a profit', () => {
+    let pos = position({ highestPrice: PEAK });
     const sold: number[] = [];
 
-    for (const live of [ENTRY * 1.04, ENTRY * 1.03, ENTRY * 1.018]) {
-      const order = ratchetOrder(pos, live);
-      expect(order).not.toBeNull();
-      const res = fill(order!, pos, live);
-      sold.push(res.newTrades[0].quantity);
-      if (res.positions.length === 0) break;
-      pos = { ...res.positions[0], highestPrice: pos.highestPrice };
-    }
+    // Leg 1: peak +20%, give back to +16%.
+    let res = fill(ratchetOrder(pos, GIVEBACK_PRICE)!, pos, GIVEBACK_PRICE);
+    sold.push(res.newTrades[0].quantity);
+    expect(res.newTrades[0].pnl!).toBeGreaterThan(0);
 
-    // 30% of 10, then 30% of the remaining 7, then the whole remaining 4.9.
+    // Leg 2: a NEW high at +40%, then a give-back to +33%.
+    pos = { ...res.positions[0], highestPrice: ENTRY * 1.40 };
+    res = fill(ratchetOrder(pos, ENTRY * 1.33)!, pos, ENTRY * 1.33);
+    sold.push(res.newTrades[0].quantity);
+    expect(res.newTrades[0].pnl!).toBeGreaterThan(0);
+
+    // 30% of 10, then 30% of the remaining 7.
     expect(sold[0]).toBeCloseTo(3, 6);
     expect(sold[1]).toBeCloseTo(2.1, 6);
-    expect(sold[2]).toBeCloseTo(4.9, 6);
-    // The 1.8% floor closed it out entirely.
-    expect(fill(ratchetOrder(pos, ENTRY * 1.018)!, pos, ENTRY * 1.018).positions).toHaveLength(0);
   });
 
-  it('every leg books a profit — the point of the exercise', () => {
-    let pos = position({ highestPrice: ENTRY * 1.042 });
-    for (const live of [ENTRY * 1.04, ENTRY * 1.03]) {
-      const res = fill(ratchetOrder(pos, live)!, pos, live);
-      expect(res.newTrades[0].pnl!).toBeGreaterThan(0);
-      pos = { ...res.positions[0], highestPrice: pos.highestPrice };
-    }
+  it('break-even closes the whole remainder', () => {
+    const pos = position({ highestPrice: PEAK, quantity: 4.9, ratchetPeakPct: 20 });
+    const order = ratchetOrder(pos, ENTRY)!;
+    expect(order.side).toBe('close_long');
+    expect(fill(order, pos, ENTRY).positions).toHaveLength(0);
+  });
+
+  it('a dust remainder is closed outright instead of being nibbled', () => {
+    // 0.05 units at ~$116 = $5.80, under the $10 exchange minimum.
+    const pos = position({ highestPrice: PEAK, quantity: 0.05, ratchetPeakPct: 0 });
+    const order = ratchetOrder(pos, GIVEBACK_PRICE)!;
+    expect(order.side).toBe('close_long');
+    expect(order.reason).toContain('מינימום');
+    expect(fill(order, pos, GIVEBACK_PRICE).positions).toHaveLength(0);
+  });
+
+  it('initialCostUsd survives a partial — the position card can still say what went in', () => {
+    // notionalUsd is REWRITTEN to the remainder's market value on every
+    // partial and marginUsd is scaled, so neither can answer "how much did
+    // this trade cost to open". initialCostUsd is the field that can.
+    const pos = position({ highestPrice: PEAK, initialCostUsd: 1000 });
+    const res = fill(ratchetOrder(pos, GIVEBACK_PRICE)!, pos, GIVEBACK_PRICE);
+    const after = res.positions[0];
+
+    expect(after.initialCostUsd).toBe(1000);
+    // …while the remaining cost basis really did drop to 70%.
+    expect(after.quantity * after.avgPrice).toBeCloseTo(QTY * 0.7 * ENTRY, 6);
+    expect(after.notionalUsd).not.toBeCloseTo(1000, 0);
   });
 
   it('a legacy TP1 order with no exitFraction still means half', () => {

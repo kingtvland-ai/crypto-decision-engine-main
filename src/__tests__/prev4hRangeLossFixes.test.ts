@@ -116,20 +116,27 @@ describe("#3 (2026-09-14) — the profit ratchet is Path's only profit exit", ()
     expect(close?.reason).toContain('Stop Loss');
   });
 
-  it('peak +4.2%, pullback to +4%: sells 30%, not the whole position', () => {
-    const orders = generatePrev4hRangeOrders(ctx([pos({ highestPrice: 104.2 })], 104));
+  it('peak +4.2%, giving back 15% of it: sells 30%, not the whole position', () => {
+    // 4.2 × 0.85 = 3.57 → a pullback to +3.5% is past the giveback line.
+    const orders = generatePrev4hRangeOrders(ctx([pos({ highestPrice: 104.2 })], 103.5));
     const partial = orders.find((o) => o.positionId === 'p1');
     expect(partial?.side).toBe('partial_tp1');
     expect(partial?.exitFraction).toBeCloseTo(0.3, 6);
     expect(partial?.reason).toContain('סולם רווח');
   });
 
-  it('peak +2.5%, pullback to the 1.8% floor: closes the whole position', () => {
-    const orders = generatePrev4hRangeOrders(ctx([pos({ highestPrice: 102.5 })], 101.8));
+  it('peak +4.2%, only a shallow pullback: holds (the old +1%-rung ladder sold here)', () => {
+    // +4% is a give-back of just 4.8% of the peak — noise, not a reversal.
+    const orders = generatePrev4hRangeOrders(ctx([pos({ highestPrice: 104.2 })], 104));
+    expect(orders.filter((o) => o.positionId === 'p1')).toHaveLength(0);
+  });
+
+  it('peak +2.5%, back to the entry: closes the whole position at break-even', () => {
+    const orders = generatePrev4hRangeOrders(ctx([pos({ highestPrice: 102.5 })], 100));
     const close = orders.find((o) => o.positionId === 'p1');
     expect(close?.side).toBe('close_long');
     expect(close?.reason).toContain('סולם רווח');
-    expect(close?.reason).toContain('1.8%');
+    expect(close?.reason).toContain('ברייק-אבן');
   });
 
   it('pre-ratchet stop-out is unchanged — mid-range stop still fires as Stop Loss', () => {

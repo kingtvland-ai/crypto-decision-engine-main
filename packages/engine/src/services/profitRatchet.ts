@@ -5,27 +5,54 @@
  * bot's own trailing stop. The complaint it answers: the bots kept giving back
  * open profit and closing red in a market that was going up.
  *
- * The ladder is a set of PROFIT rungs measured from entry:
+ * REWRITTEN 2026-09-16 after a live failure on BR. The original design was a
+ * ladder of fixed rungs (1.8%, 3%, 4%, 5%, … +1% forever) that sold 30% of the
+ * REMAINDER every time price fell back to an unconsumed rung. Measured on the
+ * actual trade log, on a move that ran +69% in two hours:
  *
- *     1.8%  →  3%  →  4%  →  5%  →  6%  →  ...   (+1% forever)
+ *     sale  rung   % of original sold   cumulative   remaining
+ *       1    3%          30.0%             30%         70%
+ *       2   10%          21.0%             51%         49%
+ *       3    9%          14.7%             66%         34%
+ *       4    8%          10.3%             76%         24%
+ *       5   11%           7.2%             83%         16.8%
+ *      38   69%           0.0%            100%          0.0001%
  *
- * Crossing a rung on the way UP does nothing but mark it. The position keeps
- * running — that is the whole point, and the reason this is not just a tighter
- * take-profit. Selling happens only on the way BACK DOWN:
+ * 83% of the position was sold below +12% of a +69% move; the weighted average
+ * exit was +8.82%. Three separate defects produced that:
  *
- *   · back to a rung of 3% or higher  →  sell RATCHET_PARTIAL_FRACTION (30%)
- *     of what is left, and CONSUME that rung: it never fires again for this
- *     position. Without that rule a price oscillating around a rung would sell
- *     30% on every tick and bleed the position out in fees.
- *   · back to the 1.8% rung           →  close the whole remainder. This is the
- *     floor: a position that once touched +1.8% is not allowed to turn red.
+ *   1. GEOMETRIC DECAY INVERTED THE LADDER. Selling 30% of what is left means
+ *      the EARLIEST (lowest, worst) rungs sell the most. The ladder sold hardest
+ *      at the worst prices, by construction.
+ *   2. TICK TIMING SET THE PRICE. A fall through several rungs inside ONE tick
+ *      consumed them all and paid once — but a gradual decline picked off one
+ *      rung per tick. The same $-move cost 3x more purely because it took three
+ *      ticks (12:06:37 / :45 / :53 on BR — one pullback from +10% to +8%, three
+ *      separate 30% sales in sixteen seconds).
+ *   3. NO MINIMUM ORDER SIZE. After ~15 sales the remainder was dust, and the
+ *      ladder kept emitting sub-cent orders that no exchange would accept —
+ *      the "+$0.00" rows in the log — each still paying a fee.
  *
- * A rung is only armed once the PEAK has crossed it, so a position that never
- * reaches +1.8% is governed entirely by the stop loss, as before.
+ * The replacement, per the operator's decision:
  *
- * Consumption is NOT monotonic: consuming the 4% rung on a pullback does not
- * retire the 5% rung, which arms later if a fresh high crosses it. That is why
- * the state is a set of consumed rungs rather than a single high-water mark.
+ *   · ARM at +RATCHET_ARM_PCT of peak profit, as before. Below that the stop
+ *     loss governs the position and this module does nothing.
+ *   · SELL RATCHET_PARTIAL_FRACTION of the remainder when profit gives back
+ *     RATCHET_GIVEBACK_FRACTION **of the peak profit** — a percentage of the
+ *     move, not a fixed rung. The trigger scales itself: a symbol that ran
+ *     +69% has to give back ~10 points, one that ran +3% gives back ~0.45.
+ *     Normal noise on a volatile micro-cap no longer reads as a reversal.
+ *   · RE-ARM ONLY ON A NEW PEAK. After a partial, nothing else sells until the
+ *     peak makes a genuinely new high. One pullback = one sale, however many
+ *     ticks it takes. This is what removes the tick-timing dependency.
+ *   · THE FULL CLOSE IS BREAK-EVEN, not a rung. Once armed, the whole remainder
+ *     closes if price returns to the ENTRY price. This REPLACES the old 1.8%
+ *     floor: a position that has seen profit still never closes red, but it now
+ *     has the room to survive a deep pullback and catch the continuation, which
+ *     the 1.8% floor made impossible.
+ *   · DUST IS CLOSED, NOT NIBBLED. When the remainder falls below
+ *     RATCHET_DUST_NOTIONAL_USD the position is closed outright — what a real
+ *     exchange's minimum order size would force anyway.
  *
  * This module is pure — no prices fetched, no orders built. Each bot's order
  * generator calls `evaluateRatchet` and translates the verdict into its own
@@ -34,59 +61,62 @@
 
 import { positionPnlPercent } from './exitPolicy';
 
-/** The floor rung. Reaching it on a pullback closes the whole position. */
-export const RATCHET_FIRST_RUNG_PCT = 1.8;
-/** The second rung. From here on the ladder steps by RATCHET_STEP_PCT. */
-export const RATCHET_SECOND_RUNG_PCT = 3.0;
-/** Spacing above the second rung. */
-export const RATCHET_STEP_PCT = 1.0;
-/** Fraction of the REMAINING position sold when a 3%+ rung is given back. */
+/** Peak profit that arms the ratchet. Below this the position is governed by
+ *  the stop loss alone, exactly as before. */
+export const RATCHET_ARM_PCT = 1.8;
+
+/** Share of the PEAK PROFIT that must be given back to trigger a partial.
+ *  0.15 = a peak of +69% sells at +58.65%, a peak of +10% sells at +8.5%.
+ *  Replaces the old fixed +1% rung spacing, which was far tighter than the
+ *  ordinary noise of the symbols these bots actually trade. */
+export const RATCHET_GIVEBACK_FRACTION = 0.15;
+
+/** Fraction of the REMAINING position sold when the giveback triggers. */
 export const RATCHET_PARTIAL_FRACTION = 0.30;
-/** Guard against a corrupt peak price generating an unbounded ladder. */
-const MAX_RUNGS = 400;
 
-/** Rungs are compared by value after rounding, so a regenerated 3 always
- *  matches a persisted 3 despite floating-point arithmetic. */
-const q = (n: number) => Math.round(n * 100) / 100;
-
-/**
- * Every rung at or below `peakPnlPct`, ascending. An empty list means the
- * position has never been far enough into profit to arm the ratchet.
- */
-export function rungsCrossed(peakPnlPct: number): number[] {
-  if (!Number.isFinite(peakPnlPct) || peakPnlPct < RATCHET_FIRST_RUNG_PCT) return [];
-  const out: number[] = [RATCHET_FIRST_RUNG_PCT];
-  for (let i = 0; i < MAX_RUNGS; i++) {
-    const rung = q(RATCHET_SECOND_RUNG_PCT + i * RATCHET_STEP_PCT);
-    if (rung > peakPnlPct + 1e-9) break;
-    out.push(rung);
-  }
-  return out;
-}
+/** Below this remaining notional the position is closed outright instead of
+ *  being sold down further. A real exchange rejects orders under its own
+ *  minimum (Bybit's `minOrderQty`), so the sub-cent partials the old ladder
+ *  produced could not have executed at all — they only paid fees and held a
+ *  position slot. */
+export const RATCHET_DUST_NOTIONAL_USD = 10;
 
 export interface RatchetInput {
   entryPrice: number;
   /** Best price seen since entry — `highestPrice` for a long, `lowestPrice`
-   *  for a short. Maintained per tick in server/simEngineFactory.ts. */
+   *  for a short. Maintained per tick in server/simEngineFactory.ts, and
+   *  widened to the true bar extremes by marketValuations.ts. */
   peakPrice: number;
   livePrice: number;
   isLong: boolean;
-  /** Rungs already paid out for this position. Persisted on the position. */
-  consumed?: number[];
+  /** Peak profit %, as it stood when this position last took a partial.
+   *  The next partial requires the peak to exceed it — that is the "new high
+   *  required" rule. Absent on a position that has never partialed (and on
+   *  positions restored from state written before this rewrite, which simply
+   *  means their first partial under the new rules can fire immediately). */
+  peakPctAtLastPartial?: number;
+  /** Remaining notional in USD, for the dust rule. Omit to skip that rule. */
+  remainingNotionalUsd?: number;
 }
 
 export type RatchetAction = 'HOLD' | 'PARTIAL' | 'FULL';
 
+/** Why a FULL close fired — the two are very different events and the trade
+ *  log should not conflate them. */
+export type RatchetFullReason = 'break-even' | 'dust';
+
 export interface RatchetDecision {
   action: RatchetAction;
-  /** The rung that fired — the lowest one given back on this tick. */
-  rung?: number;
   /** Fraction of the REMAINING quantity to sell (1 for a full exit). */
   fraction?: number;
-  /** The consumed-rung set to persist after acting on this decision. */
-  consumed: number[];
-  /** Highest rung the peak has ever crossed — for logging and the UI. */
-  peakRung?: number;
+  /** The peak has cleared RATCHET_ARM_PCT, so this module — not the stop
+   *  loss — is what governs the position's profit side. The time stops read
+   *  this to decide whether to leave a running position alone. */
+  armed: boolean;
+  /** Persist this onto the remainder when a PARTIAL fills; it is what the
+   *  "new high required" rule compares against next time. */
+  peakPctAtLastPartial: number;
+  fullReason?: RatchetFullReason;
   /** Profit % at the peak and right now, for the exit reason string. */
   peakPnlPct: number;
   livePnlPct: number;
@@ -95,19 +125,22 @@ export interface RatchetDecision {
 /**
  * Decide what the ratchet wants on this tick.
  *
- * A gap that falls through several armed rungs at once consumes all of them but
- * pays out ONCE — the move was a single event, and charging 30% per rung
- * crossed would liquidate most of a position on one bad candle. If the 1.8%
- * floor is among them the verdict is a full exit regardless, since that rung
- * subsumes every rung beneath it.
+ * Order of precedence: break-even close, then dust close, then the giveback
+ * partial. The two full closes come first because either one makes the partial
+ * moot — there is no point selling 30% of a position that is about to close.
  */
 export function evaluateRatchet(input: RatchetInput): RatchetDecision {
   const { entryPrice, peakPrice, livePrice, isLong } = input;
-  const consumed = (input.consumed ?? []).map(q);
 
-  if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
-    return { action: 'HOLD', consumed, peakPnlPct: 0, livePnlPct: 0 };
-  }
+  const idle = (peakPnlPct = 0, livePnlPct = 0): RatchetDecision => ({
+    action: 'HOLD',
+    armed: false,
+    peakPctAtLastPartial: input.peakPctAtLastPartial ?? 0,
+    peakPnlPct,
+    livePnlPct
+  });
+
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0) return idle();
 
   const livePnlPct = positionPnlPercent(entryPrice, livePrice, isLong);
   // A peak below the live price means the tracker has not caught up yet (a
@@ -118,63 +151,77 @@ export function evaluateRatchet(input: RatchetInput): RatchetDecision {
     : livePnlPct;
   const peakPnlPct = Math.max(rawPeakPnl, livePnlPct);
 
-  const crossed = rungsCrossed(peakPnlPct);
+  const armed = peakPnlPct >= RATCHET_ARM_PCT - 1e-9;
+  const lastPartialPeak = input.peakPctAtLastPartial ?? 0;
   const base = {
-    consumed,
-    peakRung: crossed.length > 0 ? crossed[crossed.length - 1] : undefined,
+    armed,
+    peakPctAtLastPartial: lastPartialPeak,
     peakPnlPct,
     livePnlPct
   };
-  if (crossed.length === 0) return { action: 'HOLD', ...base };
 
-  // Armed = crossed, not yet paid out, and genuinely LEFT BEHIND: the peak has
-  // to sit strictly above the rung, or simply touching it on the way up would
-  // read as a retrace to it and sell immediately — the exact opposite of what
-  // the ladder is for. Breached = price has since come back down to it.
-  const breached = crossed.filter((r) =>
-    !consumed.includes(r) && peakPnlPct > r + 1e-9 && livePnlPct <= r + 1e-9
-  );
-  if (breached.length === 0) return { action: 'HOLD', ...base };
+  if (!armed) return { action: 'HOLD', ...base };
 
-  const lowest = breached[0];
-  if (lowest === q(RATCHET_FIRST_RUNG_PCT)) {
-    return { action: 'FULL', rung: lowest, fraction: 1, ...base, consumed: [...consumed, ...breached] };
+  // Break-even: replaces the old 1.8% floor. A position that has been in
+  // profit does not close red, but it is allowed to give the profit back in
+  // exchange for the room to survive a pullback and catch the continuation.
+  if (livePnlPct <= 0) {
+    return { action: 'FULL', fraction: 1, fullReason: 'break-even', ...base };
   }
+
+  // Dust: what is left is smaller than an exchange would accept. Close it
+  // rather than emitting orders that cannot fill and only cost fees.
+  if (
+    typeof input.remainingNotionalUsd === 'number' &&
+    input.remainingNotionalUsd < RATCHET_DUST_NOTIONAL_USD
+  ) {
+    return { action: 'FULL', fraction: 1, fullReason: 'dust', ...base };
+  }
+
+  // A new high is required before the ratchet can sell again — this is what
+  // makes one pullback cost one sale regardless of how many ticks it spans.
+  if (peakPnlPct <= lastPartialPeak + 1e-9) return { action: 'HOLD', ...base };
+
+  const triggerPct = peakPnlPct * (1 - RATCHET_GIVEBACK_FRACTION);
+  if (livePnlPct > triggerPct + 1e-9) return { action: 'HOLD', ...base };
+
   return {
     action: 'PARTIAL',
-    rung: lowest,
     fraction: RATCHET_PARTIAL_FRACTION,
     ...base,
-    consumed: [...consumed, ...breached]
+    peakPctAtLastPartial: peakPnlPct
   };
 }
 
 /** The exit-reason string every bot writes into its trade log, so the CSV and
  *  the UI read identically across all four. */
 export function ratchetReason(d: RatchetDecision): string {
-  const rung = d.rung ?? 0;
-  // A gap can carry price below the rung — and past zero — before the next
-  // tick, so the live figure signs itself rather than assuming a profit.
   const signed = (n: number) => `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
   const ctx = `(שיא ${signed(d.peakPnlPct)}, כעת ${signed(d.livePnlPct)})`;
   if (d.action === 'FULL') {
-    return `סולם רווח: חזרה למדרגה ${rung}% ${ctx} — סגירה מלאה`;
+    return d.fullReason === 'dust'
+      ? `סולם רווח: יתרה מתחת למינימום מסחר ${ctx} — סגירה מלאה`
+      : `סולם רווח: חזרה למחיר הכניסה ${ctx} — סגירה מלאה בברייק-אבן`;
   }
-  return `סולם רווח: חזרה למדרגה ${rung}% ${ctx} — מימוש ${(RATCHET_PARTIAL_FRACTION * 100).toFixed(0)}%`;
+  const giveback = (RATCHET_GIVEBACK_FRACTION * 100).toFixed(0);
+  return `סולם רווח: החזרת ${giveback}% מהשיא ${ctx} — מימוש ${(RATCHET_PARTIAL_FRACTION * 100).toFixed(0)}%`;
 }
 
 export interface RatchetLevels {
-  /** Price that would sell RIGHT NOW if the live price fell to it — the
-   *  lowest unconsumed rung the peak has already cleared. `null` when nothing
-   *  is armed yet (the peak hasn't reached +1.8%), in which case the stop
-   *  loss is what actually governs the position, not this ladder. */
+  /** Price that would sell 30% right now if it were reached — the
+   *  giveback trigger for the CURRENT peak. `null` until the ratchet arms, in
+   *  which case the stop loss is what governs the position, not this. */
   armedSellPrice: number | null;
-  /** True when `armedSellPrice` is the 1.8% floor (a full close) rather than
-   *  a 3%+ rung (a 30% partial). Meaningless when `armedSellPrice` is null. */
+  /** The price at which the whole remainder closes: the entry price, once
+   *  armed. `null` before arming. */
+  breakEvenPrice: number | null;
+  /** Kept for the position cards: true when the next thing to trigger is the
+   *  full close rather than a partial (i.e. the break-even line sits above
+   *  the giveback line, which happens on a peak barely above the arm point). */
   armedIsFullClose: boolean;
-  /** Price the PEAK still needs to reach to arm the next rung above the
-   *  current one (or above entry, if nothing is armed yet). Always defined —
-   *  there is always a next rung, the ladder has no ceiling. */
+  /** The price the PEAK must exceed for the ratchet to be able to sell again
+   *  (a new high, per the re-arm rule) — or the arming price when it has not
+   *  armed yet. Always defined. */
   nextRungPrice: number;
   nextRungPct: number;
 }
@@ -182,67 +229,51 @@ export interface RatchetLevels {
 /**
  * Price-space view of the ladder for a chart or a position card — the UI
  * layer that used to draw a static "TP" line at `takeProfit1` even though the
- * ratchet, not that price, decides when the position actually sells. Callers
- * should replace any "take profit" marker with `armedSellPrice` /
- * `nextRungPrice` once the ratchet is in effect for that position.
+ * ratchet, not that price, decides when the position actually sells.
  */
 export function ratchetLevels(input: RatchetInput): RatchetLevels {
   const { entryPrice, isLong } = input;
-  const consumed = (input.consumed ?? []).map(q);
 
   if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
-    return { armedSellPrice: null, armedIsFullClose: false, nextRungPrice: entryPrice, nextRungPct: RATCHET_FIRST_RUNG_PCT };
-  }
-  const s = isLong ? 1 : -1;
-  const priceAt = (pct: number) => entryPrice * (1 + s * pct / 100);
-
-  // Single source of truth: ask the real decision function first. If it says
-  // anything but HOLD, a sell is firing on THIS tick (order generation would
-  // emit the same PARTIAL/FULL right now) — report that instead of a
-  // "preview", which matters on a gap that jumps clean through several rungs
-  // at once (evaluateRatchet dominant-closes at the LOWEST one breached, not
-  // the nearest).
-  const decision = evaluateRatchet(input);
-  const peakPnlPct = decision.peakPnlPct;
-  const crossed = rungsCrossed(peakPnlPct);
-
-  // The rung immediately above the highest one the peak has cleared — where
-  // price needs to climb to for a NEW rung to arm. The 1.8% floor is a
-  // one-off (not part of the +1%-forever sequence starting at 3%), so it is
-  // handled as its own case rather than folded into the arithmetic below.
-  // Valid regardless of whether a sale is also firing this tick — it is about
-  // the PEAK, not the live price.
-  const highestCrossed = crossed.length ? crossed[crossed.length - 1] : undefined;
-  const nextRungPct = highestCrossed === undefined
-    ? RATCHET_FIRST_RUNG_PCT
-    : highestCrossed < RATCHET_SECOND_RUNG_PCT - 1e-9
-      ? RATCHET_SECOND_RUNG_PCT
-      : q(highestCrossed + RATCHET_STEP_PCT);
-  const nextRungPrice = priceAt(nextRungPct);
-
-  if (decision.action !== 'HOLD') {
-    const rung = decision.rung ?? 0;
     return {
-      armedSellPrice: priceAt(rung),
-      armedIsFullClose: decision.action === 'FULL',
-      nextRungPrice,
-      nextRungPct
+      armedSellPrice: null,
+      breakEvenPrice: null,
+      armedIsFullClose: false,
+      nextRungPrice: entryPrice,
+      nextRungPct: RATCHET_ARM_PCT
     };
   }
 
-  // HOLD: every rung the peak has armed still sits BELOW the live price (or
-  // never armed at all) — otherwise evaluateRatchet would have fired above.
-  // The nearest one below the live price is the next sell trigger if price
-  // keeps falling; that is the LARGEST value in the ascending `crossed` list.
-  const armed = crossed.filter((r) => r < peakPnlPct - 1e-9 && !consumed.includes(r));
-  if (armed.length === 0) {
-    return { armedSellPrice: null, armedIsFullClose: false, nextRungPrice, nextRungPct };
+  const s = isLong ? 1 : -1;
+  const priceAt = (pct: number) => entryPrice * (1 + s * pct / 100);
+
+  // Single source of truth: the real decision function decides what is armed.
+  const decision = evaluateRatchet(input);
+  const { peakPnlPct, armed } = decision;
+
+  if (!armed) {
+    return {
+      armedSellPrice: null,
+      breakEvenPrice: null,
+      armedIsFullClose: false,
+      nextRungPrice: priceAt(RATCHET_ARM_PCT),
+      nextRungPct: RATCHET_ARM_PCT
+    };
   }
-  const nearestBelow = armed[armed.length - 1];
+
+  const lastPartialPeak = input.peakPctAtLastPartial ?? 0;
+  const triggerPct = peakPnlPct * (1 - RATCHET_GIVEBACK_FRACTION);
+  // No new high since the last partial → nothing can sell partially; the
+  // break-even line is the only live trigger.
+  const canPartial = peakPnlPct > lastPartialPeak + 1e-9;
+
   return {
-    armedSellPrice: priceAt(nearestBelow),
-    armedIsFullClose: nearestBelow === q(RATCHET_FIRST_RUNG_PCT),
-    nextRungPrice,
-    nextRungPct
+    armedSellPrice: canPartial ? priceAt(triggerPct) : null,
+    breakEvenPrice: entryPrice,
+    armedIsFullClose: !canPartial || triggerPct <= 0,
+    // A new peak is what re-arms the partial, so the next level that matters
+    // upward is the current peak itself.
+    nextRungPrice: priceAt(peakPnlPct),
+    nextRungPct: peakPnlPct
   };
 }

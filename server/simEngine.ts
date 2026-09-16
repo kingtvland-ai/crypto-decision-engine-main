@@ -64,7 +64,9 @@ engine.registerAdapter(new IntradayAdapter());
  */
 const INTRADAY_MIN_CONFIDENCE = SIM_MIN_CONFIDENCE.intraday;
 
-const intradayStrategy: SimEngineStrategy = {
+/** Exported so the replay driver (server/replayRunner.ts) can run this exact
+ *  bot over stored history through the same engine the live loop uses. */
+export const intradayStrategy: SimEngineStrategy = {
   id: 'intraday',
   logPrefix: '[sim-engine]',
   telegramTag: 'sim',
@@ -140,7 +142,7 @@ const intradayStrategy: SimEngineStrategy = {
         // sub-$100 intraday order up to the operator floor instead of opening
         // it small.
         params: { ...DEFAULT_INTRADAY_PARAMS, ...SIM_INTRADAY_PARAMS_OVERRIDE } as unknown as Record<string, unknown>,
-        now: Date.now(),
+        now: input.now,
         closedTrades: input.closedTrades,
         config: {
           // The server's configured floor comes from the persisted sim config

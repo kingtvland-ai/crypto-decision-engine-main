@@ -105,6 +105,8 @@ export {
   FEAR_BAND_SIZING_FLOOR,
   selectFillableOrders,
   fillDueOrders,
+  DEFAULT_SPREAD_PERCENT,
+  DEFAULT_LIQUIDITY_CAP_FRACTION,
   applyFundingAccrual,
   FUNDING_INTERVAL_MS,
   validateExposureModel,
@@ -113,6 +115,19 @@ export {
   applySlotPreemptions
 } from './services/simExecution';
 export type { FundingRateReading, FundingAccrualResult } from './services/simExecution';
+
+// ── Inter-tick valuation sync ───────────────────────────────────────────────
+// Reconciles the book against the real bar RANGES between two price samples —
+// the wicks a ~3s point-price sampler cannot see on a 300s bar. See
+// marketValuations.ts for why the sampled series alone was not enough.
+export { updateMarketValuations, rangeSince, limitTouchPrice } from './services/marketValuations';
+export type {
+  MarketValuationInput,
+  MarketValuationResult,
+  IntrabarTouch,
+  IntrabarTouchKind,
+  BarRange
+} from './services/marketValuations';
 
 // ── Drawdown circuit-breaker thresholds ─────────────────────────────────────
 // Re-exported from intradayParams so the server-side bot engines read the SAME

@@ -40,8 +40,9 @@ export interface IntradayPositionView {
   takeProfit1?: number;
   takeProfit2?: number;
   tp1Hit?: boolean;
-  /** Profit-ratchet rungs already paid out — see profitRatchet.ts. */
-  ratchetConsumed?: number[];
+  /** Peak profit % as of this position's last ratchet partial — the "new high
+   *  required" state. See profitRatchet.ts. */
+  ratchetPeakPct?: number;
   openTimestamp: number;
   maxHoldMs?: number;
   timeStopMs?: number;
@@ -83,8 +84,9 @@ export interface IntradayExitDecision {
   exitType: 'FULL' | 'PARTIAL_50' | 'PARTIAL_RATCHET' | 'NONE';
   /** PARTIAL_RATCHET only: fraction of the REMAINING position to close. */
   ratchetFraction?: number;
-  /** PARTIAL_RATCHET / ratchet FULL: the consumed-rung set to persist. */
-  ratchetConsumed?: number[];
+  /** PARTIAL_RATCHET: the peak-at-last-partial to persist onto the remainder,
+   *  which is what enforces the "new high required" re-arm rule. */
+  ratchetPeakPct?: number;
   reasonCode: ExitReasonCode;
   reason: string;
   trailingStopPrice?: number;
@@ -155,20 +157,21 @@ export function evaluateIntradayExit(pos: IntradayPositionView, ctx: IntradayExi
   }
 
   // 3 ── Profit ratchet (sim only, opt-in) ───────────────────────────────────
-  // Operator decision 2026-09-14. When on, it OWNS every profit exit: rungs at
-  // 1.8/3/4/5%… are marked on the way up and sell nothing; coming back down to
-  // one sells 30%, or closes the position at the 1.8% floor. TP1/TP2 and the
-  // trailing stop below are skipped entirely — the trail is what kept handing
-  // back open profit, which is the behaviour being replaced. See
-  // profitRatchet.ts. The LIVE bot leaves `profitRatchet` unset and is
-  // completely unaffected.
+  // Operator decision 2026-09-14, reworked 2026-09-16. When on, it OWNS every
+  // profit exit: once the peak clears +1.8% the position sells 30% of what is
+  // left each time profit gives back 15% OF THE PEAK, re-arming only on a new
+  // high, and closes entirely at break-even. TP1/TP2 and the trailing stop
+  // below are skipped entirely — the trail is what kept handing back open
+  // profit, which is the behaviour being replaced. See profitRatchet.ts. The
+  // LIVE bot leaves `profitRatchet` unset and is completely unaffected.
   const ratchet = params.profitRatchet === true
     ? evaluateRatchet({
         entryPrice: pos.entryPrice,
         peakPrice: peak,
         livePrice: price,
         isLong,
-        consumed: pos.ratchetConsumed
+        peakPctAtLastPartial: pos.ratchetPeakPct,
+        remainingNotionalUsd: pos.quantity * price
       })
     : undefined;
 
@@ -179,7 +182,7 @@ export function evaluateIntradayExit(pos: IntradayPositionView, ctx: IntradayExi
       reasonCode: 'PROFIT_RATCHET',
       reason: ratchetReason(ratchet),
       ratchetFraction: ratchet.fraction,
-      ratchetConsumed: ratchet.consumed,
+      ratchetPeakPct: ratchet.peakPctAtLastPartial,
       ...base
     };
   }
@@ -301,9 +304,9 @@ export function evaluateIntradayExit(pos: IntradayPositionView, ctx: IntradayExi
   // condition was only ever true for prices that had already exited. A max hold
   // is a budget — when it runs out the position closes wherever it stands,
   // which is the whole point of having one.
-  // Suspended once the ratchet has a rung (operator decision 2026-09-14): a
+  // Suspended once the ratchet is ARMED (operator decision 2026-09-14): a
   // position already climbing the ladder runs to the ladder's own verdict.
-  if (ratchet?.peakRung !== undefined) {
+  if (ratchet?.armed === true) {
     return { shouldExit: false, exitType: 'NONE', reasonCode: 'NONE', reason: '', ...base };
   }
 
