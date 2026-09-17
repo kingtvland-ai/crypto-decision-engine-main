@@ -138,6 +138,23 @@ export const PRO_CORRELATED_CLUSTER: ReadonlySet<string> = new Set([
   'RSI(14)', 'MA(20)', 'Bollinger(20,2)', 'Stochastic(14,3)'
 ]);
 
+/**
+ * Hard directional veto for Pro's SHORT capability (operator decision
+ * 2026-09-17, "RiskEngine" gate). A SELL never becomes an executable SHORT
+ * when the last closed H1 candle returned more than this, in percent — i.e.
+ * never short into a green hour. See computeProSignal's veto block.
+ */
+export const PRO_SHORT_TREND_VETO_1H_RETURN_PCT = 0.2;
+
+/** Checkpoint for Pro's own Time Stop (operator decision 2026-09-17) —
+ *  replaces the profit ratchet for Pro. See evaluateProExit. */
+export const PRO_TIME_STOP_MINUTES = 240;
+
+/** Once past PRO_TIME_STOP_MINUTES in profit, the position runs free of
+ *  TP1/TP2 and only this — a fixed percent off the peak PRICE, not a fraction
+ *  of the peak PROFIT like profitRatchet's giveback — closes it. */
+export const PRO_TIME_STOP_TRAIL_PCT = 0.6;
+
 function pushVote(
   signals: ProIndicatorSignal[],
   name: string,
@@ -318,7 +335,16 @@ export interface ProSignalResult {
   atrPercent: number;
   signals: ProIndicatorSignal[];
   /** Full per-indicator breakdown, for the technical-score line in the UI. */
-  indicators: TechnicalIndicators & { isDowntrend?: boolean; ema50?: number; ema200?: number };
+  indicators: TechnicalIndicators & {
+    isDowntrend?: boolean;
+    ema50?: number;
+    ema200?: number;
+    /** Last closed H1 candle's own return, percent — what the SHORT veto
+     *  reads (PRO_SHORT_TREND_VETO_1H_RETURN_PCT). */
+    oneHourReturnPct?: number;
+    /** ema50 > ema200 — the same test the SHORT veto and trendLaneUp use. */
+    trendUp?: boolean;
+  };
 }
 
 /**
@@ -400,12 +426,19 @@ export function computeProSignal(
   // Alignment fix: the formula above rewards dominance of ANY bucket, including
   // HOLD — so a dominant HOLD vote can push confidence past 70% even though
   // there is no directional signal to act on. That makes the displayed number
-  // lie: the user sees "72% confidence" and expects a BUY, but the action is
-  // HOLD and nothing happens. Cap non-BUY outcomes at the formula's neutral
-  // baseline (50) so high confidence ONLY ever accompanies a directional vote —
-  // "confidence ≥ 70% ⟹ a BUY is firing" holds true, and the number the user
-  // sees matches the entry decision.
-  let confidence = Number(Math.max(0, Math.min(100, action === 'BUY' ? rawConfidence : Math.min(rawConfidence, 50))).toFixed(1));
+  // lie: the user sees "72% confidence" and expects an entry, but the action is
+  // HOLD and nothing happens. Cap HOLD at the formula's neutral baseline (50)
+  // so high confidence ONLY ever accompanies a directional vote —
+  // "confidence ≥ 70% ⟹ BUY or SELL is firing" holds true, and the number the
+  // user sees matches the entry decision.
+  //
+  // 2026-09-17: SELL used to be capped here too, back when Pro was spot-only
+  // and a SELL could never open anything (only close an existing LONG, itself
+  // gated on a SEPARATE, lower threshold in evaluateProExit). Now that a SELL
+  // is a real SHORT candidate (proSimExecution.ts), it earns the same
+  // uncapped, dominance/margin-based confidence a BUY gets — otherwise a
+  // genuine bearish reading could never clear the entry threshold at all.
+  let confidence = Number(Math.max(0, Math.min(100, action === 'HOLD' ? Math.min(rawConfidence, 50) : rawConfidence)).toFixed(1));
 
   // ── Trend-participation lane ──────────────────────────────────────────────
   // The eight bucket votes are 7/8 mean-reversion, so `action` is HOLD through
@@ -431,21 +464,52 @@ export function computeProSignal(
   // penalty stopped four HOLD echoes from burying the independent votes, a
   // shallow pullback to the EMA50 — exactly what this lane exists to buy — now
   // often reads as a weak SELL (the MACD ticks mildly bearish on the dip).
-  // Pro's SELL is capped at 50 and closes nothing on the worker (minConfidence
-  // 60 > 50), so promoting a sub-threshold SELL to BUY here costs nothing and
-  // restores the intended behaviour. A genuine breakdown fails `notExtended` /
-  // `price > ema50` fast, so the lane stops catching it.
+  // A genuine breakdown fails `notExtended` / `price > ema50` fast, so the
+  // lane stops catching it — and, since SELL is no longer capped at 50
+  // (2026-09-17, SHORT is real now), trendLaneUp promoting it to BUY here is
+  // itself a soft anti-short-into-uptrend mechanism, on top of the hard veto
+  // below.
   if (action !== 'BUY' && trendLaneUp) {
     action = 'BUY';
   } else if (action === 'HOLD' && trendLaneDown) {
     action = 'SELL';
   }
   if (action === 'BUY' && trendLaneUp) {
-    // Boost is BUY-only — a trend-down SELL still tops out at the neutral 50
-    // cap so it does not start closing positions earlier than today.
     const trendStrength = clamp01(Math.abs(ema50 - ema200) / (ema200 * 0.02)); // 2% EMA spread → full
     const pullbackQuality = clamp01(1 - distFromEma50Pct / (3 * atrPercent));
     confidence = Math.max(confidence, Number((58 + trendStrength * 22 + pullbackQuality * 20).toFixed(1)));
+  }
+  // Symmetric boost for a genuine SHORT candidate (2026-09-17) — mirrors the
+  // BUY boost above. Before this, a trend-down SELL topped out at the neutral
+  // 50 cap "so it does not start closing positions earlier than today"; now
+  // that SELL is a real SHORT entry (proSimExecution.ts), it needs the same
+  // path to a real, above-threshold confidence a BUY has.
+  if (action === 'SELL' && trendLaneDown) {
+    const trendStrength = clamp01(Math.abs(ema50 - ema200) / (ema200 * 0.02));
+    const pullbackQuality = clamp01(1 - distFromEma50Pct / (3 * atrPercent));
+    confidence = Math.max(confidence, Number((58 + trendStrength * 22 + pullbackQuality * 20).toFixed(1)));
+  }
+
+  // ── Hard directional veto — never SHORT into a positive 1H candle or an
+  // established uptrend (operator decision 2026-09-17) ─────────────────────
+  // Absolute veto, independent of everything above: even a SELL that reached
+  // here through the raw bucket vote alone (not the trend lane) is refused if
+  // the last closed H1 candle itself was green past PRO_SHORT_TREND_VETO_1H_
+  // RETURN_PCT, or if the EMA structure already reads as an uptrend
+  // (ema50 > ema200 — the same test trendLaneUp uses, without requiring
+  // "not extended" this time: an extended uptrend is not a green light to
+  // short it either). Demoted to HOLD, not silently zeroed, so the reasoning
+  // string still shows what the raw vote was.
+  const lastCandle = candles[candles.length - 1];
+  const oneHourReturnPct = lastCandle && lastCandle.open > 0
+    ? ((lastCandle.close - lastCandle.open) / lastCandle.open) * 100
+    : 0;
+  const trendUp = ema50 > ema200;
+  const shortVetoed = action === 'SELL' &&
+    (oneHourReturnPct > PRO_SHORT_TREND_VETO_1H_RETURN_PCT || trendUp);
+  if (shortVetoed) {
+    action = 'HOLD';
+    confidence = Math.min(confidence, 50);
   }
 
   return {
@@ -457,7 +521,7 @@ export function computeProSignal(
     confidence,
     atrPercent,
     signals,
-    indicators: { rsi, ma20, volumeTrend, bollingerBands: bb, volumeProfile: vp, macd, stochastic, isDowntrend, ema50, ema200 }
+    indicators: { rsi, ma20, volumeTrend, bollingerBands: bb, volumeProfile: vp, macd, stochastic, isDowntrend, ema50, ema200, oneHourReturnPct, trendUp }
   };
 }
 
@@ -742,8 +806,12 @@ export interface ProPositionView {
   /** Peak profit % as of the last ratchet partial — the "new high required"
    *  re-arm state. See profitRatchet.ts. */
   ratchetPeakPct?: number;
-  /** Remaining notional in USD, for the ratchet's dust rule. */
-  remainingNotionalUsd?: number;
+  /** Remaining quantity / quantity at entry, for the ratchet's "free the
+   *  slot" rule (RATCHET_MIN_REMAINING_FRACTION). */
+  remainingQuantityFraction?: number;
+  /** Fill time — required by the Pro Time Stop (opts.timeStopPeakTrail).
+   *  Absent → that mechanism is skipped entirely (treated as "not yet due"). */
+  openTimestamp?: number;
 }
 
 export interface ProExitDecision {
@@ -768,10 +836,21 @@ export function evaluateProExit(
   currentPrice: number,
   currentSignal: ProSignalResult,
   minConfidence: number,
-  /** Opt-in (default off — sim only, see proSimExecution.ts). Hands every
-   *  profit exit to the rung ladder and bypasses TP1/TP2 and the break-even
-   *  runner stop. See profitRatchet.ts. */
-  opts: { profitRatchet?: boolean } = {}
+  /** Opt-in (default off — sim only, see proSimExecution.ts). At most one of
+   *  the two should be on at once — see each flag's own note. */
+  opts: {
+    /** Hands every profit exit to the rung ladder and bypasses TP1/TP2 and
+     *  the break-even runner stop. See profitRatchet.ts. */
+    profitRatchet?: boolean;
+    /** Operator decision 2026-09-17 — REPLACES profitRatchet for Pro. Past
+     *  PRO_TIME_STOP_MINUTES: not in profit → close now; in profit → bypass
+     *  TP1/TP2/break-even-runner and run free until a PRO_TIME_STOP_TRAIL_PCT
+     *  pullback off the peak PRICE closes it. See the block below. */
+    timeStopPeakTrail?: boolean;
+  } = {},
+  /** The engine's clock. Defaults to `Date.now()` so every existing caller
+   *  (and every test not exercising timeStopPeakTrail) is unchanged. */
+  now: number = Date.now()
 ): ProExitDecision {
   const isLong = pos.isLong ?? true;
   const changePercent = positionPnlPercent(pos.entryPrice, currentPrice, isLong);
@@ -814,7 +893,7 @@ export function evaluateProExit(
         livePrice: currentPrice,
         isLong,
         peakPctAtLastPartial: pos.ratchetPeakPct,
-        remainingNotionalUsd: pos.remainingNotionalUsd
+        remainingQuantityFraction: pos.remainingQuantityFraction
       })
     : undefined;
 
@@ -828,7 +907,46 @@ export function evaluateProExit(
     };
   }
 
-  if (reachedStop(currentPrice, ratchet ? stopLoss : runnerStop, isLong)) {
+  // Pro Time Stop (2026-09-17, operator decision) — REPLACES the ratchet for
+  // Pro (opts.timeStopPeakTrail instead of opts.profitRatchet at the
+  // proSimExecution.ts call site). Past PRO_TIME_STOP_MINUTES held:
+  //   · not in profit  → close now. The position has had its window; nothing
+  //     downstream (TP1/TP2/runner stop) needs to run for a loser.
+  //   · in profit      → freeRunning: TP1/TP2/the break-even runner stop are
+  //     bypassed exactly like the ratchet bypasses them (below), and the
+  //     ONLY thing that can close it from here is a PRO_TIME_STOP_TRAIL_PCT
+  //     pullback off the peak PRICE (not a fraction of the peak PROFIT — a
+  //     plain trailing stop, simpler than the ratchet's giveback formula,
+  //     because "let it run" is the whole point past this checkpoint). The
+  //     underlying stop loss still governs underneath this — see the
+  //     `freeRunning ? stopLoss : runnerStop` below, same pattern `ratchet`
+  //     already uses.
+  let freeRunning = false;
+  if (opts.timeStopPeakTrail === true && typeof pos.openTimestamp === 'number') {
+    const heldMs = Math.max(0, now - pos.openTimestamp);
+    if (heldMs >= PRO_TIME_STOP_MINUTES * 60_000) {
+      if (changePercent <= 0) {
+        return {
+          shouldExit: true,
+          exitType: 'FULL',
+          reason: `Time Stop (${PRO_TIME_STOP_MINUTES} דק') — לא ברווח (שינוי ${changePercent.toFixed(2)}%) — סגירה`
+        };
+      }
+      freeRunning = true;
+      const peak = pos.peakPrice ?? currentPrice;
+      const trailPrice = peak * (1 - s * PRO_TIME_STOP_TRAIL_PCT / 100);
+      const trailHit = isLong ? currentPrice <= trailPrice : currentPrice >= trailPrice;
+      if (trailHit) {
+        return {
+          shouldExit: true,
+          exitType: 'FULL',
+          reason: `Time Stop (${PRO_TIME_STOP_MINUTES} דק') — נעילת רווח: ירידה של ${PRO_TIME_STOP_TRAIL_PCT}% משיא $${peak.toFixed(6)} (שינוי ${changePercent.toFixed(2)}%)`
+        };
+      }
+    }
+  }
+
+  if (reachedStop(currentPrice, (ratchet || freeRunning) ? stopLoss : runnerStop, isLong)) {
     const atBreakEven = pos.tp1Hit && Math.abs(runnerStop - pos.entryPrice) <= Math.abs(pos.entryPrice) * 1e-9;
     return {
       shouldExit: true,
@@ -839,18 +957,22 @@ export function evaluateProExit(
     };
   }
   // TP2 first: past it, there is nothing left to leave running.
-  if (!ratchet && reachedTarget(currentPrice, takeProfit2, isLong)) {
+  if (!ratchet && !freeRunning && reachedTarget(currentPrice, takeProfit2, isLong)) {
     return { shouldExit: true, exitType: 'FULL', reason: `TP2 ב-${takeProfit2.toFixed(6)} (שינוי ${changePercent.toFixed(2)}%)` };
   }
-  if (!ratchet && !pos.tp1Hit && reachedTarget(currentPrice, takeProfit1, isLong)) {
+  if (!ratchet && !freeRunning && !pos.tp1Hit && reachedTarget(currentPrice, takeProfit1, isLong)) {
     return {
       shouldExit: true,
       exitType: 'PARTIAL_50',
       reason: `TP1 ב-${takeProfit1.toFixed(6)} (שינוי ${changePercent.toFixed(2)}%) — סגירת ${(TP1_EXIT_FRACTION * 100).toFixed(0)}%`
     };
   }
-  if (currentSignal.action === 'SELL' && currentSignal.confidence >= minConfidence) {
-    return { shouldExit: true, exitType: 'FULL', reason: `היפוך אות: SELL בביטחון ${currentSignal.confidence.toFixed(1)} >= ${minConfidence}` };
+  // Confidence-gated flip: SELL closes a LONG, BUY closes a SHORT (2026-09-17
+  // — symmetric now that Pro can hold either side; used to be SELL-only back
+  // when every position was a LONG).
+  const flipAction = isLong ? 'SELL' : 'BUY';
+  if (currentSignal.action === flipAction && currentSignal.confidence >= minConfidence) {
+    return { shouldExit: true, exitType: 'FULL', reason: `היפוך אות: ${flipAction} בביטחון ${currentSignal.confidence.toFixed(1)} >= ${minConfidence}` };
   }
   return { shouldExit: false, reason: '' };
 }

@@ -50,9 +50,12 @@
  *     floor: a position that has seen profit still never closes red, but it now
  *     has the room to survive a deep pullback and catch the continuation, which
  *     the 1.8% floor made impossible.
- *   · DUST IS CLOSED, NOT NIBBLED. When the remainder falls below
- *     RATCHET_DUST_NOTIONAL_USD the position is closed outright — what a real
- *     exchange's minimum order size would force anyway.
+ *   · THE SLOT IS FREED, NOT NIBBLED FOREVER. Once the remainder falls below
+ *     RATCHET_MIN_REMAINING_FRACTION (25%) of the ORIGINAL entry quantity, the
+ *     position is closed outright rather than sold down in 30%-of-remainder
+ *     slices indefinitely. (Replaced RATCHET_DUST_NOTIONAL_USD, a flat $10
+ *     floor, on 2026-09-17 — a percentage scales with account/position size
+ *     the way a flat dollar amount never did.)
  *
  * This module is pure — no prices fetched, no orders built. Each bot's order
  * generator calls `evaluateRatchet` and translates the verdict into its own
@@ -74,12 +77,16 @@ export const RATCHET_GIVEBACK_FRACTION = 0.15;
 /** Fraction of the REMAINING position sold when the giveback triggers. */
 export const RATCHET_PARTIAL_FRACTION = 0.30;
 
-/** Below this remaining notional the position is closed outright instead of
- *  being sold down further. A real exchange rejects orders under its own
- *  minimum (Bybit's `minOrderQty`), so the sub-cent partials the old ladder
- *  produced could not have executed at all — they only paid fees and held a
- *  position slot. */
-export const RATCHET_DUST_NOTIONAL_USD = 10;
+/** Below this fraction of the ORIGINAL entry quantity, the position is closed
+ *  outright to free the slot instead of being sold down further in 30%
+ *  slices. Operator decision 2026-09-17, replacing the old fixed
+ *  RATCHET_DUST_NOTIONAL_USD ($10) floor — a percentage of the position
+ *  scales with account size the way a flat dollar amount never did (a $10,000
+ *  position had no business shrinking all the way to $10 before the slot was
+ *  freed). Measured in QUANTITY, not current dollar value: the ratchet's own
+ *  30% partials are quantity fractions, and a $-value comparison would move
+ *  around with price on top of the sales themselves. */
+export const RATCHET_MIN_REMAINING_FRACTION = 0.25;
 
 export interface RatchetInput {
   entryPrice: number;
@@ -95,15 +102,18 @@ export interface RatchetInput {
    *  positions restored from state written before this rewrite, which simply
    *  means their first partial under the new rules can fire immediately). */
   peakPctAtLastPartial?: number;
-  /** Remaining notional in USD, for the dust rule. Omit to skip that rule. */
-  remainingNotionalUsd?: number;
+  /** Remaining quantity / quantity at entry — for the "free the slot" rule
+   *  (RATCHET_MIN_REMAINING_FRACTION). Omit to skip that rule (e.g. a caller
+   *  with no `initialQuantity` on record for a position restored from old
+   *  state). */
+  remainingQuantityFraction?: number;
 }
 
 export type RatchetAction = 'HOLD' | 'PARTIAL' | 'FULL';
 
 /** Why a FULL close fired — the two are very different events and the trade
  *  log should not conflate them. */
-export type RatchetFullReason = 'break-even' | 'dust';
+export type RatchetFullReason = 'break-even' | 'min-remaining';
 
 export interface RatchetDecision {
   action: RatchetAction;
@@ -169,13 +179,14 @@ export function evaluateRatchet(input: RatchetInput): RatchetDecision {
     return { action: 'FULL', fraction: 1, fullReason: 'break-even', ...base };
   }
 
-  // Dust: what is left is smaller than an exchange would accept. Close it
-  // rather than emitting orders that cannot fill and only cost fees.
+  // Free the slot: what is left is a small enough sliver of the ORIGINAL
+  // position that further 30%-of-the-remainder partials would just nibble at
+  // it indefinitely. Close it outright instead of holding the slot open.
   if (
-    typeof input.remainingNotionalUsd === 'number' &&
-    input.remainingNotionalUsd < RATCHET_DUST_NOTIONAL_USD
+    typeof input.remainingQuantityFraction === 'number' &&
+    input.remainingQuantityFraction < RATCHET_MIN_REMAINING_FRACTION
   ) {
-    return { action: 'FULL', fraction: 1, fullReason: 'dust', ...base };
+    return { action: 'FULL', fraction: 1, fullReason: 'min-remaining', ...base };
   }
 
   // A new high is required before the ratchet can sell again — this is what
@@ -199,8 +210,8 @@ export function ratchetReason(d: RatchetDecision): string {
   const signed = (n: number) => `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
   const ctx = `(שיא ${signed(d.peakPnlPct)}, כעת ${signed(d.livePnlPct)})`;
   if (d.action === 'FULL') {
-    return d.fullReason === 'dust'
-      ? `סולם רווח: יתרה מתחת למינימום מסחר ${ctx} — סגירה מלאה`
+    return d.fullReason === 'min-remaining'
+      ? `סולם רווח: נותרו פחות מ-${(RATCHET_MIN_REMAINING_FRACTION * 100).toFixed(0)}% מהכמות המקורית ${ctx} — סגירה מלאה לפינוי סלוט`
       : `סולם רווח: חזרה למחיר הכניסה ${ctx} — סגירה מלאה בברייק-אבן`;
   }
   const giveback = (RATCHET_GIVEBACK_FRACTION * 100).toFixed(0);

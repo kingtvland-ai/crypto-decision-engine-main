@@ -60,6 +60,10 @@ export interface IntradayPositionView {
   lowestPrice?: number;
   highestPriceSinceTP1?: number;
   lowestPriceSinceTP1?: number;
+  /** Quantity at entry, frozen — for the ratchet's "free the slot" rule
+   *  (RATCHET_MIN_REMAINING_FRACTION). Absent → that rule is skipped (treated
+   *  as 100% remaining), same as a position restored from old state. */
+  initialQuantity?: number;
 }
 
 export interface IntradayExitContext {
@@ -171,7 +175,7 @@ export function evaluateIntradayExit(pos: IntradayPositionView, ctx: IntradayExi
         livePrice: price,
         isLong,
         peakPctAtLastPartial: pos.ratchetPeakPct,
-        remainingNotionalUsd: pos.quantity * price
+        remainingQuantityFraction: pos.quantity / (pos.initialQuantity ?? pos.quantity)
       })
     : undefined;
 

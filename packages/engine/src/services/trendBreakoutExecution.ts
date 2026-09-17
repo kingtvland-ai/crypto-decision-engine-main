@@ -326,7 +326,9 @@ export function generateTrendBreakoutOrders(ctx: TrendBreakoutOrderGenContext): 
       livePrice: live,
       isLong,
       peakPctAtLastPartial: first.ratchetPeakPct,
-      remainingNotionalUsd: lt.lots.reduce((s, l) => s + l.quantity * live, 0)
+      remainingQuantityFraction:
+        lt.lots.reduce((s, l) => s + l.quantity, 0) /
+        lt.lots.reduce((s, l) => s + (l.initialQuantity ?? l.quantity), 0)
     });
 
     const openLots = lt.lots.filter((l) => !claimedPositionIds.has(l.id));

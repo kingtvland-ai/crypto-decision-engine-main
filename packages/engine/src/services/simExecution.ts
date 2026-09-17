@@ -234,6 +234,13 @@ export interface SimPosition {
    *  sale. Absent on positions restored from state written before this field
    *  existed — the UI falls back to the current figures there. */
   initialCostUsd?: number;
+  /** Quantity at entry, frozen — same rule as `initialCostUsd` but in units.
+   *  `quantity` shrinks on every partial (ratchet or Time Stop), so this is
+   *  what "remaining fraction of the original position" (profitRatchet.ts's
+   *  `remainingQuantityFraction`) divides against. Absent on positions
+   *  restored from state written before this field existed — callers fall
+   *  back to treating the position as 100% remaining. */
+  initialQuantity?: number;
   /** Peak profit % as it stood when this position last took a ratchet partial
    *  (profitRatchet.ts). The next partial requires the peak to EXCEED it —
    *  that is the "new high required" rule, and it is what stops one slow
@@ -1005,7 +1012,8 @@ export function generateNewOrders(ctx: OrderGenContext): PendingOrder[] {
         timeStopMs: pos.timeStopMs,
         naturalStopPct: pos.naturalStopPct,
         setupType: pos.setupType,
-        ratchetPeakPct: pos.ratchetPeakPct
+        ratchetPeakPct: pos.ratchetPeakPct,
+        initialQuantity: pos.initialQuantity
       },
       livePrice,
       atr5,
@@ -1665,6 +1673,11 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
       // rewritten to the remainder's market value on every partial and
       // `marginUsd` is scaled down, so neither can answer "how much went in".
       newPos.initialCostUsd = order.type === 'SPOT' ? notional + fee : budget;
+      // Same idea, in units: `quantity` is what is LEFT after partials
+      // (ratchet or Time Stop). The "free the slot" rule (profitRatchet.ts,
+      // 2026-09-17) needs to compare what's left against what the position
+      // STARTED with, not against a moving target.
+      newPos.initialQuantity = newPos.quantity;
 
       // §10/§11: post-fill R:R computed from the re-anchored levels + actual fill price.
       // The evaluation-time actualRR (in prev4hRange/trendBreakout plans) used

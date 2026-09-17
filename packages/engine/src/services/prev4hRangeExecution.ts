@@ -158,7 +158,7 @@ export function generatePrev4hRangeOrders(ctx: Prev4hRangeOrderGenContext): Pend
       livePrice: live,
       isLong,
       peakPctAtLastPartial: pos.ratchetPeakPct,
-      remainingNotionalUsd: pos.quantity * live
+      remainingQuantityFraction: pos.quantity / (pos.initialQuantity ?? pos.quantity)
     });
 
     if (ratchet.action === 'PARTIAL') {

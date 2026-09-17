@@ -653,7 +653,7 @@ export default function SimulationEngineColumn({
                       livePrice,
                       isLong,
                       peakPctAtLastPartial: pos.ratchetPeakPct,
-                      remainingNotionalUsd: pos.quantity * livePrice
+                      remainingQuantityFraction: pos.quantity / (pos.initialQuantity ?? pos.quantity)
                     });
                     return (
                       <LivePositionChart

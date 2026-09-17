@@ -20,7 +20,7 @@ import {
   generateProOrders,
   buildProEvaluation,
   MIN_PRO_CANDLES,
-  DAILY_DRAWDOWN_BLOCK_PERCENT,
+  PRO_DAILY_DRAWDOWN_BLOCK_PERCENT,
   WEEKLY_DRAWDOWN_LOCK_PERCENT,
   isInStreakCooldown,
   portfolioStreakCooldownUntil,
@@ -88,6 +88,8 @@ export const proStrategy: SimEngineStrategy = {
       equity: input.equity,
       initialAmount: input.initialAmount,
       maxPositions: input.maxPositions,
+      // SHORT capability (2026-09-17) — same field Path/Bybit already read.
+      maxFuturesPositions: input.maxFuturesPositions,
       riskLevel,
       minConfidenceOverride,
       candlesBySymbol: input.candlesBySymbol
@@ -115,7 +117,9 @@ export const proStrategy: SimEngineStrategy = {
     // per-symbol streak cooldown at all — §4 gates on price/slots/confidence
     // only — so this is its only losing-streak brake).
     const breakerTripped =
-      input.dailyDrawdownPercent >= DAILY_DRAWDOWN_BLOCK_PERCENT ||
+      // 2026-09-17: Pro's own daily floor (10%, not the shared 8%) — see
+      // PRO_DAILY_DRAWDOWN_BLOCK_PERCENT's own doc comment for why.
+      input.dailyDrawdownPercent >= PRO_DAILY_DRAWDOWN_BLOCK_PERCENT ||
       input.weeklyDrawdownPercent >= WEEKLY_DRAWDOWN_LOCK_PERCENT ||
       isInStreakCooldown(portfolioStreakCooldownUntil(input.closedTradeMetrics ?? [], input.equity));
 

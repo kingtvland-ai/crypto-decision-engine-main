@@ -15,9 +15,14 @@
  *                         already approved. Entries are §6's delayed MARKET
  *                         fills (fill: 'market').
  *
- * Spot only, per §4's explicit "the system does not open shorts": a SELL
- * signal on a symbol with no open position produces no order at all, it only
- * closes a position that already exists.
+ * SHORT capability (2026-09-17, operator decision, sim only): a SELL signal
+ * strong enough to clear the entry threshold now opens a SHORT (1x FUTURES —
+ * same convention Path/Bybit use), gated by a hard directional veto that
+ * refuses to short into a positive last-H1-candle return or an established
+ * uptrend (see PRO_SHORT_TREND_VETO_1H_RETURN_PCT in proAlgEngine.ts — the
+ * signal itself already demotes a vetoed SELL to HOLD; the check here is
+ * belt-and-suspenders at the entry gate, not reliance on one mechanism).
+ * §4's original "the system does not open shorts" no longer holds.
  */
 import {
   computeProSignal,
@@ -28,10 +33,18 @@ import {
   proMaxEntryDiscountPercent,
   proStopTpLevels,
   MIN_PRO_CANDLES,
+  PRO_SHORT_TREND_VETO_1H_RETURN_PCT,
   type ProSignalResult,
   type ProRiskLevel
 } from './proAlgEngine';
-import { PER_ASSET_EXPOSURE_CAP_PERCENT, POSITION_TARGET_PCT, CAPITAL_FLOOR_PCT, resolveSizingBase, isBelowCapitalFloor } from './intradayParams';
+import {
+  PER_ASSET_EXPOSURE_CAP_PERCENT,
+  MAX_TOTAL_EXPOSURE_PERCENT,
+  POSITION_TARGET_PCT,
+  CAPITAL_FLOOR_PCT,
+  resolveSizingBase,
+  isBelowCapitalFloor
+} from './intradayParams';
 import { isBuyingSurge, measureStopNoise } from './calmRegime';
 import type { Candle } from './tradeEngine';
 import type { SignalEvaluation, DecisionFactor } from './intradayBridge';
@@ -84,30 +97,35 @@ export function buildProEvaluation(
 
   const signal = computeProSignal(candles, priceChange24h);
   const minConfidence = proMinConfidence(riskLevel, minConfidenceOverride);
-  /** §16 raw signal threshold check, before any state or risk gate. */
-  const signalPasses = signal.action === 'BUY' && signal.confidence >= minConfidence;
+  /** §16 raw signal threshold check, before any state or risk gate. A SELL
+   *  here already survived the hard directional veto inside computeProSignal
+   *  (a vetoed SELL is demoted to HOLD there) — this is a real SHORT
+   *  candidate, not just a close-the-LONG signal. */
+  const isShortCandidate = signal.action === 'SELL';
+  const isLong = !isShortCandidate;
+  const signalPasses = (signal.action === 'BUY' || signal.action === 'SELL') && signal.confidence >= minConfidence;
 
-  // Deterministic Dynamic Volatility Profile (2026-09-16, sim only). Pro is
-  // spot-only (isLong=true, hardcoded below), so market is always 'spot'.
+  // Deterministic Dynamic Volatility Profile (2026-09-16, sim only). LONG
+  // routes SPOT, SHORT routes FUTURES(1x) — same convention Path/Bybit use.
   // `candles` is the same H1 series §2's indicators are computed from — its
   // last element is the most recent CLOSED bar.
   const lastClosedH1 = candles.length ? candles[candles.length - 1] : undefined;
   const volatilityLadder = volatilityProfiles
     ? resolveVolatilityLadder({
         profiles: volatilityProfiles,
-        market: 'spot',
+        market: isLong ? 'spot' : 'linear',
         symbol,
-        side: 'LONG',
+        side: isLong ? 'LONG' : 'SHORT',
         lastClosedH1
       })
     : null;
 
   // ATR-scaled stop + stop-relative TP ladder, as absolute prices off the
   // signal price. fillDueOrders reanchors them to the actual fill, preserving
-  // the % distances. Spot is LONG only.
+  // the % distances.
   // Calm-regime scalp (2026-09-11, operator request, sim only): see
   // calmRegime.ts / proStopTpLevels for the full rationale.
-  const levels = proStopTpLevels(currentPrice, signal.atrPercent, true, {
+  const levels = proStopTpLevels(currentPrice, signal.atrPercent, isLong, {
     calmRegimeScalp: true,
     noiseFloorStop: true,
     // The two things that widen the fixed 2.3% stop — both measured on the same
@@ -136,13 +154,11 @@ export function buildProEvaluation(
 
   const reasoning = signal.action === 'HOLD'
     ? `ללא יתרון כיווני מובהק (buy ${signal.buyScore.toFixed(1)} / sell ${signal.sellScore.toFixed(1)} / hold ${signal.holdScore.toFixed(1)}) · ציון טכני ${proTechnicalScore(signal).toFixed(0)}/100`
-    : signal.action === 'SELL'
-      ? `אות SELL — Spot אינו פותח שורט, נדרשת פוזיציה פתוחה כדי לסגור`
-      : willExecute
-        ? `אות BUY בביטחון ${signal.confidence.toFixed(1)} >= סף ${minConfidence} — מבצע קנייה`
-        : signalPasses && levels.tooVolatile
-          ? `אות BUY בביטחון ${signal.confidence.toFixed(1)} — נחסם: תנודתיות ${signal.atrPercent.toFixed(2)}% לנר דורשת סטופ ${levels.noiseFloorPct.toFixed(2)}% מעל התקרה, נר רגיל היה מוציא את הפוזיציה`
-          : `אות BUY בביטחון ${signal.confidence.toFixed(1)} מתחת לסף ${minConfidence}`;
+    : willExecute
+      ? `אות ${signal.action} בביטחון ${signal.confidence.toFixed(1)} >= סף ${minConfidence} — מבצע ${isLong ? 'קנייה' : 'שורט (FUTURES 1x)'}`
+      : signalPasses && levels.tooVolatile
+        ? `אות ${signal.action} בביטחון ${signal.confidence.toFixed(1)} — נחסם: תנודתיות ${signal.atrPercent.toFixed(2)}% לנר דורשת סטופ ${levels.noiseFloorPct.toFixed(2)}% מעל התקרה, נר רגיל היה מוציא את הפוזיציה`
+        : `אות ${signal.action} בביטחון ${signal.confidence.toFixed(1)} מתחת לסף ${minConfidence}`;
 
   const tradeSide: SignalEvaluation['tradeSide'] = signal.action === 'BUY' ? 'BUY' : signal.action === 'SELL' ? 'SELL' : 'NONE';
 
@@ -215,6 +231,12 @@ export interface ProGateContext {
   equity: number;
   initialAmount: number;
   maxPositions: number;
+  /** SHORTs are simulated as 1x FUTURES (same convention as Path/Bybit) —
+   *  this caps how many can be open at once. LONGs are SPOT and unaffected.
+   *  2026-09-17: was pinned at 0 everywhere (Pro was spot-only); a caller
+   *  still passing 0 (or omitting this) simply keeps SHORT disabled, same
+   *  net effect as before this feature existed. */
+  maxFuturesPositions?: number;
   riskLevel: ProRiskLevel;
   minConfidenceOverride?: number;
   /** H1 candles per symbol, keyed the same way ev.symbol/positions[].symbol
@@ -230,11 +252,12 @@ function gateResult(
   reasoning: string,
   willExecute: boolean,
   minConfidence: number,
-  budgetUsd?: number
+  budgetUsd?: number,
+  tradeType: 'SPOT' | 'FUTURES' = 'SPOT'
 ): SignalEvaluation {
   return {
     ...ev,
-    tradeType: willExecute ? 'SPOT' : 'HOLD',
+    tradeType: willExecute ? tradeType : 'HOLD',
     status,
     reasoning,
     willExecute,
@@ -248,16 +271,25 @@ export function applyProEntryGates(
   ctx: ProGateContext
 ): SignalEvaluation[] {
   const heldSymbols = new Set(ctx.positions.map((p) => p.symbol));
+  const heldSideBySymbol = new Map(ctx.positions.map((p) => [p.symbol, isLongSide(p.side) ? 'LONG' as const : 'SHORT' as const]));
   const queuedSymbols = new Set(ctx.pending.map((o) => o.symbol));
   const minConfidence = proMinConfidence(ctx.riskLevel, ctx.minConfidenceOverride);
+  const ENTRY_SIDES = new Set(['buy', 'short']);
 
-  // §4 gate 5: open positions AND queued buys occupy slots. A slot an exit is
-  // about to free stays occupied until that exit FILLS — but a queued buy that
-  // has not filled is only a reservation, and a clearly stronger fresh signal
-  // may evict the weakest one (see the gate below).
-  let occupiedSlots = ctx.positions.length + ctx.pending.filter((o) => o.side === 'buy').length;
-  // Resting buys this batch has already agreed to evict, so two candidates in
-  // one tick cannot both free the same slot.
+  // §4 gate 5: open positions AND queued entries (buy or short) occupy slots.
+  // A slot an exit is about to free stays occupied until that exit FILLS —
+  // but a queued entry that has not filled is only a reservation, and a
+  // clearly stronger fresh signal may evict the weakest one (see the gate
+  // below).
+  let occupiedSlots = ctx.positions.length + ctx.pending.filter((o) => ENTRY_SIDES.has(o.side)).length;
+  // SHORTs are simulated as 1x FUTURES (2026-09-17) — capped separately from
+  // the SPOT slot count, same convention Path/Bybit use.
+  let futuresCount =
+    ctx.positions.filter((p) => p.type === 'FUTURES').length +
+    ctx.pending.filter((o) => o.type === 'FUTURES' && ENTRY_SIDES.has(o.side)).length;
+  const maxFuturesPositions = ctx.maxFuturesPositions ?? 0;
+  // Resting entries this batch has already agreed to evict, so two candidates
+  // in one tick cannot both free the same slot.
   const preemptClaimed = new Set<string>();
   // Budget is tracked against CASH (what's actually spendable), not equity —
   // an allocation that equity would allow but cash couldn't cover would create
@@ -267,15 +299,14 @@ export function applyProEntryGates(
 
   // Correlation cluster gate (2026-09-16) — the same helper Intraday/Path/
   // Bybit already use. Pro was the one bot with NO concentration check at
-  // all: SPOT-only, so every held position is a LONG, and nothing stopped it
-  // stacking BTC+ETH+SOL+... (up to 7 slots) as one leveraged bet on the same
-  // risk factor during a correlated leg. Direction is always LONG here —
-  // toPositionDirection is used anyway for the same call shape the other
-  // three bots share, not because Pro can actually open a SHORT.
+  // all: every held position used to be a LONG (spot-only), so nothing
+  // stopped it stacking BTC+ETH+SOL+... (up to 7 slots) as one leveraged bet
+  // on the same risk factor during a correlated leg. Direction now varies
+  // (2026-09-17, SHORT capability) — toPositionDirection reads the real side.
   const candlesBySymbol = ctx.candlesBySymbol ?? {};
   const correlationBook: CorrelatedHolding[] = [
     ...ctx.positions.map((p) => ({ symbol: p.symbol, direction: toPositionDirection(p.side) })),
-    ...ctx.pending.filter((o) => o.side === 'buy').map((o) => ({ symbol: o.symbol, direction: toPositionDirection(o.side) }))
+    ...ctx.pending.filter((o) => ENTRY_SIDES.has(o.side)).map((o) => ({ symbol: o.symbol, direction: toPositionDirection(o.side) }))
   ];
 
   return evaluations
@@ -283,26 +314,117 @@ export function applyProEntryGates(
     .sort((a, b) => (b.ev.confidence - a.ev.confidence) || (a.i - b.i))
     .map(({ ev }) => {
       if (ev.action === 'sell') {
-        // §4's sell logic: not held → no action (Spot never shorts). Held → a
-        // close order for the WHOLE position goes out this tick, via the exit
-        // loop in generateProOrders, which owns §5's fixed percentages and the
-        // confidence-gated flip alike.
+        // §4's sell logic, extended 2026-09-17 for SHORT capability:
+        //   held LONG    → a close order for the WHOLE position (the flip),
+        //                  via the exit loop in generateProOrders.
+        //   held SHORT   → already positioned this direction — no action.
+        //   not held     → a genuine SHORT entry candidate, gated below the
+        //                  same way a BUY is (this SELL already survived the
+        //                  hard directional veto inside computeProSignal —
+        //                  see the re-check at gate "8", belt-and-suspenders).
         if (queuedSymbols.has(ev.symbol)) {
-          return gateResult(ev, 'NO_SIGNAL [ORDER_QUEUED]', 'פקודת מכירה כבר בתור ביצוע', false, minConfidence);
+          return gateResult(ev, 'NO_SIGNAL [ORDER_QUEUED]', 'פקודה כבר בתור ביצוע', false, minConfidence);
         }
-        if (!heldSymbols.has(ev.symbol)) return ev;
-        if (ev.confidence >= minConfidence) {
-          return gateResult(ev, 'SIGNAL SPOT SELL', 'אות SELL מעל הסף — נשלחת פקודת מכירה לכל הפוזיציה', true, minConfidence);
+        const heldSide = heldSideBySymbol.get(ev.symbol);
+        if (heldSide === 'LONG') {
+          if (ev.confidence >= minConfidence) {
+            return gateResult(ev, 'SIGNAL SPOT SELL', 'אות SELL מעל הסף — נשלחת פקודת מכירה לכל הפוזיציה', true, minConfidence);
+          }
+          return gateResult(
+            ev,
+            'NO_SIGNAL [BELOW_THRESHOLD]',
+            `היפוך SELL מתחת לסף (${ev.confidence.toFixed(1)} < ${minConfidence}) — הפוזיציה נשארת פתוחה, SL/TP עדיין פעילים`,
+            false,
+            minConfidence
+          );
         }
-        return gateResult(
-          ev,
-          'NO_SIGNAL [BELOW_THRESHOLD]',
-          `היפוך SELL מתחת לסף (${ev.confidence.toFixed(1)} < ${minConfidence}) — הפוזיציה נשארת פתוחה, SL/TP עדיין פעילים`,
-          false,
-          minConfidence
+        if (heldSide === 'SHORT') return ev; // already positioned this direction
+
+        // Not held — a SHORT entry candidate. Mirrors the BUY sequence below.
+        if (ev.confidence < minConfidence) {
+          return gateResult(ev, 'NO_SIGNAL [BELOW_THRESHOLD]', `ביטחון נמוך מהסף (${ev.confidence.toFixed(1)} < ${minConfidence})`, false, minConfidence);
+        }
+        // Hard directional veto, re-checked here (2026-09-17) — belt-and-
+        // suspenders on top of computeProSignal's own veto, which already
+        // demotes a vetoed SELL to HOLD before it ever reaches this file.
+        const oneHourReturnPct = ev.indicators?.oneHourReturnPct ?? 0;
+        const trendUp = ev.indicators?.trendUp === true;
+        if (oneHourReturnPct > PRO_SHORT_TREND_VETO_1H_RETURN_PCT || trendUp) {
+          return gateResult(
+            ev,
+            'NO_SIGNAL [SHORT_TREND_VETO]',
+            `שורט חסום: תשואת 1H ${oneHourReturnPct.toFixed(2)}% > ${PRO_SHORT_TREND_VETO_1H_RETURN_PCT}% או מגמה עולה — לא שורטים כנגד מגמה עולה`,
+            false,
+            minConfidence
+          );
+        }
+        const shortDirection = toPositionDirection('SHORT');
+        const shortCorr = evaluateCorrelationGate({
+          symbol: ev.symbol,
+          direction: shortDirection,
+          held: correlationBook,
+          candlesBySymbol
+        });
+        if (!shortCorr.allowed) {
+          return gateResult(ev, 'NO_SIGNAL [CORRELATION]', shortCorr.reason ?? 'ריכוז יתר בנכסים מתואמים', false, minConfidence);
+        }
+        if (blocksOnAbstention(shortCorr, correlationBook.length, DEFAULT_MAX_CORRELATED)) {
+          return gateResult(ev, 'NO_SIGNAL [CORRELATION]', abstentionBlockReason(correlationBook.length, DEFAULT_MAX_CORRELATED), false, minConfidence);
+        }
+        if (futuresCount >= maxFuturesPositions) {
+          return gateResult(ev, 'NO_SIGNAL [MAX_FUTURES]', `שורט דורש FUTURES — ${futuresCount}/${maxFuturesPositions} תפוסות`, false, minConfidence);
+        }
+        if (occupiedSlots >= ctx.maxPositions) {
+          const victimId = pickPreemptibleEntryOrder(ev.confidence, ctx.pending, preemptClaimed);
+          if (!victimId) {
+            return gateResult(ev, 'NO_SIGNAL [NO_SLOTS]', `אין סלוט פנוי (${occupiedSlots}/${ctx.maxPositions})`, false, minConfidence);
+          }
+          preemptClaimed.add(victimId);
+          ev.preemptsOrderId = victimId;
+        }
+        if (!ev.price || ev.price <= 0) {
+          return gateResult(ev, 'NO_SIGNAL [NO_PRICE]', 'אין מחיר תקף', false, minConfidence);
+        }
+        if (isBelowCapitalFloor(ctx.initialAmount, ctx.equity)) {
+          return gateResult(
+            ev,
+            'NO_SIGNAL [CAPITAL_FLOOR]',
+            `הון ${ctx.equity.toFixed(2)}$ מתחת ל-${(CAPITAL_FLOOR_PCT * 100).toFixed(0)}% מההון ההתחלתי ${ctx.initialAmount.toFixed(2)}$ — כניסות חדשות מושהות`,
+            false,
+            minConfidence
+          );
+        }
+        // Same sizing model as the BUY side — 10% of sizingBase, capped by
+        // cash/per-asset — with leverage fixed at 1x (SHORT = FUTURES 1x,
+        // same convention Path/Bybit use; margin == notional at 1x).
+        const shortSizingBase = resolveSizingBase(ctx.initialAmount, ctx.equity);
+        const shortPerAssetCap = shortSizingBase * (PER_ASSET_EXPOSURE_CAP_PERCENT / 100);
+        const shortTotalCap = shortSizingBase * (MAX_TOTAL_EXPOSURE_PERCENT / 100);
+        const totalFuturesExposure = ctx.positions
+          .filter((p) => p.type === 'FUTURES')
+          .reduce((sum, p) => sum + p.notionalUsd, 0);
+        const shortTargetNotional = shortSizingBase * POSITION_TARGET_PCT;
+        const shortBudget = Math.min(
+          shortTargetNotional,
+          projectedCash,
+          shortPerAssetCap,
+          Math.max(0, shortTotalCap - totalFuturesExposure)
         );
+        if (shortBudget < MIN_SIM_ENTRY_USD) {
+          return gateResult(ev, 'NO_SIGNAL [MIN_ORDER_EXCEEDS_POSITION_TARGET]', `יעד ${shortBudget.toFixed(2)}$ מתחת למינימום ${MIN_SIM_ENTRY_USD}$`, false, minConfidence);
+        }
+        occupiedSlots++;
+        futuresCount++;
+        projectedCash -= shortBudget;
+        correlationBook.push({ symbol: ev.symbol, direction: shortDirection });
+        return gateResult(ev, 'SIGNAL FUTURES SHORT', `אות SELL בביטחון ${ev.confidence.toFixed(1)} >= סף ${minConfidence} — פותח שורט (FUTURES 1x)`, true, minConfidence, shortBudget, 'FUTURES');
       }
       if (ev.action !== 'buy') return ev;
+      // heldSymbols below already covers "held SHORT" too — a BUY evaluation
+      // never opens a new LONG on a symbol Pro is already positioned in,
+      // regardless of side. Closing a SHORT on a fresh BUY signal is the
+      // flip, handled in generateProOrders's exit loop via evaluateProExit
+      // (isLong=false → flipAction='BUY'), not here.
 
       // §4's buy sequence, in the doc's own order (gate 1, "הבוט פעיל?", is
       // the runtime itself — a stopped engine produces no evaluations):
@@ -444,13 +566,19 @@ export function generateProOrders(ctx: ProOrderGenContext): PendingOrder[] {
         stopLoss: pos.stopLoss, takeProfit1: pos.takeProfit1, takeProfit2: pos.takeProfit2,
         peakPrice: (isLong ? pos.highestPrice : pos.lowestPrice) ?? pos.entryPrice,
         ratchetPeakPct: pos.ratchetPeakPct,
-        remainingNotionalUsd: pos.quantity * livePrice
+        remainingQuantityFraction: pos.quantity / (pos.initialQuantity ?? pos.quantity),
+        openTimestamp: pos.openTimestamp
       },
       livePrice,
       effectiveSignal,
       minConfidence,
-      // Sim only — the LIVE Pro path never sets this. See profitRatchet.ts.
-      { profitRatchet: true }
+      // Sim only — the LIVE Pro path never sets either flag. 2026-09-17:
+      // timeStopPeakTrail REPLACES profitRatchet for Pro (operator decision —
+      // see evaluateProExit's own doc comment for why: the ratchet's
+      // giveback-of-peak partials didn't compensate for what a full,
+      // same-tick close of a stagnant position cost).
+      { timeStopPeakTrail: true },
+      now
     );
     if (!exitCheck.shouldExit) continue;
 
@@ -459,8 +587,8 @@ export function generateProOrders(ctx: ProOrderGenContext): PendingOrder[] {
     const fraction = ratchetPartial ? (exitCheck.ratchetFraction ?? 0) : TP1_EXIT_FRACTION;
     newOrders.push({
       id: uid(`${pos.symbol}-${partial ? (ratchetPartial ? 'ratchet' : 'tp1') : 'exit'}`),
-      symbol: pos.symbol, positionId: pos.id, type: 'SPOT',
-      side: partial ? 'partial_tp1' : 'close_long',
+      symbol: pos.symbol, positionId: pos.id, type: pos.type,
+      side: partial ? 'partial_tp1' : (isLong ? 'close_long' : 'close_short'),
       exitFraction: partial ? fraction : undefined,
       ratchetPeakPct: exitCheck.ratchetPeakPct,
       signalPrice: livePrice,
@@ -477,7 +605,8 @@ export function generateProOrders(ctx: ProOrderGenContext): PendingOrder[] {
   // straddle a state change (the browser fallback recomputes on a 5s
   // heartbeat) — not a second gate.
   for (const ev of evaluations) {
-    if (!ev.willExecute || ev.action !== 'buy' || !ev.price) continue;
+    const isShortEntry = ev.action === 'sell';
+    if (!ev.willExecute || (ev.action !== 'buy' && !isShortEntry) || !ev.price) continue;
     // Smart re-entry cooldown (2026-09-14, recovery-recompute 2026-09-16).
     // Reported, not a bare `continue` — an operator looking at "why didn't
     // it buy" needs to see this.
@@ -503,21 +632,26 @@ export function generateProOrders(ctx: ProOrderGenContext): PendingOrder[] {
 
     // §6: when limitEntries is on, use the optimal entry price (computed from
     // support levels) instead of the current market price. This is typically
-    // LOWER — the bot waits for a dip to enter at a better price.
-    const entryPrice = limitEntries && ev.optimalEntryPrice ? ev.optimalEntryPrice : ev.price;
+    // LOWER for a BUY (the bot waits for a dip) — a SHORT still fires at
+    // market; §6/optimalEntryPrice was never designed for the short side and
+    // resting a SHORT limit ABOVE market on a bearish read is not "waiting
+    // for a better price" the way it is for a BUY.
+    const entryPrice = !isShortEntry && limitEntries && ev.optimalEntryPrice ? ev.optimalEntryPrice : ev.price;
 
     newOrders.push({
-      id: uid(`${ev.symbol}-buy`), symbol: ev.symbol, type: 'SPOT', side: 'buy',
+      id: uid(`${ev.symbol}-${isShortEntry ? 'short' : 'buy'}`),
+      symbol: ev.symbol, type: isShortEntry ? 'FUTURES' : 'SPOT', side: isShortEntry ? 'short' : 'buy',
       signalPrice: entryPrice, quantity: budget / entryPrice, budgetUsd: budget, leverage: 1,
       // ATR-scaled levels off the signal price; fillDueOrders reanchors to fill.
       stopLoss: ev.stopLoss, takeProfit1: ev.takeProfit1, takeProfit2: ev.takeProfit2, takeProfit: ev.takeProfit1,
       // §6 default: delayed MARKET fills — at executeAt the order fills at the
       // market price of that moment, adverse slippage and a Taker fee included.
-      // With `limitEntries` on, the order rests as a LIMIT at the optimal entry
+      // With `limitEntries` on, a BUY rests as a LIMIT at the optimal entry
       // price (from support levels): the bot waits until the market reaches that
       // price (or better, i.e. lower for a buy) and only then buys — "יחשב מתי
       // להיכנס, יגיע לשער וירכוש". Fills are Maker (lower fee) and carry no slippage.
-      fill: limitEntries ? 'limit' : 'market',
+      // A SHORT always fires MARKET (see entryPrice above).
+      fill: !isShortEntry && limitEntries ? 'limit' : 'market',
       reason: ev.reasoning, confidence: ev.confidence,
       executeAt: now + delayMs, createdAt: now
     } as PendingOrder);

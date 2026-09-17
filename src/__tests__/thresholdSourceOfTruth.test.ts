@@ -92,8 +92,12 @@ function buyEval(symbol: string, confidence: number): SignalEvaluation {
 }
 
 function sellEval(symbol: string, confidence: number): SignalEvaluation {
-  // buildProEvaluation stamps this status on every SELL — Spot never shorts —
-  // and the gate pass leaves an unheld SELL untouched (§4: no action).
+  // Stub status — a real evaluation from buildProEvaluation carries its own.
+  // 2026-09-17: an unheld SELL is now a real SHORT candidate through the
+  // gates below (see the describe block), not the old "Spot never shorts,
+  // untouched" no-op — except when the held position is already SHORT,
+  // where it genuinely IS a same-direction no-op and this stub status
+  // survives untouched (see that specific test).
   return {
     ...buyEval(symbol, confidence),
     action: 'sell',
@@ -298,26 +302,42 @@ describe('§4 — a clearly stronger BUY evicts the weakest RESTING buy from its
   });
 });
 
-describe('§4 — the sell logic: Spot never shorts, a held symbol closes whole', () => {
-  it('a SELL with no position stays display-only', () => {
+describe('§4 — the sell logic: SHORT capability (2026-09-17), a held LONG closes whole', () => {
+  it('a SELL with no position and no futures slots (default cap 0) is blocked, not silently dropped', () => {
+    // maxFuturesPositions unset here → ctx.maxFuturesPositions ?? 0, same net
+    // effect as before this feature existed (SHORT stays off unless configured).
     const [ev] = applyProEntryGates([sellEval('LA', 90)], gateCtx());
     expect(ev.willExecute).toBe(false);
-    expect(ev.status).toBe('NO_SIGNAL [SPOT_SELL_UNSUPPORTED]');
+    expect(ev.status).toBe('NO_SIGNAL [MAX_FUTURES]');
   });
 
-  it('a SELL on a held symbol above the threshold is a full-position close signal', () => {
-    const held = { id: 'p1', symbol: 'LA' } as never;
+  it('a SELL with no position opens a SHORT (1x FUTURES) once futures slots exist', () => {
+    const [ev] = applyProEntryGates([sellEval('LA', 90)], gateCtx({ maxFuturesPositions: 2 }));
+    expect(ev.status).toBe('SIGNAL FUTURES SHORT');
+    expect(ev.willExecute).toBe(true);
+    expect(ev.tradeType).toBe('FUTURES');
+  });
+
+  it('a SELL on a held LONG above the threshold is a full-position close signal (the flip)', () => {
+    const held = { id: 'p1', symbol: 'LA', side: 'BUY' } as never;
     const [ev] = applyProEntryGates([sellEval('LA', 80)], gateCtx({ positions: [held] }));
     expect(ev.status).toBe('SIGNAL SPOT SELL');
     expect(ev.willExecute).toBe(true);
   });
 
-  it('a SELL flip below the threshold leaves the position to §5\'s SL/TP', () => {
-    const held = { id: 'p1', symbol: 'LA' } as never;
+  it('a SELL flip below the threshold leaves the held LONG to §5\'s SL/TP', () => {
+    const held = { id: 'p1', symbol: 'LA', side: 'BUY' } as never;
     const [ev] = applyProEntryGates([sellEval('LA', 20)], gateCtx({ positions: [held] }));
     expect(ev.status).toBe('NO_SIGNAL [BELOW_THRESHOLD]');
     expect(ev.willExecute).toBe(false);
     expect(ev.reasoning).toContain('SL/TP');
+  });
+
+  it('a SELL on a symbol already held SHORT is a no-op — already positioned this direction', () => {
+    const heldShort = { id: 'p1', symbol: 'LA', side: 'SHORT' } as never;
+    const [ev] = applyProEntryGates([sellEval('LA', 90)], gateCtx({ positions: [heldShort], maxFuturesPositions: 2 }));
+    expect(ev.willExecute).toBe(false);
+    expect(ev.status).toBe('NO_SIGNAL [SPOT_SELL_UNSUPPORTED]'); // untouched — the fixture's own stub status
   });
 });
 

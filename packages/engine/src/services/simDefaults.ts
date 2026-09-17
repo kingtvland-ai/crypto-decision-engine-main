@@ -87,9 +87,11 @@ export interface SimBotSpec {
    * which defeats the point of the table.
    */
   confidenceDerivedFromRiskLevel?: boolean;
-  /** Path is 0 by strategy, not by oversight: bot 4 is spot-only. Pro is also
-   *  spot-only per alg.md §4 ("the system does not open shorts") — 0 here
-   *  reflects that, not an omission. */
+  /** Path is 0 by strategy, not by oversight: bot 4 is spot-only. Pro was
+   *  also spot-only per alg.md §4 ("the system does not open shorts") — 0
+   *  meant that. 2026-09-17 (operator decision): Pro gained a SHORT
+   *  capability (1x FUTURES, hard-vetoed against shorting into an uptrend —
+   *  see PRO_SHORT_TREND_VETO_1H_RETURN_PCT), so its cap moved off 0 too. */
   maxFuturesPositions: number;
 }
 
@@ -116,7 +118,9 @@ export const SIM_BOTS: Record<SimBotId, SimBotSpec> = {
     // stays exported as §3's reference table.
     minConfidence: 50,
     confidenceDerivedFromRiskLevel: true,
-    maxFuturesPositions: 0
+    // Not spot-only since 2026-09-17: a SHORT setup (hard-vetoed against
+    // shorting into an uptrend) is simulated as 1x FUTURES, same as Path.
+    maxFuturesPositions: 2
   },
   path: {
     id: 'path',

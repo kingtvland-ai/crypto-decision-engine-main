@@ -280,6 +280,13 @@ export interface IntradayParams {
 export const DAILY_DRAWDOWN_BLOCK_PERCENT = 8;
 export const WEEKLY_DRAWDOWN_LOCK_PERCENT = 15;
 
+/** Pro-only override of DAILY_DRAWDOWN_BLOCK_PERCENT (operator decision
+ *  2026-09-17) — Pro now runs the new Time Stop + SHORT capability and needs
+ *  more room before new entries are withheld. Deliberately NOT applied to
+ *  Intraday/Path/Bybit, which stay on the shared 8% above. See
+ *  server/proSimEngine.ts, the only reader. */
+export const PRO_DAILY_DRAWDOWN_BLOCK_PERCENT = 10;
+
 /**
  * Target position size as a fraction of equity.
  *

@@ -105,6 +105,11 @@ export interface SignalEvaluation {
     ma20: number;
     bollingerBands: { upper: number; middle: number; lower: number; position: string };
     volumeProfile: { poc: number; valueAreaHigh: number; valueAreaLow: number; position: string };
+    /** Pro's SHORT veto (2026-09-17): last closed H1 candle's own return,
+     *  percent, and whether ema50 > ema200. See PRO_SHORT_TREND_VETO_1H_
+     *  RETURN_PCT in proAlgEngine.ts — the entry gate re-checks these. */
+    oneHourReturnPct?: number;
+    trendUp?: boolean;
   };
   /** Pro (§4 regime filter): true when EMA50 < EMA200 on the higher timeframe —
    *  injected by proAlgEngine to block BUY signals during confirmed downtrends. */
@@ -421,6 +426,8 @@ export interface ExitPositionInput {
   /** See IntradayPositionView.naturalStopPct (intradayExit.ts) — frozen at
    *  entry from RiskPlan.naturalStopPct (intradayRisk.ts). */
   naturalStopPct?: number;
+  /** See IntradayPositionView.initialQuantity (intradayExit.ts). */
+  initialQuantity?: number;
 }
 
 export function buildExitView(pos: ExitPositionInput): IntradayPositionView {
@@ -444,7 +451,8 @@ export function buildExitView(pos: ExitPositionInput): IntradayPositionView {
     lowestPriceSinceTP1: pos.lowestPriceSinceTP1,
     maxHoldMs: pos.maxHoldMs,
     timeStopMs: pos.timeStopMs,
-    naturalStopPct: pos.naturalStopPct
+    naturalStopPct: pos.naturalStopPct,
+    initialQuantity: pos.initialQuantity
   };
 }
 

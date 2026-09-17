@@ -24,7 +24,7 @@ function position(over: Partial<SimPosition> = {}): SimPosition {
     stopLoss: ENTRY * 0.977, tp1Hit: false,
     highestPrice: ENTRY, lowestPrice: ENTRY,
     openedAt: '', openTimestamp: Date.now(), reason: '', confidence: 70,
-    entryFee: 0,
+    entryFee: 0, initialQuantity: QTY,
     ...over
   } as SimPosition;
 }
@@ -37,7 +37,7 @@ function ratchetOrder(pos: SimPosition, live: number): PendingOrder | null {
     livePrice: live,
     isLong: true,
     peakPctAtLastPartial: pos.ratchetPeakPct,
-    remainingNotionalUsd: pos.quantity * live
+    remainingQuantityFraction: pos.quantity / (pos.initialQuantity ?? pos.quantity)
   });
   if (d.action === 'HOLD') return null;
   return {
@@ -113,12 +113,12 @@ describe('ratchet partial through the fill core', () => {
     expect(fill(order, pos, ENTRY).positions).toHaveLength(0);
   });
 
-  it('a dust remainder is closed outright instead of being nibbled', () => {
-    // 0.05 units at ~$116 = $5.80, under the $10 exchange minimum.
+  it('a sliver of the original position is closed outright instead of being nibbled', () => {
+    // 0.05 of an original 10 units = 0.5% remaining, well under the 25% floor.
     const pos = position({ highestPrice: PEAK, quantity: 0.05, ratchetPeakPct: 0 });
     const order = ratchetOrder(pos, GIVEBACK_PRICE)!;
     expect(order.side).toBe('close_long');
-    expect(order.reason).toContain('מינימום');
+    expect(order.reason).toContain('פינוי סלוט');
     expect(fill(order, pos, GIVEBACK_PRICE).positions).toHaveLength(0);
   });
 

@@ -14,14 +14,16 @@
  *   · sell 30% of the remainder on a giveback of 15% OF THE PEAK
  *   · re-arm only on a NEW peak (one pullback = one sale)
  *   · full close at BREAK-EVEN (replaces the old 1.8% floor)
- *   · full close when the remainder is dust
+ *   · full close ("free the slot") once the remainder is below
+ *     RATCHET_MIN_REMAINING_FRACTION (25%) of the ORIGINAL entry quantity —
+ *     replaced the old fixed $10 RATCHET_DUST_NOTIONAL_USD floor on 2026-09-17
  */
 import { describe, it, expect } from 'vitest';
 import {
   RATCHET_ARM_PCT,
   RATCHET_GIVEBACK_FRACTION,
   RATCHET_PARTIAL_FRACTION,
-  RATCHET_DUST_NOTIONAL_USD,
+  RATCHET_MIN_REMAINING_FRACTION,
   evaluateRatchet,
   ratchetReason,
   ratchetLevels,
@@ -136,19 +138,19 @@ describe('the full close is break-even, not a rung', () => {
   });
 });
 
-describe('dust', () => {
-  it('closes the remainder outright once it is below the exchange minimum', () => {
-    const d = evaluateRatchet(longAt(50, 45, { remainingNotionalUsd: RATCHET_DUST_NOTIONAL_USD - 0.01 }));
+describe('free the slot — below RATCHET_MIN_REMAINING_FRACTION of the original quantity', () => {
+  it('closes the remainder outright once it is below 25% of the original quantity', () => {
+    const d = evaluateRatchet(longAt(50, 45, { remainingQuantityFraction: RATCHET_MIN_REMAINING_FRACTION - 0.01 }));
     expect(d.action).toBe('FULL');
-    expect(d.fullReason).toBe('dust');
+    expect(d.fullReason).toBe('min-remaining');
   });
 
   it('leaves a healthy remainder alone', () => {
-    const d = evaluateRatchet(longAt(50, 45, { remainingNotionalUsd: 500 }));
+    const d = evaluateRatchet(longAt(50, 45, { remainingQuantityFraction: 0.5 }));
     expect(d.action).not.toBe('FULL');
   });
 
-  it('skips the rule entirely when no notional is supplied', () => {
+  it('skips the rule entirely when no fraction is supplied', () => {
     expect(evaluateRatchet(longAt(50, 49)).action).toBe('HOLD');
   });
 });
@@ -179,11 +181,11 @@ describe('ratchetReason', () => {
     expect(text).toContain('30%');
   });
 
-  it('distinguishes a break-even close from a dust close', () => {
+  it('distinguishes a break-even close from a min-remaining ("free the slot") close', () => {
     expect(ratchetReason(evaluateRatchet(longAt(45, 0)))).toContain('ברייק-אבן');
     expect(
-      ratchetReason(evaluateRatchet(longAt(45, 40, { remainingNotionalUsd: 1 })))
-    ).toContain('מינימום');
+      ratchetReason(evaluateRatchet(longAt(45, 40, { remainingQuantityFraction: 0.1 })))
+    ).toContain('פינוי סלוט');
   });
 });
 

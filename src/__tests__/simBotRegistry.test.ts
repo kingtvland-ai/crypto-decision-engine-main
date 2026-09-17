@@ -143,9 +143,11 @@ describe('Test B — scale parity: every sim bot now reports a 0-100 signal scor
   });
 
   it('keeps each bot’s futures cap fixed whatever the environment says', () => {
-    // Path (Prev-4H Range) and Bybit take SHORTs as 1x futures; Pro is spot-only.
+    // Path (Prev-4H Range) and Bybit take SHORTs as 1x futures. Pro gained
+    // the same SHORT capability 2026-09-17 (hard-vetoed against shorting
+    // into an uptrend) — no longer spot-only, no longer 0.
     expect(simBotDefaults('path', { maxPositions: 9 }).maxFuturesPositions).toBe(2);
-    expect(simBotDefaults('pro', { maxPositions: 9 }).maxFuturesPositions).toBe(0);
+    expect(simBotDefaults('pro', { maxPositions: 9 }).maxFuturesPositions).toBe(2);
     expect(simBotDefaults('bybit', { maxPositions: 9 }).maxFuturesPositions).toBe(3);
   });
 });

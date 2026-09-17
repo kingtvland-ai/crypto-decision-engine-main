@@ -266,7 +266,7 @@ export const ExecutiveDashboard: React.FC = () => {
         livePrice: p.currentPrice,
         isLong,
         peakPctAtLastPartial: p.ratchetPeakPct,
-        remainingNotionalUsd: p.quantity * p.currentPrice
+        remainingQuantityFraction: p.quantity / (p.initialQuantity ?? p.quantity)
       });
       return {
         symbol: p.symbol,
