@@ -314,6 +314,15 @@ export interface SimTrade {
    *  SimPosition.initialRiskUsd. Present on exit trades only — entries have no
    *  pnl and are filtered out before the Kelly history is built. */
   riskUsd?: number;
+  /** SimPosition.id this trade belongs to — the entry fill AND every partial/
+   *  full exit against the same position share this value (2026-09-18). This
+   *  is what a "logical trade" (logicalTrades.ts) groups by: a TP1 partial
+   *  and the break-even close that follows it are two rows here but ONE
+   *  logical trade, whose win/loss is decided by their SUMMED pnl — not
+   *  independently, which used to count a net-positive sequence as one win
+   *  AND one loss. Absent on trades recorded before this field existed;
+   *  aggregateLogicalTrades falls back to one-row-per-trade for those. */
+  positionId?: string;
 }
 
 export interface SimPoint {
@@ -1693,7 +1702,7 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
         id: order.id, symbol: order.symbol, type: order.type, side: order.side,
         price: fillPrice, requestedPrice: order.signalPrice, slippagePercent, fee, delayMs,
         quantity, usdValue: notional, leverage, timestamp: now, at: atMs,
-        reason: order.reason, confidence: order.confidence
+        reason: order.reason, confidence: order.confidence, positionId: newPos.id
       });
 
       events.push({
@@ -1772,7 +1781,8 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
           price: fillPrice, requestedPrice: order.signalPrice, slippagePercent, fee, delayMs,
           quantity: closeQty, usdValue: notional, leverage: pos.leverage, timestamp: now, at: atMs,
           reason: order.reason, confidence: order.confidence, pnl, pnlPercent: partialPnlPercent,
-          riskUsd: pos.initialRiskUsd !== undefined ? pos.initialRiskUsd * exitFraction : undefined
+          riskUsd: pos.initialRiskUsd !== undefined ? pos.initialRiskUsd * exitFraction : undefined,
+          positionId: pos.id
         });
 
         events.push({
@@ -1838,7 +1848,7 @@ export function fillDueOrders(due: PendingOrder[], cash: number, positions: SimP
           price: exitPrice, requestedPrice: order.signalPrice, slippagePercent, fee, delayMs,
           quantity: pos.quantity, usdValue: notional, leverage: pos.leverage, timestamp: now, at: atMs,
           reason: order.reason, confidence: order.confidence, pnl, pnlPercent,
-          riskUsd: pos.initialRiskUsd
+          riskUsd: pos.initialRiskUsd, positionId: pos.id
         });
 
         events.push({

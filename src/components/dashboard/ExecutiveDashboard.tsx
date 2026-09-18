@@ -29,6 +29,7 @@ import type { SimPosition, SimTrade } from '@/hooks/useSimulationBot';
 import { useWorkerAuth } from '@/contexts/WorkerAuthContext';
 import { summarizeSimBot } from '@/lib/simBotSummary';
 import { ratchetLevels as summarizeRatchet } from '@cde/engine/analysis';
+import { summarizeLogicalTrades } from '@cde/engine/execution';
 import { useApiPolling } from '@/hooks/useApiPolling';
 
 
@@ -324,8 +325,10 @@ export const ExecutiveDashboard: React.FC = () => {
           : ((p.entryPrice - p.currentPrice) / p.entryPrice) * 100 * (p.leverage || 1);
         currentVal += (p.marginUsd || notional) + (p.marginUsd || notional) * (pnl / 100);
       });
-      const winningTrades = trades.filter((t) => (t.pnl || 0) > 0).length;
-      const winRate = trades.length > 0 ? (winningTrades / trades.length) * 100 : 0;
+      // 2026-09-18: logical-trade win rate (grouped by positionId), not one
+      // row per exit event — same fix as the live path's source.winRate
+      // above (which already comes pre-aggregated from useSimulationBot.ts).
+      const winRate = summarizeLogicalTrades(trades).winRate;
       const totalProfit = currentVal - initial;
       const status = localStorage.getItem(fallbackStatusKey);
       // `currentVal` already carries cash + marked-to-market positions, which is

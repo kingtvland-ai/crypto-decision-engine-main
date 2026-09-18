@@ -17,6 +17,7 @@ import {
   fillDueOrders,
   selectFillableOrders,
   applySlotPreemptions,
+  summarizeLogicalTrades,
   SimPosition,
   SimTrade,
   SimPoint,
@@ -696,9 +697,15 @@ export function useSimulationBot({ config, isRunning, cryptoData, recommendation
     );
   }, [cryptoData, priceFor]);
 
+  // 2026-09-18: winRate/wins/losses etc. are now LOGICAL-TRADE stats (every
+  // partial fill + the close that eventually follows it, grouped by
+  // positionId, summed to one net PnL) — not one row per exit event. A TP1
+  // partial win followed by a break-even loss used to count as a win AND a
+  // loss; now it is the one net-positive trade it actually was. `closedTrades`
+  // (row count) is kept for anything still reading the old exit-event count.
   const closedTrades = trades.filter((t) => typeof t.pnl === 'number');
-  const wins = closedTrades.filter((t) => (t.pnl ?? 0) > 0).length;
-  const winRate = closedTrades.length ? (wins / closedTrades.length) * 100 : 0;
+  const logicalStats = summarizeLogicalTrades(trades);
+  const winRate = logicalStats.winRate;
 
   const displayHistory = useMemo(() => {
     const map = new Map<number, SimPoint>();
@@ -723,6 +730,19 @@ export function useSimulationBot({ config, isRunning, cryptoData, recommendation
     winRate,
     totalTrades: trades.length,
     closedTrades: closedTrades.length,
+    // 2026-09-18 — logical-trade stats (see the comment above winRate).
+    // exitEventCount duplicates closedTrades.length under a name that pairs
+    // with logicalTradeCount, so a consumer can display both without reading
+    // the field-naming history.
+    logicalTradeCount: logicalStats.logicalTradeCount,
+    closedLogicalTradeCount: logicalStats.closedLogicalTradeCount,
+    exitEventCount: logicalStats.exitEventCount,
+    wins: logicalStats.wins,
+    losses: logicalStats.losses,
+    grossProfit: logicalStats.grossProfit,
+    grossLoss: logicalStats.grossLoss,
+    netRealizedPnl: logicalStats.netRealizedPnl,
+    avgPnlPerLogicalTrade: logicalStats.avgPnlPerLogicalTrade,
     lastEvaluation,
     evaluations,
     reset,

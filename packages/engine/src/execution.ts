@@ -116,6 +116,12 @@ export {
 } from './services/simExecution';
 export type { FundingRateReading, FundingAccrualResult } from './services/simExecution';
 
+export {
+  aggregateLogicalTrades,
+  summarizeLogicalTrades
+} from './services/logicalTrades';
+export type { LogicalTrade, LogicalTradeStats, LogicalTradeLeg } from './services/logicalTrades';
+
 // ── Inter-tick valuation sync ───────────────────────────────────────────────
 // Reconciles the book against the real bar RANGES between two price samples —
 // the wicks a ~3s point-price sampler cannot see on a 300s bar. See

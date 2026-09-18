@@ -13,6 +13,8 @@
 > + 2026-09-17: יכולת SHORT (FUTURES 1x) ל-Pro + מסנן כיווני קשיח נגד שורט
 > במגמה עולה, Time Stop חדש של 240 דק' שמחליף את הסולם עבור Pro בלבד, ו-
 > תקרת drawdown יומית של 10% ל-Pro בלבד (§2).
+> + 2026-09-18: SHORT נעול ל-2.3% במדרגת ה-Scalp בכל 4 הבוטים, ו-Logical
+> Trades מאחד יציאות לפי positionId ל-win/loss/PnL נכונים (§7, חדש).
 
 ארבעת הבוטים רצים כ-4 מופעים נפרדים לגמרי של אותה תשתית
 (`server/simEngineFactory.ts` → `createGenericSimEngine`) — לכל אחד `cash`,
@@ -618,7 +620,7 @@ Time Stop עד כה — אלא כי המנגנון זהה מבנית לבאג ב
 | Fill/Fee/Slippage/Funding | מנוע אחד | `simExecution.ts` |
 | שער קורלציה | ρ ≥ 0.7 על 72 נרות H1, מקס' 3 | `correlation.ts` — Intraday · Path · Bybit (**לא** Pro) |
 | רצפת גודל בפחד (opt-in) | F&G 20–35 + MEAN_REVERSION BUY → מכפיל ≥ 0.9 | `simExecution.ts` — **Intraday בלבד** |
-| מדרגת Scalp קבועה (opt-in) | תמיד SL 2.3/TP1 1.8/TP2 3.5; גל קונים → סטופ רחב | `calmRegime.ts` — **כל 4 הבוטים** |
+| מדרגת Scalp קבועה (opt-in) | תמיד SL 2.3/TP1 1.8/TP2 3.5; גל קונים → סטופ רחב (LONG בלבד — SHORT נעול ל-2.3%, 2026-09-18) | `calmRegime.ts` — **כל 4 הבוטים** |
 | Volatility Profile (sim-default) | SL/TP1 מ-`dynamicRiskPct`/`dynamicOpportunityPct` (עוקף calmRegimeScalp) | `volatilityProfile.ts` — **כל 4 הבוטים, §5** |
 | סולם רווח (opt-in) | חימוש +1.8%; החזרת 15% מהשיא = מימוש 30%; ברייק-אבן = סגירה | `profitRatchet.ts` — **כל 4 הבוטים** |
 | צינון כניסה חוזרת | 60 דק' אחרי **כל** יציאה מלאה | `ENTRY_COOLDOWN_MS` — **כל 4 הבוטים** |
@@ -694,13 +696,22 @@ $10 קבוע על הערך הדולרי הנוכחי) הוחלף באחוז מה
 ```
 גל קונים = relVolume ≥ 2 (ווליום הנר האחרון / ממוצע 20 שלפניו)  AND  נר ירוק
            Intraday=M5 · Pro=נרות הסיגנל · Path=H1 · Bybit=M15
-        →  SL  = clamp(הסטופ הדינמי של הבוט, 2.3%, 4.2%)
+        →  SL  = clamp(הסטופ הדינמי של הבוט, 2.3%, 4.2%)   ← LONG; SHORT ראה מטה
            TP1 = 1.8%              ← קבוע תמיד
            TP2 = max(3.5%, 1.2×SL) ← גדל עם הסטופ, כדי שהשער יישאר עביר
 ```
 
 TP1 ביחס-סיכון 0.78 מתחת ל-`minRewardRisk` **בכוונה** — פרטיישל מהיר, לא כל
 התזה; שער ה-R:R בענף הזה נמדד מול **TP2** (3.5/2.3=1.52), לא TP1.
+
+**SHORT נעול ל-2.3% בלי יוצא מן הכלל (2026-09-18, "רעש מכירה חייב להפסיק
+ב-2.3%").** `resolveLadderPercents({ ..., isLong })` — עבור SHORT התקרה
+האפקטיבית (גם לגל קונים, גם לרצפת הרעש) היא `FIXED_SL_PCT` (2.3%), לא
+`SURGE_MAX_SL_PCT` (4.2%). LONG לא השתנה. `isLong` אופציונלי (ברירת מחדל
+LONG) — כל 4 נקודות הקריאה (`intradayRisk.ts`, `proAlgEngine.ts`,
+`prev4hRange.ts`, `trendBreakout.ts`) עודכנו להעביר את הכיוון האמיתי.
+`tooVolatile` נבדק מול אותה תקרה אפקטיבית — סימבול תנודתי מדי לשורט הצר
+נדחה, במקום לקבל סטופ צר-מדי-להיות-אמיתי.
 Intraday (`intradayRisk.ts`) / Path (`prev4hRange.ts`) / Bybit (`trendBreakout.ts`)
 משתמשים בשער R:R הקיים שלהם, מוסט ל-TP2. Pro (`proStopTpLevels`) אין לו שער
 R:R — רק המדרגה עצמה משתנה. הזרקה: `SIM_INTRADAY_PARAMS_OVERRIDE` (Intraday),
@@ -877,3 +888,50 @@ TRAIN 60% / VALIDATION 20% / OOS 20% לפי זמן, עם:
 מדידה ראשונה (Pro, 6 סימבולים, 2025-01→07): TRAIN 9 עסקאות / 88.9% / PF 24.9 /
 +$86.93 מול VALIDATION 5 עסקאות / 0% / -$142.45. שני החלונות מתחת ל-20 עסקאות,
 כלומר מתחת ל-`minTradesPerWindow` — הכלי עובד, קצה לא הוכח.
+
+---
+
+## 7. Logical Trades — `logicalTrades.ts` (2026-09-18)
+
+**קבצי מפתח:** `packages/engine/src/services/logicalTrades.ts` (הלוגיקה),
+`simExecution.ts` (השדה `SimTrade.positionId` שהמנגנון תלוי בו).
+
+**הבעיה:** כל שורת `SimTrade` (כניסה, כל `partial_tp1`, כל סגירה מלאה) נספרה
+בנפרד כניצחון/הפסד עצמאי — ב-`useSimulationBot.ts:699-701` וב-`ExecutiveDashboard.tsx:327-328`
+גם יחד. פוזיציה שמימשה TP1 ב-+$12.89 ואז נסגרה בברייק-אבן ב--$2.91 (נטו
++$9.98, ניצחון אמיתי) נספרה כניצחון **וגם** הפסד, ומכנה ה-win-rate תפח בכל
+מימוש חלקי.
+
+**התיקון — `SimTrade.positionId` (חדש):** נקבע בכל 3 נקודות ה-`newTrades.push`
+ב-`simExecution.ts` (כניסה ← `newPos.id`; `partial_tp1` ← `pos.id`; סגירה
+מלאה ← `pos.id`). שורות ישנות בלי השדה הופכות כל אחת לעסקה לוגית עצמאית
+(לא רטרואקטיבי).
+
+```
+aggregateLogicalTrades(trades)  → מקבץ לפי positionId (fallback: id הבודד)
+  netPnl        = Σ pnl של כל רגלי היציאה
+  netPnlPercent = Σ(pnl_i) / Σ(pnl_i / (pnlPercent_i/100))   ← לא העתקה של % רגל בודדת
+  isWin         = netPnl > 0
+  isClosed      = true רק אחרי רגל close_long/close_short (פוזיציה שמומשה
+                  רק חלקית לא נספרת ב-win/loss)
+
+summarizeLogicalTrades(trades)  → logicalTradeCount, closedLogicalTradeCount,
+  exitEventCount, wins, losses, winRate, grossProfit, grossLoss,
+  netRealizedPnl, avgPnlPerLogicalTrade
+```
+`grossProfit + grossLoss === netRealizedPnl` תמיד — אינווריאנט מהבנייה, נבדק
+ישירות בטסט.
+
+**חובר ל:** `useSimulationBot.ts` ו-`useProSimulationBot.ts` (`winRate` שחוזר
+מכל hook מגיע מ-`summarizeLogicalTrades`, לא מספירה גולמית) · `ExecutiveDashboard.tsx`
+(גם הנתיב החי דרך ה-hook וגם ה-fallback ל-localStorage) · `PortfolioPulseCard.tsx`
+(בתוך חלון הזמן הנבחר — רגל שקדמה לחלון לא נראית, קירוב מובנה של חלונות-זמן,
+לא רגרסיה). Path/Bybit לא נגעו ישירות — קוראים ל-`useSimulationBot.ts` הגנרי.
+
+**מה לא השתנה:** אסטרטגיית כניסה, TP/SL, תנאי קבלת החלטות — אפס. זה תיקון
+איחוד-וסיכום בלבד על מספרים ש-`simExecution.ts` כבר חישב נכון per-leg.
+
+טסטים: `src/__tests__/logicalTrades.test.ts` — TP1+ברייק-אבן→WIN, TP1+TP2,
+TP1+SL, LONG/SHORT עצמאיים, slippage בין הרמה הנומינלית לביצוע בפועל, עסקה
+ללא partial, פוזיציה פתוחה לא נספרת, שורות legacy בלי positionId, ואינווריאנט
+הסכימה (Σ עסקאות לוגיות סגורות = netRealizedPnl).

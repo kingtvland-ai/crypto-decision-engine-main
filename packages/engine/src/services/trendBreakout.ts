@@ -486,7 +486,8 @@ export function evaluateTrendBreakout(input: TrendBreakoutInput): SignalEvaluati
     const ladder = resolveLadderPercents({
       dynamicSlPct: dynSlPct,
       buyingSurge: isBuyingSurge(m15),
-      noiseFloorPct: noise?.floorPct
+      noiseFloorPct: noise?.floorPct,
+      isLong
     });
     if (ladder.tooVolatile) {
       return base('SETUP', 'VOLATILITY_TOO_HIGH', { regime: regimeResult }, [

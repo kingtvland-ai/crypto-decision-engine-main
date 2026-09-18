@@ -579,7 +579,8 @@ export function buildRiskPlan(input: RiskPlanInput): RiskPlan {
       // The PRE-ceiling dynamic stop — see where it is computed above.
       dynamicSlPct,
       buyingSurge: input.buyingSurge === true,
-      noiseFloorPct: noise?.floorPct
+      noiseFloorPct: noise?.floorPct,
+      isLong
     });
     if (ladder.tooVolatile) {
       return rejected(

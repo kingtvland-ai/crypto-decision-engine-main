@@ -321,26 +321,41 @@ export function resolveLadderPercents(input: {
   /** The already-measured noise floor from `measureStopNoise().floorPct`.
    *  Omitted (or 0) disables the floor entirely and the flat ladder stands. */
   noiseFloorPct?: number;
+  /** Direction of the trade this ladder is for (operator decision
+   *  2026-09-18: "sell-side noise must stop at 2.3%"). SHORT (`false`) is
+   *  hard-locked to FIXED_SL_PCT — neither a buying surge NOR the noise
+   *  floor may widen a SHORT's stop past it; both mechanisms stay exactly as
+   *  they were for LONG (up to SURGE_MAX_SL_PCT/4.2%). Omitted → LONG, so
+   *  every pre-existing caller not yet updated to pass direction keeps its
+   *  current behavior unchanged. */
+  isLong?: boolean;
 }): LadderPercents {
+  const isLong = input.isLong !== false;
+  const maxSlPct = isLong ? SURGE_MAX_SL_PCT : FIXED_SL_PCT;
+
   const noiseFloorPct = typeof input.noiseFloorPct === 'number' && Number.isFinite(input.noiseFloorPct) && input.noiseFloorPct > 0
     ? input.noiseFloorPct
     : 0;
 
   let slPct = FIXED_SL_PCT;
-  let surged = false;
 
   if (input.buyingSurge) {
     const dyn = typeof input.dynamicSlPct === 'number' && Number.isFinite(input.dynamicSlPct)
       ? input.dynamicSlPct
       : FIXED_SL_PCT;
-    slPct = Math.min(SURGE_MAX_SL_PCT, Math.max(SURGE_MIN_SL_PCT, dyn));
-    surged = true;
+    slPct = Math.min(maxSlPct, Math.max(SURGE_MIN_SL_PCT, dyn));
   }
+  // Reflects whether the stop ACTUALLY widened, not just whether a surge was
+  // detected — for a SHORT, maxSlPct === FIXED_SL_PCT, so the line above can
+  // never move slPct past 2.3% regardless of the surge input.
+  const surged = slPct > FIXED_SL_PCT;
 
   // The noise floor applies on top of whatever the surge rule decided: a surge
-  // stop that still sits inside one bar's range is not a stop either.
-  const noiseWidened = noiseFloorPct > slPct;
-  if (noiseWidened) slPct = Math.min(SURGE_MAX_SL_PCT, noiseFloorPct);
+  // stop that still sits inside one bar's range is not a stop either. Same
+  // asymmetric cap — a SHORT's noise floor can widen only up to FIXED_SL_PCT.
+  const preNoiseSlPct = slPct;
+  if (noiseFloorPct > slPct) slPct = Math.min(maxSlPct, noiseFloorPct);
+  const noiseWidened = slPct > preNoiseSlPct;
 
   const widened = surged || noiseWidened;
   return {
@@ -349,7 +364,11 @@ export function resolveLadderPercents(input: {
     tp2Pct: widened ? Math.max(FIXED_TP2_PCT, slPct * TP2_MIN_REWARD_RISK) : FIXED_TP2_PCT,
     surged,
     noiseWidened,
-    tooVolatile: noiseFloorPct > SURGE_MAX_SL_PCT,
+    // A SHORT's effective ceiling is FIXED_SL_PCT now, not SURGE_MAX_SL_PCT —
+    // noise that would have been an acceptable (if wide) LONG stop can be too
+    // volatile for a SHORT's tighter cap, and the trade is correctly refused
+    // rather than given a stop the noise floor says is too tight to be real.
+    tooVolatile: noiseFloorPct > maxSlPct,
     noiseFloorPct
   };
 }

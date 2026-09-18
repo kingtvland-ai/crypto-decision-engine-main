@@ -759,7 +759,8 @@ export function proStopTpLevels(
     const ladder = resolveLadderPercents({
       dynamicSlPct: stopPct,
       buyingSurge: opts.buyingSurge,
-      noiseFloorPct: opts.noiseFloorStop === true ? opts.stopNoise?.floorPct : undefined
+      noiseFloorPct: opts.noiseFloorStop === true ? opts.stopNoise?.floorPct : undefined,
+      isLong
     });
     finalStopPct = ladder.slPct;
     tp1Pct = ladder.tp1Pct;

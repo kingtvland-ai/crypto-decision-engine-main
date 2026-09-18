@@ -71,6 +71,46 @@ describe('resolveLadderPercents', () => {
   });
 });
 
+// 2026-09-18, operator decision: "sell-side noise must stop at 2.3%" — a
+// SHORT's stop can never widen past FIXED_SL_PCT, regardless of a buying
+// surge or the noise floor. LONG is completely unaffected (still up to
+// SURGE_MAX_SL_PCT/4.2%, exactly the tests above).
+describe('resolveLadderPercents — SHORT is hard-locked to FIXED_SL_PCT (isLong: false)', () => {
+  it('a buying surge cannot widen a SHORT past 2.3%, no matter how wide the dynamic stop is', () => {
+    for (const dynamicSlPct of [2.5, 3.1, 4.2, 99]) {
+      const r = resolveLadderPercents({ dynamicSlPct, buyingSurge: true, isLong: false });
+      expect(r.slPct).toBeCloseTo(FIXED_SL_PCT, 6);
+      expect(r.surged).toBe(false); // nothing actually widened
+    }
+  });
+
+  it('the noise floor cannot widen a SHORT past 2.3% either', () => {
+    const r = resolveLadderPercents({ noiseFloorPct: 3.5, isLong: false });
+    expect(r.slPct).toBeCloseTo(FIXED_SL_PCT, 6);
+    expect(r.noiseWidened).toBe(false);
+  });
+
+  it('LONG is unaffected — the same inputs still widen up to 4.2%', () => {
+    const short = resolveLadderPercents({ dynamicSlPct: 3.1, buyingSurge: true, isLong: false });
+    const long = resolveLadderPercents({ dynamicSlPct: 3.1, buyingSurge: true, isLong: true });
+    expect(short.slPct).toBeCloseTo(FIXED_SL_PCT, 6);
+    expect(long.slPct).toBeCloseTo(3.1, 6);
+  });
+
+  it('omitting isLong defaults to LONG — every pre-existing caller is unaffected', () => {
+    const withoutFlag = resolveLadderPercents({ dynamicSlPct: 3.1, buyingSurge: true });
+    const explicitLong = resolveLadderPercents({ dynamicSlPct: 3.1, buyingSurge: true, isLong: true });
+    expect(withoutFlag).toEqual(explicitLong);
+  });
+
+  it('a SHORT can still be too volatile — its ceiling for that check is 2.3%, not 4.2%', () => {
+    const short = resolveLadderPercents({ noiseFloorPct: 3.0, isLong: false });
+    const long = resolveLadderPercents({ noiseFloorPct: 3.0, isLong: true });
+    expect(short.tooVolatile).toBe(true);  // 3.0% > FIXED_SL_PCT (2.3%)
+    expect(long.tooVolatile).toBe(false);  // 3.0% <= SURGE_MAX_SL_PCT (4.2%)
+  });
+});
+
 function volBars(n: number, lastVolume: number, lastGreen: boolean): Candle[] {
   const bars: Candle[] = Array.from({ length: n }, (_, i) => ({
     timestamp: i * 60_000, open: 100, high: 101, low: 99, close: 100, volume: 1000

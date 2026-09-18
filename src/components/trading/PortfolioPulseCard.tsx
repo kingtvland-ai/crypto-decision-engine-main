@@ -4,6 +4,7 @@ import { Area, AreaChart, ResponsiveContainer, Tooltip, YAxis } from 'recharts';
 import { TrendingDown, TrendingUp } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import ProfitScale from './ProfitScale';
+import { summarizeLogicalTrades } from '@cde/engine/execution';
 
 interface Metric {
   label: string;
@@ -21,8 +22,14 @@ interface HistoryPoint {
 }
 
 interface TradeLike {
-  at?: number;
+  at: number;
   pnl?: number;
+  pnlPercent?: number;
+  side: string;
+  /** SimPosition.id — needed for logical-trade win-rate grouping
+   *  (summarizeLogicalTrades). Absent on data recorded before 2026-09-18;
+   *  that data just aggregates one row per logical trade, same as before. */
+  positionId?: string;
 }
 
 interface Props {
@@ -108,8 +115,16 @@ const PortfolioPulseCard = ({
     const closed = trades.filter(
       (t) => typeof t.pnl === 'number' && (t.at ?? 0) >= cutoff
     );
-    const wins = closed.filter((t) => (t.pnl as number) > 0).length;
-    const winRate = closed.length ? (wins / closed.length) * 100 : 0;
+    // 2026-09-18: logical-trade win rate within this window (grouped by
+    // positionId) — a TP1 partial followed by a break-even loss on the same
+    // position no longer counts as one win AND one loss. A leg from outside
+    // the window is not visible here, so a position whose partial fired
+    // before `cutoff` and whose close fires after it is scored on the close
+    // leg alone — an inherent windowing approximation, not a regression from
+    // the old per-row count.
+    const logicalStats = summarizeLogicalTrades(closed);
+    const wins = logicalStats.wins;
+    const winRate = logicalStats.winRate;
     const realized = closed.reduce((s, t) => s + (t.pnl as number), 0);
 
     let peak = -Infinity;
@@ -123,7 +138,9 @@ const PortfolioPulseCard = ({
         maxDdPercent = peak ? (dd / peak) * 100 : 0;
       }
     }
-    return { closed: closed.length, wins, winRate, realized, maxDd, maxDdPercent };
+    // `closed` here is the logical-trade denominator (matches `wins`), not
+    // the raw exit-event row count — see the comment above.
+    return { closed: logicalStats.closedLogicalTradeCount, wins, winRate, realized, maxDd, maxDdPercent };
   }, [trades, range, filteredHistory]);
 
   const pnl = equity - invested;

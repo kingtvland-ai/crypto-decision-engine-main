@@ -368,7 +368,8 @@ export function evaluatePrev4hRange(input: Prev4hRangeInput): SignalEvaluation {
     const ladder = resolveLadderPercents({
       dynamicSlPct: dynSlPct,
       buyingSurge: isBuyingSurge(h1),
-      noiseFloorPct: noise?.floorPct
+      noiseFloorPct: noise?.floorPct,
+      isLong
     });
     if (ladder.tooVolatile) {
       return base('ARMED', 'VOLATILITY_TOO_HIGH', [

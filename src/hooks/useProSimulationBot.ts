@@ -21,7 +21,7 @@ import type { Candle } from '@cde/engine';
 import { SignalEvaluation } from '@cde/engine';
 import { getUniverseMarketData } from '@cde/engine/market-data';
 import { toBaseAsset } from '@cde/engine/market-data';
-import { fillDueOrders, selectFillableOrders, applySlotPreemptions } from '@cde/engine/execution';
+import { fillDueOrders, selectFillableOrders, applySlotPreemptions, summarizeLogicalTrades } from '@cde/engine/execution';
 import {
   applyProEntryGates,
   generateProOrders,
@@ -427,8 +427,10 @@ export function useProSimulationBot({ config, isRunning, cryptoData, initialSnap
     );
   }, [cryptoData, priceFor]);
 
-  const wins = closedTrades.filter((t) => (t.pnl ?? 0) > 0).length;
-  const winRate = closedTrades.length ? (wins / closedTrades.length) * 100 : 0;
+  // 2026-09-18: logical-trade stats (grouped by positionId), not one row per
+  // exit event — see the identical fix/comment in useSimulationBot.ts.
+  const logicalStats = summarizeLogicalTrades(trades);
+  const winRate = logicalStats.winRate;
 
   const displayHistory = useMemo(() => {
     const map = new Map<number, SimPoint>();
@@ -442,6 +444,16 @@ export function useProSimulationBot({ config, isRunning, cryptoData, initialSnap
   return {
     cash, positions, positionsValue, equity, trades, history: displayHistory, pending,
     totalFees, totalSlippageCost, winRate, totalTrades: trades.length, closedTrades: closedTrades.length,
+    // 2026-09-18 — logical-trade stats, see useSimulationBot.ts's identical fix.
+    logicalTradeCount: logicalStats.logicalTradeCount,
+    closedLogicalTradeCount: logicalStats.closedLogicalTradeCount,
+    exitEventCount: logicalStats.exitEventCount,
+    wins: logicalStats.wins,
+    losses: logicalStats.losses,
+    grossProfit: logicalStats.grossProfit,
+    grossLoss: logicalStats.grossLoss,
+    netRealizedPnl: logicalStats.netRealizedPnl,
+    avgPnlPerLogicalTrade: logicalStats.avgPnlPerLogicalTrade,
     lastEvaluation, evaluations, reset, minConfidence: minConfidence ?? SIM_MIN_CONFIDENCE.pro, hasSavedSession, nextTickAt,
     // Was a hardcoded 0, which handed the risk meter "no exposure" no matter
     // what the twin held. Pro is spot-only today, so this is normally 0 anyway
