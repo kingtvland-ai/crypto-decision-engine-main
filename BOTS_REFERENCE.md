@@ -15,6 +15,13 @@
 > תקרת drawdown יומית של 10% ל-Pro בלבד (§2).
 > + 2026-09-18: SHORT נעול ל-2.3% במדרגת ה-Scalp בכל 4 הבוטים, ו-Logical
 > Trades מאחד יציאות לפי positionId ל-win/loss/PnL נכונים (§7, חדש).
+> + 2026-09-18 (10 תיקוני מתמטיקה/זרימה ל-Pro בלבד, אין שינוי אסטרטגיה/SL/
+> sizing/משקלים): `MIN_PRO_CANDLES` 40→250 (חימום EMA200 אמיתי), clamp
+> confidence מפורש, Market Regime הפך לפילטר/מכפיל בלבד (לא rewrite של
+> HOLD ל-BUY/SELL), Net Break-Even (עמלות אמיתיות) מחליף `entryPrice` הגולמי
+> ברצפת ה-freeRunning ובה-runner-stop שאחרי TP1, Flip Hysteresis (סף 82 +
+> פער ניקוד 4), Limit Order TTL 45 דק' + Revalidation לפני מילוי, Streak
+> Cooldown לפי עסקה לוגית ולא לפי רגל (§2).
 
 ארבעת הבוטים רצים כ-4 מופעים נפרדים לגמרי של אותה תשתית
 (`server/simEngineFactory.ts` → `createGenericSimEngine`) — לכל אחד `cash`,
@@ -219,8 +226,13 @@ GROSS_RR=.. ENTRY_FEE%=.. EXIT_FEE%=.. SLIPPAGE%=.. TOTAL_COST%=.. NET_RR=..`
 הקצאה), `proSimExecution.ts` (שערים + הזמנות).
 
 ### נתוני קלט נדרשים
-`MIN_PRO_CANDLES = 40` (`proAlgEngine.ts:465`) — נמוך משמעותית מ-Intraday,
-כי Pro לא בונה רג'ים רב-טיימפריים.
+`MIN_PRO_CANDLES = 250` (`proAlgEngine.ts`, **הועלה מ-40 ב-2026-09-18**).
+הסיבה: `calculateEMA` זורע את הנקודה הראשונה מ-SMA של `Math.min(period,
+values.length)` — כלומר "EMA200" שחושב על 40 נרות מעולם לא היה EMA200 אמיתי,
+היה SMA(40) מתחזה. 250 נותן ל-EMA200 עוד 50 נרות אמיתיים של התכנסות מעבר
+לתקופה שלו עצמה, בתוך `targetCandles` (260) שה-fetch של H1 כבר מביא בפועל
+(`TIMEFRAME_SPECS` ב-`marketDataService.ts`) — אין צורך למשוך יותר נתונים
+ממה שהצינור כבר מביא. כל החלטת Signal/Trend/Veto נחסמת עד לרף הזה.
 
 ### חישוב הביטחון (Score 0–100)
 8 אינדיקטורים משוקללים (`§2`, `proAlgEngine.ts`):
@@ -230,7 +242,11 @@ Volume Profile 15 · Volume Trend 10 · שינוי 24h 12   (סה"כ משקל = 
 ```
 `confidence = 50 + (dominance·45 + margin·25)·coverage − (1−coverage)·10`, כאשר
 `coverage = min(1, totalWeight / 105)`. **תוקן 2026-09-16** (היה `/88`, מול
-Σמשקלות בפועל 105 — ראה "פערים ידועים" למטה).
+Σמשקלות בפועל 105 — ראה "פערים ידועים" למטה). **`confidence = clamp(…, 0,
+100)` מפורש בסוף החישוב (2026-09-18)** — אחרי ה-veto, אחרי בונוסי ה-regime,
+לפני ההחזרה. בפועל no-op היום (כל שלב כבר משתמש ב-`Math.max`/`Math.min` על
+ערכים חסומים), אבל נשמר מפורש כדי ששינוי עתידי בענף כלשהו לא ידחוף
+confidence מחוץ לתחום בשקט.
 
 **עונש קורלציה (2026-09-11, `aggregateProBuckets`):** RSI, מרחק-מ-MA20,
 Bollinger %B ו-Stochastic %K מודדים את **אותו דבר** (כמה המחיר מתוח מהממוצע) —
@@ -241,12 +257,25 @@ Bollinger %B ו-Stochastic %K מודדים את **אותו דבר** (כמה המ
 אפקטיביים, לא 4. `totalWeight` נשאר הסכום הגולמי (coverage לא מושפע). MACD /
 Volume Profile / מגמת נפח / שינוי 24h נשארים עצמאיים במשקל מלא.
 
-**נתיב trend-participation** (`computeProSignal`): כש-`EMA50>EMA200` והמחיר מעל
-EMA50 ולא מתוח (≤3×ATR ממנו) — כל תוצאה **שאינה BUY** (כולל SELL חלש) מקודמת
-ל-BUY, עם בונוס ביטחון (58 + עוצמת מגמה + איכות פולבאק). סימטרי מ-2026-09-17:
-כש-`EMA50<EMA200` והמחיר מתחת ל-EMA50 ולא מתוח — HOLD מקודם ל-SELL, עם אותו
-בונוס ביטחון (לפני 2026-09-17 SELL היה חסום ב-50 בקוד, אז הבונוס לא היה
-משנה כלום בפועל — עכשיו SELL הוא מועמד שורט אמיתי, ראה למטה).
+**Market Regime — פילטר/מכפיל בלבד, לא rewrite (`computeProSignal`, שוכתב
+2026-09-18).** עד 2026-09-17 "נתיב trend-participation" **החליף** את התוצאה:
+HOLD הפך ל-BUY במגמה עולה, HOLD הפך ל-SELL במגמה יורדת — סיגנל שהצבעת
+האינדיקטורים מעולם לא נתנה. **מ-2026-09-18 זה אסור**: `rawSignal` (הצבעת
+הסל, לפני כל שינוי) נשמר בנפרד מ-`action` (מה שבאמת קובע את המסחר) ומ-
+`marketRegime` ('UP'/'DOWN'/'NONE', אותו תנאי EMA50/EMA200+לא-מתוח כמו קודם).
+Regime הוא עכשיו **פילטר/מכפיל בלבד**:
+```
+UP:   action===BUY  → בונוס ביטחון (58 + עוצמת מגמה + איכות פולבאק)
+      action===SELL → נחסם ל-HOLD (לא הופך ל-BUY!)
+      action===HOLD → נשאר HOLD (לא מקודם)
+DOWN: action===SELL → בונוס ביטחון (סימטרי)
+      action===BUY  → נחסם ל-HOLD
+      action===HOLD → נשאר HOLD
+```
+HOLD **לעולם לא** הופך לכיוון שהסל לא בחר. `rawSignal`/`marketRegime` חשופים
+על `ProSignalResult` לשקיפות/דיבוג. הווטו הכיווני הקשיח (למטה) עדיין קיים
+כבדיקה **נפרדת ועצמאית** — הוא מכסה גם מגמה **מתוחה** (extended), מקרה
+ש-`marketRegime` לא תופס (regime='NONE' כשלא-מתוח נכשל).
 
 ### סף כניסה
 **שטוח, 70**, בלי קשר ל-riskLevel (`PRO_DEFAULT_ENTRY_CONFIDENCE`,
@@ -307,12 +336,29 @@ Bollinger-lower / MA20 / VAL / POC — מחיר "איפה התמיכה הקרו�
 SL   = ATR-scaled: clamp(atr%·1.6, 1.8%, 4.2%)   ·   תקרה PRO_STOP_LOSS_PERCENT 4.2%
 רווח = Time Stop של Pro (ראה למטה, 2026-09-17) — `proSimExecution.ts` מדליק
        `timeStopPeakTrail: true` ללא תנאי בכל קריאה ל-`evaluateProExit`
-       (מחליף את `profitRatchet: true` הישן — הסולם לא רץ יותר ל-Pro).
-       TP1 חצי/TP2/break-even runner עדיין קוד חי, אבל **לעולם לא רצים
-       בסימולציה** — נשארים כברירת מחדל ל-opts ריק (קריאה ישירה בלי opts,
-       למשל מטסט).
-Flip:  SELL בביטחון ≥ סף סוגר LONG; BUY בביטחון ≥ סף סוגר SHORT (סימטרי,
-       2026-09-17 — לפני כן SELL בלבד, כי כל פוזיציה הייתה LONG).
+       (מחליף את `profitRatchet: true` הישן).
+
+       ⚠️ **תופעת-לוואי מכוונת (אושרה 2026-09-18, לא לתקן):** ה-ratchet היה
+       תמיד `evaluateRatchet(...)` — אובייקט מוגדר, אף פעם לא `undefined` —
+       ברגע ש-`profitRatchet: true` הועבר, גם כשלא חמוש (peak<1.8%). לכן
+       `!ratchet` היה **תמיד `false`**, ו-TP1 חצי/TP2/break-even runner
+       (המוגנים ב-`!ratchet`) היו **קוד מת** ל-Pro מ-2026-09-14 ועד עכשיו —
+       ללא קשר אם הסולם חמוש בפועל. עכשיו ש-`opts` מעביר `timeStopPeakTrail`
+       במקום, `ratchet` הוא תמיד `undefined` ו-`!ratchet` תמיד `true` **לפני
+       הצ'קפוינט** (240 דק') — כלומר TP1(50%)/TP2/break-even runner **חזרו
+       לפעול** ל-Pro לראשונה מזה חודשים. זו לא הייתה כוונה מוצהרת של השינוי
+       המקורי, אבל אושרה כרצויה: "תן לפוזיציה לרוץ, רק תתממש אם מגיעה
+       לצ'קפוינט" — כלומר לפני הצ'קפוינט השער הרגיל (TP1/TP2/SL) אמור
+       לשלוט, לא רק SL. **אחרי** הצ'קפוינט (240 דק') — כרגיל, freeRunning
+       מדלג עליהם (ראה §Time Stop למטה).
+Flip:  Flip Hysteresis (2026-09-18) — SELL סוגר LONG, BUY סוגר SHORT, אבל
+       לא באותו סף כמו כניסה. שני תנאים, שניהם חובה:
+       (א) confidence ≥ minConfidence + PRO_FLIP_THRESHOLD_MARGIN (4) —
+           82 בקונפיג החי היום (78+4), מחושב דינמית מ-minConfidence הפעיל,
+           לא קבוע נפרד שיכול להתנתק ממנו.
+       (ב) ניקוד הכיוון הנגדי (sellScore/buyScore הגולמי) חייב לנצח את
+           ניקוד הכיוון המוחזק ב-4 נקודות לפחות — לא רק "SELL דומיננטי",
+           אלא "SELL דומיננטי בפער". מונע BUY→SELL→BUY על תנודת ניקוד קטנה.
 ```
 
 **SHORT (FUTURES 1x) — יכולת חדשה, 2026-09-17 (החלטת מפעיל).** עד כאן Pro
@@ -341,18 +387,66 @@ RETURN_PCT = 0.2`).** וטו מוחלט, נבדק בשתי שכבות עצמאי
 `PRO_TIME_STOP_MINUTES = 240` (4 שעות), `PRO_TIME_STOP_TRAIL_PCT = 0.6`.
 ```
 heldMs < 240 דק'                    → כלום לא משתנה, TP1/TP2/SL רגילים
-heldMs >= 240 דק' וגם לא ברווח       → סגירה מלאה מיידית
-heldMs >= 240 דק' וגם ברווח          → TP1/TP2/break-even runner מדולגים;
-                                       רץ חופשי עד שהמחיר יורד (LONG) /
-                                       עולה (SHORT) 0.6% **ממחיר** השיא —
-                                       לא 0.6% מהשיא כאחוז-רווח, ולא שבר
-                                       מהשיא כמו הסולם — טריילינג-סטופ פשוט
-                                       על המחיר. ה-SL המקורי עדיין גובר מתחת.
+heldMs >= 240 דק' והשיא מעולם לא עבר Net BE  → סגירה מלאה מיידית
+heldMs >= 240 דק' והשיא כן עבר Net BE (אי-פעם) → freeRunning, ראה מטה
 ```
 שונה במתכוון מהסולם (`profitRatchet.ts`): אין מימוש חלקי בדרך, ואין נוסחת
-giveback-of-peak — "תן לרוץ, נעל ב-0.6% מהשיא" בלבד. `PRO_DAILY_DRAWDOWN_
-BLOCK_PERCENT = 10` (במקום ה-`DAILY_DRAWDOWN_BLOCK_PERCENT` המשותף 8%, ראה
-`server/proSimEngine.ts`) — Pro בלבד, שלושת הבוטים האחרים נשארים ב-8%.
+giveback-of-peak — "תן לרוץ, נעל ב-Net BE / 0.6% מהשיא" בלבד. `PRO_DAILY_
+DRAWDOWN_BLOCK_PERCENT = 10` (במקום ה-`DAILY_DRAWDOWN_BLOCK_PERCENT` המשותף
+8%, ראה `server/proSimEngine.ts`) — Pro בלבד, שלושת הבוטים האחרים ב-8%.
+
+**Net Break-Even + רצפת ה-freeRunning (2026-09-18, החלטת מפעיל).** "ברווח"
+לא נמדד מול `entryPrice` הגולמי — נמדד מול `netBreakEvenPrice`, שכולל את
+העמלות בפועל:
+```
+entryFeePct = entryFee (ששולם בפועל) / (quantity × entryPrice) × 100
+              — נופל חזרה לשיעור taker (BYBIT_FEES) אם quantity/entryFee חסרים
+exitFeePct  = תמיד taker — כל יציאה (SL/TP/Time Stop) חוצה את הספר, אף פעם לא limit נח
+netBreakEvenPrice = entryPrice × (1 + s × (entryFeePct + exitFeePct) / 100)
+```
+**לא כולל funding** — אין בכל הקוד מעקב מצטבר per-position אחרי funding
+(מיושם פעם אחת ישירות על ה-equity הכולל, לא מיוחס לפוזיציה בודדת); הכללתו
+דורשת תשתית חדשה שלא קיימת.
+
+`isEverNetProfitable` נבדק מול **השיא**, לא מול המחיר הנוכחי — קביעה
+**דביקה, חד-כיוונית**: ברגע שהשיא עבר את Net BE, הפוזיציה freeRunning
+לצמיתות (עד שתיסגר), גם אם המחיר יורד בחזרה מתחת ל-Net BE אחר כך. (באג
+שנתפס ותוקן ב-2026-09-18: בדיקה מול המחיר הנוכחי במקום השיא יצרה סתירה —
+ברגע שהמחיר יורד ל-Net BE או מתחתיו, "לא ברווח נטו → סגירה" הייתה יורה
+*לפני* שרצפת ה-freeRunning אי-פעם מקבלת סיכוי לפעול, מה שהפך אותה לקוד
+שלעולם לא רץ.)
+```
+LONG:  runnerStop = max(netBreakEvenPrice, highWaterMark × 0.994)
+SHORT: runnerStop = min(netBreakEvenPrice, lowWaterMark  × 1.006)
+```
+0.6% מהשיא **לעולם לא** מורשה להפוך עסקה שהייתה ברווח נטו להפסד — הרצפה/תקרה
+לוקחת את הערך המגן יותר משני הביטויים. **גם אחרי TP1 (לפני הצ'קפוינט)**:
+ה-runner-stop שרץ עם היתרה אחרי TP1 עוגן מ-2026-09-18 ב-`netBreakEvenPrice`,
+לא ב-`entryPrice` הגולמי (`max(stopLoss, netBreakEvenPrice)` ל-LONG). טסטים:
+`src/__tests__/proNetBreakEvenAndOrderLifecycle.test.ts`.
+
+**Limit Orders — TTL + Revalidation (2026-09-18, החלטת מפעיל).**
+`PRO_LIMIT_ORDER_TTL_MS = 45` דקות (היה נופל לברירת המחדל המשותפת של 2
+שעות) — נקבע כ-`expiresAt` על כל פקודת כניסה של Pro. **בנוסף**, `revalidate
+ProPendingEntries` (מנגנון opt-in חדש ב-`SimEngineStrategy`, Pro בלבד —
+שלושת הבוטים האחרים משאירים את השדה `undefined` ולא מושפעים) רץ **בכל טיק**,
+לפני `selectFillableOrders`, ומבטל פקודת LIMIT נחה אם ההערכה הטרייה של
+אותו סימבול כבר לא תומכת בה: אין הערכה (פער נתונים), confidence ירד מתחת
+לסף, או שהאות התהפך לכיוון הנגדי. נקרא גם מ-`server/proSimEngine.ts` (הנתיב
+החי) וגם מ-`src/hooks/useProSimulationBot.ts` (ה-fallback בדפדפן) כדי
+שההתנהגות תהיה זהה בשני הנתיבים.
+
+**Streak Cooldown לפי עסקה לוגית, לא לפי רגל (2026-09-18).** `closedTradeMetrics`
+(המערך המשותף ל-4 הבוטים ל-Kelly/streak) קיבל `positionId`/`side` נוספים
+(שדות אופציונליים, לא משפיעים על שלושת הבוטים האחרים). Pro בלבד מאחד אותו
+עם `aggregateLogicalTrades` **לפני** שהוא מוזן ל-`portfolioStreakCooldownUntil`
+— כך ש-TP1 מרוויח + סגירת ברייק-אבן על אותה פוזיציה נספרים כעסקה **אחת**
+נטו-חיובית, לא כ"ניצחון ואז הפסד" שמנפח את מונה ההפסדים הרצופים.
+
+**Signal Stability — כבר מובטח ע"י התשתית הקיימת, לא נדרש שינוי (2026-09-18).**
+`marketDataService.ts` כבר מסיר את הנר הפורמינג (הבלתי-סגור) לפני שהוא
+חושף `candlesBySymbol` — כל 4 הבוטים, כולל Pro, קוראים מאותו צינור משותף.
+נבדק ולא נמצא מסלול חלופי (כולל ה-fallback בדפדפן) שעוקף את זה.
 
 ### מעגל שבירה
 זהה ל-Intraday (8%/15%), אבל **מיושם בקובץ שונה** — `proSimEngine.ts`

@@ -24,7 +24,9 @@ import {
   WEEKLY_DRAWDOWN_LOCK_PERCENT,
   isInStreakCooldown,
   portfolioStreakCooldownUntil,
-  applySellPressureOverride
+  applySellPressureOverride,
+  revalidateProPendingEntries,
+  aggregateLogicalTrades
 } from '@cde/engine/execution';
 import { computeProSignal, proMinConfidence, type ProSignalResult, type ProRiskLevel } from '@cde/engine/analysis';
 import { SignalEvaluation } from '@cde/engine';
@@ -116,12 +118,27 @@ export const proStrategy: SimEngineStrategy = {
     // Also halt new entries after a book-level losing streak (Pro had no
     // per-symbol streak cooldown at all — §4 gates on price/slots/confidence
     // only — so this is its only losing-streak brake).
+    // Item 9 (2026-09-18): the streak cooldown must count LOGICAL trades —
+    // net PnL across every leg of one positionId — not each partial/full
+    // exit row independently. A TP1 win followed by a break-even loss on the
+    // SAME position is one net-positive trade, not "a win, then a loss" for
+    // streak-counting purposes; without this a profitable position could
+    // trip the loss-streak breaker on its own break-even leg.
+    const logicalClosedTrades = aggregateLogicalTrades(input.closedTradeMetrics ?? [])
+      .filter((lt) => lt.isClosed)
+      .map((lt) => ({
+        pnl: lt.netPnl ?? 0,
+        symbol: lt.symbol,
+        at: lt.closedAt,
+        riskUsd: lt.exitLegs[lt.exitLegs.length - 1]?.riskUsd
+      }));
+
     const breakerTripped =
       // 2026-09-17: Pro's own daily floor (10%, not the shared 8%) — see
       // PRO_DAILY_DRAWDOWN_BLOCK_PERCENT's own doc comment for why.
       input.dailyDrawdownPercent >= PRO_DAILY_DRAWDOWN_BLOCK_PERCENT ||
       input.weeklyDrawdownPercent >= WEEKLY_DRAWDOWN_LOCK_PERCENT ||
-      isInStreakCooldown(portfolioStreakCooldownUntil(input.closedTradeMetrics ?? [], input.equity));
+      isInStreakCooldown(portfolioStreakCooldownUntil(logicalClosedTrades, input.equity));
 
     // The exit check (§5's fixed %, §4's flip-to-SELL) needs each held
     // symbol's CURRENT signal, independent of whether that symbol currently
@@ -151,6 +168,17 @@ export const proStrategy: SimEngineStrategy = {
       limitEntries: input.config.proLimitEntries === true,
       now: input.now
     });
+  },
+
+  // Pre-fill revalidation (2026-09-18, item 8) — Pro only; every other
+  // strategy leaves this field undefined and the tick loop skips it.
+  revalidatePendingEntries(input, pending, evaluations) {
+    const riskLevel = (input.config.riskLevel ?? 'medium') as ProRiskLevel;
+    const minConfidenceOverride = typeof input.config.minConfidenceOverride === 'number' && input.config.minConfidenceOverride > 0
+      ? input.config.minConfidenceOverride
+      : undefined;
+    const minConfidence = proMinConfidence(riskLevel, minConfidenceOverride);
+    return revalidateProPendingEntries(pending, evaluations, minConfidence);
   }
 };
 

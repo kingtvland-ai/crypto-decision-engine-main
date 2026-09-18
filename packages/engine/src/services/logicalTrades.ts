@@ -35,8 +35,18 @@ const ENTRY_SIDES = new Set(['buy', 'sell', 'long', 'short']);
 export interface LogicalTradeLeg {
   id?: string;
   symbol?: string;
-  side: string;
+  /** Optional so a caller whose type declares it optional (e.g.
+   *  StrategyTickInput.closedTradeMetrics) can pass its array as-is —
+   *  `CLOSE_SIDES.has(undefined)`/`ENTRY_SIDES.has(undefined)` are both
+   *  false, same as never matching either, so an absent side just means
+   *  this leg contributes to isClosed/pnl exactly like an unrecognized side
+   *  string would. */
+  side?: string;
   at: number;
+  /** Risk-at-entry (SimPosition.initialRiskUsd, prorated) — not read by this
+   *  module, kept only so a caller's own richer per-leg type (SimTrade,
+   *  ClosedTradeRecord) round-trips through `legs`/`exitLegs` without a cast. */
+  riskUsd?: number;
   pnl?: number;
   pnlPercent?: number;
   positionId?: string;
@@ -96,8 +106,8 @@ export function aggregateLogicalTrades<T extends LogicalTradeLeg>(trades: T[]): 
     }
     lt.legs.push(t);
     if (typeof t.pnl === 'number') lt.exitLegs.push(t);
-    if (CLOSE_SIDES.has(t.side)) lt.isClosed = true;
-    if (ENTRY_SIDES.has(t.side)) lt.openedAt = t.at;
+    if (t.side !== undefined && CLOSE_SIDES.has(t.side)) lt.isClosed = true;
+    if (t.side !== undefined && ENTRY_SIDES.has(t.side)) lt.openedAt = t.at;
   }
 
   for (const lt of byKey.values()) {

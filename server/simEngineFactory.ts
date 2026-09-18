@@ -199,8 +199,13 @@ export interface StrategyTickInput {
    *  `riskUsd` is the risk-at-entry that turns Kelly's payoff ratio into
    *  R-multiples; absent on trades closed before the field existed. */
   closedTrades: { pnl: number; at: number; symbol?: string; riskUsd?: number }[];
-  /** {pnl, pnlPercent, at, symbol} — what the legacy/pro strategies consume. */
-  closedTradeMetrics: { pnl: number; pnlPercent: number; at: number; symbol?: string; riskUsd?: number }[];
+  /** {pnl, pnlPercent, at, symbol} — what the legacy/pro strategies consume.
+   *  `positionId`/`side` (2026-09-18, item 9) let a consumer that needs
+   *  LOGICAL-trade win/loss (e.g. Pro's streak cooldown — a TP1 partial win
+   *  followed by a break-even loss on the SAME position must count as one
+   *  net trade, not two independent streak events) re-aggregate this raw
+   *  per-leg list with aggregateLogicalTrades. Absent on legacy rows. */
+  closedTradeMetrics: { pnl: number; pnlPercent: number; at: number; symbol?: string; riskUsd?: number; positionId?: string; side?: string }[];
   fearGreedIndex: number;
   /** Current perpetual funding, keyed by Binance futures pair (e.g. "BTCUSDT").
    *  Empty when the feed is unavailable — the funding gate abstains, so an
@@ -241,6 +246,20 @@ export interface SimEngineStrategy {
   logCandleFetch: boolean;
   buildEvaluations: (input: StrategyTickInput) => SignalEvaluation[];
   generateOrders: (input: StrategyTickInput, evaluations: SignalEvaluation[]) => PendingOrder[];
+  /** Opt-in pre-fill revalidation (operator decision 2026-09-18, Pro only —
+   *  every other strategy leaves this undefined and the tick loop skips it
+   *  entirely, unchanged for them). Called every tick, right where
+   *  applySlotPreemptions already runs, against the SAME fresh `pending`/
+   *  `evaluations` (and the same `input` buildEvaluations/generateOrders
+   *  already received, so the strategy can read its own config off it) —
+   *  cancels a resting entry the current evaluation no longer supports,
+   *  independent of the order's own TTL. See proSimExecution.ts's
+   *  revalidateProPendingEntries for Pro's rule. */
+  revalidatePendingEntries?: (
+    input: StrategyTickInput,
+    pending: PendingOrder[],
+    evaluations: SignalEvaluation[]
+  ) => { pending: PendingOrder[]; cancelledIds: string[] };
 }
 
 async function sendSimTelegramMessage(tag: string, message: string): Promise<void> {
@@ -687,7 +706,14 @@ export function createGenericSimEngine(
       .map((t) => ({ pnl: t.pnl ?? 0, at: t.at, symbol: t.symbol, riskUsd: t.riskUsd }));
     const closedTradeMetrics = trades
       .filter((t) => typeof t.pnl === 'number')
-      .map((t) => ({ pnl: t.pnl ?? 0, pnlPercent: t.pnlPercent ?? 0, at: t.at, symbol: t.symbol, riskUsd: t.riskUsd }));
+      .map((t) => ({
+        pnl: t.pnl ?? 0, pnlPercent: t.pnlPercent ?? 0, at: t.at, symbol: t.symbol, riskUsd: t.riskUsd,
+        // 2026-09-18, item 9 — see this field's own doc comment above.
+        // Legacy rows recorded before positionId existed default `side` to a
+        // CLOSE side so aggregateLogicalTrades still treats them as closed,
+        // matching their old (pre-logical-trade) one-row-one-outcome behavior.
+        positionId: t.positionId, side: t.side ?? 'close_long'
+      }));
 
     const candlesBySymbol: Record<string, Candle[]> = {};
     for (const key of Object.keys(liveCandles)) candlesBySymbol[key] = buildH1CandlesForSymbol(key);
@@ -757,6 +783,15 @@ export function createGenericSimEngine(
     if (preempt.cancelledIds.length) {
       pending = preempt.pending;
       for (const id of preempt.cancelledIds) console.log(`${strategy.logPrefix} slot preempted — cancelled resting entry ${id}`);
+    }
+    // Pre-fill revalidation (2026-09-18, Pro only — see SimEngineStrategy's
+    // own doc comment). Every other strategy leaves this undefined.
+    if (strategy.revalidatePendingEntries) {
+      const reval = strategy.revalidatePendingEntries(input, pending, evaluations);
+      if (reval.cancelledIds.length) {
+        pending = reval.pending;
+        for (const id of reval.cancelledIds) console.log(`${strategy.logPrefix} revalidation — cancelled resting entry ${id} (signal no longer supports it)`);
+      }
     }
     if (newOrders.length) pending = [...pending, ...newOrders];
 

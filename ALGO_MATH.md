@@ -13,7 +13,11 @@
 > שמחליף את הסולם עבורו בלבד, ותקרת drawdown יומית של 10% (§2, §2.1, §2.2).
 > 2026-09-18: SHORT נעול ל-2.3% במדרגת ה-Scalp (§5, "רעש מכירה חייב להפסיק
 > ב-2.3%"), ו-Logical Trades מאחד יציאות לפי positionId ל-win/loss/PnL נכונים
-> (§10, חדש). סימולציה בלבד — אף בוט לא שולח פקודה אמיתית.
+> (§10, חדש). 2026-09-18 (10 תיקוני מתמטיקה/זרימה ל-Pro בלבד, ללא שינוי
+> אסטרטגיה/SL/sizing/משקלים): MIN_PRO_CANDLES 250, clamp confidence מפורש,
+> Market Regime כפילטר/מכפיל בלבד (לא rewrite), Net Break-Even מחליף
+> entryPrice הגולמי, Flip Hysteresis, Limit TTL+Revalidation, Streak Cooldown
+> לפי עסקה לוגית (§2, §2.3). סימולציה בלבד — אף בוט לא שולח פקודה אמיתית.
 
 הבוטים בדף `/simulation-bot`:
 
@@ -224,7 +228,8 @@ netRR         = (rewardPercent − totalCostPercent) / riskPercent      ← נד
 
 ## 2. Pro · alg.md
 
-מנוע אינדיקטורים חד-טיימפריים. `MIN_PRO_CANDLES = 40`.
+מנוע אינדיקטורים חד-טיימפריים. `MIN_PRO_CANDLES = 250` (הועלה מ-40 ב-2026-09-18
+— חימום EMA200 אמיתי, ראה BOTS_REFERENCE.md §2).
 
 ### מתמטיקת הביטחון (Score 0–100)
 8 אינדיקטורים, כל אחד פולט אות (buy/sell/hold) + ביטחון פנימי 0–100 + משקל:
@@ -259,6 +264,7 @@ margin    = (maxScore − secondScore) / maxScore
 coverage  = min(1, totalWeight / 105)             ← 105 = Σמשקלות (תוקן 2026-09-16, ראה §7)
 
 confidence = 50 + (dominance·45 + margin·25)·coverage − (1 − coverage)·10
+confidence = clamp(confidence, 0, 100)             ← מפורש מ-2026-09-18, אחרי כל שלב (veto/בונוסים)
 ```
 תוצאה HOLD חסומה ב-50 (`action === 'HOLD' → min(conf, 50)`). **זה Score,
 לא הסתברות.** לפני עונש הקורלציה (2026-09-11): קריאת אוסילטור בודדת עברה 70,
@@ -266,10 +272,13 @@ confidence = 50 + (dominance·45 + margin·25)·coverage − (1 − coverage)·1
 חסום ב-50 גם הוא** (SELL לא פתח כלום, רק סגר LONG) — מ-2026-09-17, עם יכולת
 SHORT (ראה §2.1), SELL מקבל את אותה נוסחת ביטחון לא-חסומה ש-BUY מקבל.
 
-**נתיב trend-participation:** `EMA50>EMA200` + מחיר מעל EMA50 + לא-מתוח (≤3×ATR) →
-כל תוצאה שאינה BUY (כולל SELL חלש) מקודמת ל-BUY, עם בונוס ביטחון. סימטרי
-מ-2026-09-17: `EMA50<EMA200` + מחיר מתחת ל-EMA50 + לא-מתוח → HOLD מקודם
-ל-SELL עם אותו בונוס (לפני כן חסר עלות/תוצאה כי SELL היה חסום ב-50).
+**Market Regime — פילטר/מכפיל בלבד, לא rewrite (שוכתב 2026-09-18):**
+`rawSignal` (הצבעת הסל הגולמית) נשמר נפרד מ-`action`/`marketRegime`. עד
+2026-09-17 `EMA50>EMA200` + לא-מתוח **החליף** HOLD ב-BUY (וסימטרית, HOLD
+ב-SELL במגמה יורדת) — סיגנל שהסל מעולם לא נתן. מעכשיו: `marketRegime`
+('UP'/'DOWN'/'NONE') רק **מחזק** action שכבר מסכים איתו (בונוס ביטחון, כמו
+קודם) או **חוסם** action שמתנגד לו בחזרה ל-HOLD — HOLD גולמי **תמיד** נשאר
+HOLD, לא משנה המגמה. ראה BOTS_REFERENCE.md §2 לפירוט המלא.
 
 ### סף כניסה
 **שטוח 70** (`PRO_DEFAULT_ENTRY_CONFIDENCE`), ללא תלות ב-`riskLevel`.
@@ -300,18 +309,29 @@ budget = min(
   (`calculateOptimalEntryPrice`), מעוגל ב-`roundToPriceScale`. TTL 2h.
 
 ### יציאה
-> ⚠️ **מוחלף ע"י Time Stop של Pro (2026-09-17, ראה §2.2), לא הסולם.** עד
-> 2026-09-16 היה זה הסולם (`profitRatchet.ts`) שהחליף את היציאה הזו. מ-2026-09-17
-> `timeStopPeakTrail: true` (§2.2 למטה) מחליף גם אותו, **רק ל-Pro** — שלושת
-> הבוטים האחרים ממשיכים על הסולם הרגיל. TP1/TP2/הטריילינג/הסולם — כולם קוד
-> חי אבל אף אחד מהם לא רץ בפועל בסימולציה של Pro יותר. ה-SL ותקרת 4.2%
-> עדיין גוברים.
+> ⚠️ **מוחלף ע"י Time Stop של Pro (2026-09-17, ראה §2.2), לא הסולם — אבל
+> "מוחלף" חל רק אחרי הצ'קפוינט (240 דק').** עד 2026-09-16 הסולם
+> (`profitRatchet.ts`) היה מחליף את TP1/TP2/break-even runner למטה **תמיד**
+> (`ratchet` היה מוגדר בכל טיק כש-`profitRatchet:true` הועבר, גם לפני
+> שהחימוש קרה — אז `!ratchet` היה `false` תמיד וה-TP1/TP2 היו קוד מת ל-Pro
+> מ-2026-09-14). מ-2026-09-17 `proSimExecution.ts` מעביר `timeStopPeakTrail`
+> **במקום** `profitRatchet` — כלומר `ratchet` הוא `undefined` תמיד, ו-TP1/TP2/
+> break-even runner למטה **פעילים שוב**, אבל רק **לפני** הצ'קפוינט. **אושר
+> 2026-09-18 כרצוי** (לא באג): לפני 240 דק' השער הרגיל שולט; אחריו — freeRunning
+> (§2.2) משתלט. ה-SL ותקרת 4.2% גוברים תמיד, בשני המצבים.
 
 ```
 Stop Loss   = −4.2%   (PRO_STOP_LOSS_PERCENT)
-Take Profit = +3.0%   (PRO_TAKE_PROFIT_PERCENT)   ← לא רץ בפועל, ראה למעלה
-Flip: SELL בביטחון ≥ סף סוגר LONG; BUY בביטחון ≥ סף סוגר SHORT (סימטרי מ-2026-09-17)
+Take Profit = +3.0%   (PRO_TAKE_PROFIT_PERCENT)   ← פעיל לפני הצ'קפוינט, ראה למעלה
+Flip: Flip Hysteresis (2026-09-18) — SELL סוגר LONG / BUY סוגר SHORT, אבל רק אם
+      confidence ≥ minConfidence+4 (82 היום) וגם ניקוד הכיוון הנגדי מנצח
+      בפער ≥4 נק' את ניקוד הכיוון המוחזק. מונע BUY→SELL→BUY על תנודת ניקוד קטנה.
 ```
+**Net Break-Even (2026-09-18):** "ברווח" לפני/אחרי הצ'קפוינט נמדד מול
+`netBreakEvenPrice = entryPrice × (1 ± (entryFeePct+exitFeePct)/100)`, לא
+מול `entryPrice` הגולמי — כולל עמלות בפועל (לא funding, לא מיוחס
+per-position בקוד היום). ה-runner-stop אחרי TP1 (לפני הצ'קפוינט) עוגן
+ב-`netBreakEvenPrice`, לא ב-`entryPrice`.
 
 ### §2.1 — SHORT (FUTURES 1x), חדש 2026-09-17
 עד כאן Pro היה spot-בלבד. עכשיו SELL בביטחון מספיק על סימבול לא-מוחזק פותח
@@ -327,16 +347,32 @@ Flip: SELL בביטחון ≥ סף סוגר LONG; BUY בביטחון ≥ סף ס
 ### §2.2 — Time Stop של Pro, חדש 2026-09-17 (מחליף את הסולם ל-Pro בלבד)
 `PRO_TIME_STOP_MINUTES = 240` (4 שעות) · `PRO_TIME_STOP_TRAIL_PCT = 0.6`:
 ```
-heldMs < 240 דק'                →  TP1/TP2/SL רגילים, שום דבר לא משתנה
-heldMs ≥ 240 דק' ולא ברווח       →  סגירה מלאה מיידית
-heldMs ≥ 240 דק' וברווח          →  TP1/TP2/break-even runner מדולגים;
-                                    רץ חופשי עד ירידה (LONG)/עלייה (SHORT)
-                                    של 0.6% ממחיר השיא (לא מאחוז-הרווח בשיא,
-                                    ולא giveback-of-peak כמו הסולם — טריילינג
-                                    פשוט על המחיר). ה-SL המקורי עדיין גובר.
+heldMs < 240 דק'                        →  TP1/TP2/SL רגילים, שום דבר לא משתנה
+heldMs ≥ 240 דק' והשיא מעולם לא עבר Net BE →  סגירה מלאה מיידית
+heldMs ≥ 240 דק' והשיא כן עבר Net BE       →  TP1/TP2/break-even runner מדולגים;
+                                            runnerStop = max/min(netBreakEvenPrice,
+                                            peak × 0.994/1.006) — 0.6% מהשיא,
+                                            אבל לעולם לא מתחת (LONG)/מעל (SHORT)
+                                            ל-Net BE. ה-SL המקורי עדיין גובר.
 ```
-`PRO_DAILY_DRAWDOWN_BLOCK_PERCENT = 10` (Pro בלבד, במקום `DAILY_DRAWDOWN_
-BLOCK_PERCENT` המשותף 8% — שלושת הבוטים האחרים נשארים ב-8%).
+**נבדק מול השיא, לא מול המחיר הנוכחי (2026-09-18, תיקון באג):** בדיקת
+"ברווח" מול המחיר הנוכחי (לא השיא) יצרה סתירה עם רצפת ה-freeRunning — ברגע
+שהמחיר יורד ל-Net BE או מתחתיו, "לא ברווח → סגירה" הייתה יורה *לפני*
+שהרצפה מקבלת סיכוי לפעול, מה שהפך אותה לקוד שלעולם לא רץ. הבדיקה מול השיא
+היא **דביקה, חד-כיוונית**: ברגע שהשיא עבר Net BE פעם אחת, הפוזיציה
+freeRunning לצמיתות עד שתיסגר. `PRO_DAILY_DRAWDOWN_BLOCK_PERCENT = 10`
+(Pro בלבד, במקום `DAILY_DRAWDOWN_BLOCK_PERCENT` המשותף 8%).
+
+### §2.3 — סדר, לא מתמטיקה: TTL/Revalidation + Streak Cooldown (2026-09-18)
+שלושה תיקוני זרימה נוספים, פרטים מלאים ב-BOTS_REFERENCE.md §2:
+- **Limit Order TTL** 45 דק' (היה 2 שעות) + **Revalidation** לפני מילוי בכל
+  טיק — פקודת LIMIT נחה מתבטלת ברגע שההערכה הטרייה כבר לא תומכת בה
+  (confidence ירד / האות התהפך / אין הערכה בכלל).
+- **Streak Cooldown לפי עסקה לוגית** — TP1 מרוויח + ברייק-אבן מפסיד על אותה
+  פוזיציה נספרים כעסקה אחת נטו-חיובית, לא כניצחון-ואז-הפסד שמנפח את מונה
+  ההפסדים הרצופים.
+- **Signal Stability** — נבדק ואומת שכבר מובטח ע"י `marketDataService.ts`
+  (מסיר את הנר הפורמינג לפני שהוא חושף `candlesBySymbol`) — אין שינוי קוד.
 
 ---
 

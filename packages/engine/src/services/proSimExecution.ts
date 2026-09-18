@@ -67,6 +67,14 @@ export const uid = (p: string) => `pro-${p}-${Date.now()}-${Math.random().toStri
 
 export { MIN_PRO_CANDLES };
 
+/** Operator decision 2026-09-18 — a resting Pro entry (limitEntries on) used
+ *  to fall back to the shared LIMIT_ORDER_TTL_MS default (2h): long enough
+ *  for the signal that justified it to be stale many times over before it
+ *  ever filled. 45 minutes sits in the requested 30-60 min band. See
+ *  revalidateProPendingEntries for the continuous (not just at-expiry) half
+ *  of this requirement. */
+export const PRO_LIMIT_ORDER_TTL_MS = 45 * 60 * 1000;
+
 /**
  * §2/§4 for one symbol: computes the weighted signal and the threshold-only
  * view of §4 (gate 4), as the same SignalEvaluation shape every other bot's
@@ -567,7 +575,9 @@ export function generateProOrders(ctx: ProOrderGenContext): PendingOrder[] {
         peakPrice: (isLong ? pos.highestPrice : pos.lowestPrice) ?? pos.entryPrice,
         ratchetPeakPct: pos.ratchetPeakPct,
         remainingQuantityFraction: pos.quantity / (pos.initialQuantity ?? pos.quantity),
-        openTimestamp: pos.openTimestamp
+        openTimestamp: pos.openTimestamp,
+        // Net break-even (2026-09-18) — see evaluateProExit's own comment.
+        type: pos.type, quantity: pos.quantity, entryFee: pos.entryFee
       },
       livePrice,
       effectiveSignal,
@@ -653,7 +663,14 @@ export function generateProOrders(ctx: ProOrderGenContext): PendingOrder[] {
       // A SHORT always fires MARKET (see entryPrice above).
       fill: !isShortEntry && limitEntries ? 'limit' : 'market',
       reason: ev.reasoning, confidence: ev.confidence,
-      executeAt: now + delayMs, createdAt: now
+      executeAt: now + delayMs, createdAt: now,
+      // Limit TTL (operator decision 2026-09-18): a resting Pro entry used to
+      // fall back to the shared 2h default (LIMIT_ORDER_TTL_MS) — long enough
+      // for the market/signal that justified the order to have moved on
+      // entirely before it ever filled. PRO_LIMIT_ORDER_TTL_MS (45 min) caps
+      // it; see revalidateProPendingEntries for the OTHER half of this
+      // requirement (checked continuously, not just at expiry).
+      expiresAt: now + PRO_LIMIT_ORDER_TTL_MS
     } as PendingOrder);
   }
 
@@ -665,4 +682,45 @@ export function generateProOrders(ctx: ProOrderGenContext): PendingOrder[] {
 // so this is always empty.
 export function activeMarketRegimesFrom(): Record<string, never> {
   return {};
+}
+
+/**
+ * Pre-fill revalidation for Pro's own resting LIMIT entries (operator
+ * decision 2026-09-18, item 8) — checked every tick, independent of the
+ * order's own TTL (PRO_LIMIT_ORDER_TTL_MS). Cancels a resting BUY/SHORT if:
+ *   · there is no fresh evaluation for the symbol this tick (data gap), or
+ *   · the fresh evaluation no longer clears entry confidence for the SAME
+ *     direction, or
+ *   · the fresh evaluation has flipped to the opposite direction.
+ *
+ * Reads `ev.action`/`ev.confidence` directly rather than `ev.willExecute` —
+ * a symbol with an order already resting always gates to
+ * `NO_SIGNAL [ORDER_QUEUED]` (willExecute: false) on every subsequent tick
+ * regardless of signal strength, which is not what "still valid" means here.
+ * `buildProEvaluation` recomputes `action`/`confidence` fresh every tick
+ * before that gate is ever applied, so those two fields are exactly the live
+ * read this function needs.
+ */
+export function revalidateProPendingEntries(
+  pending: PendingOrder[],
+  evaluations: SignalEvaluation[],
+  minConfidence: number
+): { pending: PendingOrder[]; cancelledIds: string[] } {
+  const evalBySymbol = new Map(evaluations.map((ev) => [ev.symbol, ev]));
+  const cancelledIds: string[] = [];
+  const kept = pending.filter((o) => {
+    // Only a resting Pro BUY/SHORT limit entry is in scope — anything else
+    // (a market order already past its delay, an exit, a limit order that
+    // already isn't a Pro entry shape) passes through untouched.
+    if (o.fill !== 'limit' || !(o.side === 'buy' || o.side === 'short')) return true;
+    const ev = evalBySymbol.get(o.symbol);
+    const wantedAction = o.side === 'buy' ? 'buy' : 'sell';
+    const stillValid = !!ev && ev.action === wantedAction && ev.confidence >= minConfidence;
+    if (!stillValid) {
+      cancelledIds.push(o.id);
+      return false;
+    }
+    return true;
+  });
+  return { pending: kept, cancelledIds };
 }

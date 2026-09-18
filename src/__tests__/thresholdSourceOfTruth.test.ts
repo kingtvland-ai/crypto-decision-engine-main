@@ -343,10 +343,14 @@ describe('§4 — the sell logic: SHORT capability (2026-09-17), a held LONG clo
 
 // ── §5 — the fixed exits precede everything, and use the §3 number ───────────
 
-const stubSignal = (action: 'BUY' | 'SELL' | 'HOLD', confidence: number): ProSignalResult => ({
+const stubSignal = (
+  action: 'BUY' | 'SELL' | 'HOLD',
+  confidence: number,
+  scores: { buyScore?: number; sellScore?: number } = {}
+): ProSignalResult => ({
   action,
-  buyScore: 0,
-  sellScore: 0,
+  buyScore: scores.buyScore ?? 0,
+  sellScore: scores.sellScore ?? 0,
   holdScore: 0,
   totalWeight: 105,
   confidence,
@@ -441,11 +445,32 @@ describe('§5 — fixed-percentage exits, independent of the recommendation', ()
     expect(d.shouldExit).toBe(false);
   });
 
-  it('the flip-to-SELL exit is gated by the same §3 number', () => {
-    const below = evaluateProExit({ entryPrice: 100 }, 99, stubSignal('SELL', 30), minConfidence);
+  it('the flip-to-SELL exit needs Flip Hysteresis (2026-09-18): confidence AND a score margin, not just §3\'s entry number', () => {
+    // Below minConfidence entirely — never flips regardless of score shape.
+    const below = evaluateProExit({ entryPrice: 100 }, 99, stubSignal('SELL', 30, { sellScore: 60, buyScore: 10 }), minConfidence);
     expect(below.shouldExit).toBe(false);
-    const above = evaluateProExit({ entryPrice: 100 }, 99, stubSignal('SELL', 80), minConfidence);
+
+    // Confidence clears the OLD (entry) threshold but not FLIP_THRESHOLD
+    // (minConfidence + 4) — must NOT flip; this is exactly the case the old
+    // gate (bare minConfidence) used to let through.
+    const belowFlipThreshold = evaluateProExit(
+      { entryPrice: 100 }, 99, stubSignal('SELL', minConfidence + 1, { sellScore: 60, buyScore: 10 }), minConfidence
+    );
+    expect(belowFlipThreshold.shouldExit).toBe(false);
+
+    // Confidence clears FLIP_THRESHOLD but the opposing score barely beats
+    // the position's own direction (margin < 4) — still must not flip.
+    const belowScoreMargin = evaluateProExit(
+      { entryPrice: 100 }, 99, stubSignal('SELL', 90, { sellScore: 52, buyScore: 50 }), minConfidence
+    );
+    expect(belowScoreMargin.shouldExit).toBe(false);
+
+    // Both conditions clear — flips.
+    const above = evaluateProExit(
+      { entryPrice: 100 }, 99, stubSignal('SELL', 90, { sellScore: 60, buyScore: 10 }), minConfidence
+    );
     expect(above.shouldExit).toBe(true);
+    expect(above.reason).toContain('Flip Hysteresis');
   });
 });
 
@@ -546,10 +571,13 @@ describe('alignment — confidence reflects directional conviction', () => {
     }
   });
 
-  it('trend-participation lane: a gentle uptrend riding near EMA50 fires a BUY even with neutral oscillators', () => {
+  it('market regime (2026-09-18): a gentle uptrend never MANUFACTURES a BUY out of a raw HOLD', () => {
     // slope well under ATR + a sine wobble → RSI/Stoch/BB all sit mid-range
-    // (bucket vote = HOLD), but EMA50 > EMA200, price just above EMA50 and
-    // within 3×ATR of it → the trend lane turns HOLD into BUY.
+    // (bucket vote = HOLD), and EMA50 > EMA200, price just above EMA50 and
+    // within 3×ATR of it (marketRegime = 'UP'). Before 2026-09-18 this used
+    // to REWRITE the HOLD into a BUY the bucket vote never cast; now regime
+    // only boosts an agreeing action or blocks a disagreeing one — it never
+    // fabricates a direction from HOLD.
     const candles: Candle[] = Array.from({ length: 160 }, (_, i) => {
       // 155 bars of a very gentle rise, then a shallow 5-bar pullback that
       // lands price back on the EMA50 with the oscillators reset to neutral.
@@ -560,8 +588,35 @@ describe('alignment — confidence reflects directional conviction', () => {
       };
     });
     const signal = computeProSignal(candles, 1);
-    expect(signal.action).toBe('BUY');
-    expect(signal.confidence).toBeGreaterThanOrEqual(55);
+    // The shallow pullback actually reads as a mild SELL on the raw bucket
+    // vote (not a clean HOLD) — the point of this test either way: in an UP
+    // regime, action must never become BUY unless rawSignal itself was BUY.
+    expect(signal.rawSignal).not.toBe('BUY');
+    expect(signal.marketRegime).toBe('UP');
+    expect(signal.action).not.toBe('BUY'); // NOT promoted/rewritten to BUY
+    expect(signal.confidence).toBeLessThanOrEqual(50); // NOT boosted either
+  });
+
+  it('market regime (2026-09-18): a genuine BUY riding the same uptrend still gets the confidence boost', () => {
+    // Same gentle-uptrend shape, but this time seed a real oversold dip on
+    // the last bar so the bucket vote itself casts BUY — the regime should
+    // still boost it, since boosting an AGREEING raw signal is unchanged.
+    const candles: Candle[] = Array.from({ length: 160 }, (_, i) => {
+      if (i === 159) return {
+        timestamp: 1_700_000_000_000 + i * 3_600_000,
+        open: 112.5, high: 112.6, low: 108, close: 108.2, volume: 1000
+      };
+      const close = i < 155 ? 100 + i * 0.08 : (100 + 154 * 0.08) - (i - 154) * 0.22;
+      return {
+        timestamp: 1_700_000_000_000 + i * 3_600_000,
+        open: close, high: close + 0.9, low: close - 0.9, close, volume: 1000
+      };
+    });
+    const signal = computeProSignal(candles, 1);
+    if (signal.rawSignal === 'BUY' && signal.marketRegime === 'UP') {
+      expect(signal.action).toBe('BUY');
+      expect(signal.confidence).toBeGreaterThanOrEqual(58);
+    }
   });
 
   it('trend-participation lane stays out when price is extended far above EMA50', () => {

@@ -63,7 +63,9 @@ export {
   MIN_PRO_CANDLES,
   buildProEvaluation,
   applyProEntryGates,
-  generateProOrders
+  generateProOrders,
+  revalidateProPendingEntries,
+  PRO_LIMIT_ORDER_TTL_MS
 } from './services/proSimExecution';
 export { calculateOptimalEntryPrice } from './services/proAlgEngine';
 

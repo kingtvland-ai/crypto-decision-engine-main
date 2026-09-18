@@ -21,7 +21,7 @@ import type { Candle } from '@cde/engine';
 import { SignalEvaluation } from '@cde/engine';
 import { getUniverseMarketData } from '@cde/engine/market-data';
 import { toBaseAsset } from '@cde/engine/market-data';
-import { fillDueOrders, selectFillableOrders, applySlotPreemptions, summarizeLogicalTrades } from '@cde/engine/execution';
+import { fillDueOrders, selectFillableOrders, applySlotPreemptions, summarizeLogicalTrades, revalidateProPendingEntries } from '@cde/engine/execution';
 import {
   applyProEntryGates,
   generateProOrders,
@@ -316,12 +316,20 @@ export function useProSimulationBot({ config, isRunning, cryptoData, initialSnap
     // Slot preemption: a BUY that claimed a full slot by evicting the weakest
     // resting buy carries its id — drop that incumbent now its replacement placed.
     const placedSymbols = new Set(newOrders.map((o) => o.symbol));
-    if (newOrders.length) {
-      setPending((prev) => {
-        const { pending: kept } = applySlotPreemptions(prev, evaluations, placedSymbols);
-        return [...kept, ...newOrders];
-      });
-    }
+    // Pre-fill revalidation (2026-09-18, item 8) — checked every tick
+    // regardless of whether a new order was generated this tick, unlike slot
+    // preemption above (a resting order can go stale on its own, without a
+    // competing candidate). Mirrors server/proSimEngine.ts's
+    // revalidatePendingEntries. Only calls setPending when something actually
+    // changed, so an idle tick with nothing resting does not force a re-render.
+    setPending((prev) => {
+      const { pending: afterPreempt } = newOrders.length
+        ? applySlotPreemptions(prev, evaluations, placedSymbols)
+        : { pending: prev };
+      const { pending: afterRevalidation, cancelledIds } = revalidateProPendingEntries(afterPreempt, evaluations, minConfidence);
+      if (!newOrders.length && cancelledIds.length === 0 && afterPreempt === prev) return prev;
+      return newOrders.length ? [...afterRevalidation, ...newOrders] : afterRevalidation;
+    });
     setLastEvaluation(new Date().toLocaleTimeString('he-IL'));
     setNextTickAt(Date.now() + 5000);
   }, [isRunning, evaluations, signalsBySymbol, minConfidence, heartbeat, dailyDrawdownPercent, weeklyDrawdownPercent, config, riskLevel]);
